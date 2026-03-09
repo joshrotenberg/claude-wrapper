@@ -34,6 +34,13 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+
+    /// The installed CLI version does not meet the minimum requirement.
+    #[error("CLI version {found} does not meet minimum requirement {minimum}")]
+    VersionMismatch {
+        found: crate::version::CliVersion,
+        minimum: crate::version::CliVersion,
+    },
 }
 
 impl From<std::io::Error> for Error {

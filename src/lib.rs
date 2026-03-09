@@ -170,6 +170,7 @@ pub mod exec;
 pub mod mcp_config;
 pub mod streaming;
 pub mod types;
+pub mod version;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -200,6 +201,7 @@ pub use exec::CommandOutput;
 pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use types::*;
+pub use version::{CliVersion, VersionParseError};
 
 /// The Claude CLI client. Holds shared configuration applied to all commands.
 ///
@@ -238,6 +240,57 @@ impl Claude {
         let mut clone = self.clone();
         clone.working_dir = Some(dir.into());
         clone
+    }
+
+    /// Query the installed CLI version.
+    ///
+    /// Runs `claude --version` and parses the output into a [`CliVersion`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = claude_wrapper::Claude::builder().build()?;
+    /// let version = claude.cli_version().await?;
+    /// println!("Claude CLI {version}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn cli_version(&self) -> Result<CliVersion> {
+        let output = VersionCommand::new().execute(self).await?;
+        CliVersion::parse_version_output(&output.stdout).map_err(|e| Error::Io {
+            message: format!("failed to parse CLI version: {e}"),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        })
+    }
+
+    /// Check that the installed CLI version meets a minimum requirement.
+    ///
+    /// Returns the detected version on success, or an error if the version
+    /// is below the minimum.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::CliVersion;
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = claude_wrapper::Claude::builder().build()?;
+    /// let version = claude.check_version(&CliVersion::new(2, 1, 0)).await?;
+    /// println!("CLI version {version} meets minimum requirement");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn check_version(&self, minimum: &CliVersion) -> Result<CliVersion> {
+        let version = self.cli_version().await?;
+        if version.satisfies_minimum(minimum) {
+            Ok(version)
+        } else {
+            Err(Error::VersionMismatch {
+                found: version,
+                minimum: *minimum,
+            })
+        }
     }
 }
 
