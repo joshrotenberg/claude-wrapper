@@ -1,0 +1,69 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    groups:
+      tokio-ecosystem:
+        patterns:
+          - "tokio*"
+        update-types:
+          - "minor"
+          - "patch"
+      serde-ecosystem:
+        patterns:
+          - "serde*"
+        update-types:
+          - "minor"
+          - "patch"
+      dev-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore"
+    assignees:
+      - "joshrotenberg"
+    reviewers:
+      - "joshrotenberg"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      actions-core:
+        patterns:
+          - "actions/*"
+        update-types:
+          - "minor"
+          - "patch"
+      rust-toolchain:
+        patterns:
+          - "dtolnay/*"
+          - "swatinem/*"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "ci"
+    assignees:
+      - "joshrotenberg"
+    reviewers:
+      - "joshrotenberg"
+    labels:
+      - "dependencies"
+      - "github-actions"
