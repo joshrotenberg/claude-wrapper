@@ -191,6 +191,78 @@ impl McpConfigBuilder {
 
         Ok(path)
     }
+
+    /// Write the config to a temporary file that is cleaned up on drop.
+    ///
+    /// Returns a [`TempMcpConfig`] that holds the temp file and provides
+    /// the path for use with [`QueryCommand::mcp_config()`](crate::QueryCommand::mcp_config).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, ClaudeCommand, McpConfigBuilder, QueryCommand};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    ///
+    /// let config = McpConfigBuilder::new()
+    ///     .http_server("hub", "http://localhost:9090")
+    ///     .stdio_server("tool", "npx", ["my-server"])
+    ///     .build_temp()?;
+    ///
+    /// let output = QueryCommand::new("list tools")
+    ///     .mcp_config(config.path())
+    ///     .execute(&claude)
+    ///     .await?;
+    /// // temp file is cleaned up when `config` is dropped
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "tempfile")]
+    pub fn build_temp(&self) -> Result<TempMcpConfig> {
+        use std::io::Write;
+
+        let json = self.to_json()?;
+        let mut file = tempfile::Builder::new()
+            .suffix(".mcp.json")
+            .tempfile()
+            .map_err(|e| crate::error::Error::Io {
+                message: "failed to create temp MCP config file".to_string(),
+                source: e,
+            })?;
+
+        file.write_all(json.as_bytes())
+            .map_err(|e| crate::error::Error::Io {
+                message: "failed to write temp MCP config".to_string(),
+                source: e,
+            })?;
+
+        Ok(TempMcpConfig { file })
+    }
+}
+
+/// A temporary MCP config file that is cleaned up when dropped.
+///
+/// Created by [`McpConfigBuilder::build_temp()`]. Use [`path()`](TempMcpConfig::path)
+/// to get the file path for passing to [`QueryCommand::mcp_config()`](crate::QueryCommand::mcp_config).
+#[cfg(feature = "tempfile")]
+#[derive(Debug)]
+pub struct TempMcpConfig {
+    file: tempfile::NamedTempFile,
+}
+
+#[cfg(feature = "tempfile")]
+impl TempMcpConfig {
+    /// Get the path to the temporary config file.
+    ///
+    /// Returns a string suitable for passing to `QueryCommand::mcp_config()`.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.file
+            .path()
+            .to_str()
+            .expect("temp file path is valid UTF-8")
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +292,22 @@ mod tests {
         assert!(json.contains("npx"));
         assert!(json.contains("my-mcp-server"));
         assert!(json.contains(r#""type": "stdio""#));
+    }
+
+    #[test]
+    #[cfg(feature = "tempfile")]
+    fn test_build_temp() {
+        let config = McpConfigBuilder::new()
+            .http_server("hub", "http://localhost:9090")
+            .stdio_server("tool", "echo", ["hello"]);
+
+        let temp = config.build_temp().unwrap();
+        let path = temp.path();
+        assert!(path.ends_with(".mcp.json"));
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("hub"));
+        assert!(contents.contains("localhost:9090"));
     }
 
     #[test]

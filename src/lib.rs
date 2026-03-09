@@ -196,6 +196,8 @@ pub use command::raw::RawCommand;
 pub use command::version::VersionCommand;
 pub use error::{Error, Result};
 pub use exec::CommandOutput;
+#[cfg(feature = "tempfile")]
+pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use types::*;
 
