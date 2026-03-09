@@ -1,5 +1,10 @@
 # claude-wrapper
 
+[![Crates.io](https://img.shields.io/crates/v/claude-wrapper.svg)](https://crates.io/crates/claude-wrapper)
+[![Documentation](https://docs.rs/claude-wrapper/badge.svg)](https://docs.rs/claude-wrapper)
+[![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/claude-wrapper.svg)](LICENSE-MIT)
+
 A type-safe Claude Code CLI wrapper for Rust.
 
 `claude-wrapper` provides a builder-pattern interface for invoking the `claude` CLI programmatically. Same design philosophy as [docker-wrapper](https://crates.io/crates/docker-wrapper) and [terraform-wrapper](https://crates.io/crates/terraform-wrapper): each CLI subcommand is a builder struct that produces typed output.
@@ -158,7 +163,7 @@ let output = VersionCommand::new().execute(&claude).await?;
 
 // Auth status
 let status = AuthStatusCommand::new().execute_json(&claude).await?;
-assert!(status.authenticated);
+assert!(status.logged_in);
 
 // Doctor (health check)
 let output = DoctorCommand::new().execute(&claude).await?;
@@ -218,6 +223,26 @@ This is an early-stage spike. The API is functional but may change.
 
 - Retry/backoff policies
 - Process lifecycle management (restart loops for agent patterns)
+- CLI version compatibility checks
+
+## Scope
+
+### Will Do
+
+- Full coverage of `claude` CLI subcommands and flags
+- Typed builders for every subcommand
+- JSON output parsing into Rust structs
+- Streaming NDJSON event processing
+- MCP config file generation
+- Process spawning with timeout, env, and working directory control
+- Track CLI version changes and update types accordingly
+
+### Won't Do
+
+- Interactive/REPL mode (this wraps print mode and subcommands only)
+- Direct API calls to Anthropic (use the [Anthropic SDK](https://crates.io/crates/anthropic) for that)
+- Prompt engineering or conversation management
+- Token counting or cost estimation beyond what the CLI returns
 
 ## License
 

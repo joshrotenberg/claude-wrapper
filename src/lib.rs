@@ -26,15 +26,140 @@
 //! # }
 //! ```
 //!
-//! # MCP Config Generation
+//! # Two-Layer Builder
+//!
+//! The [`Claude`] client holds shared config (binary path, env vars, timeout).
+//! Command builders hold per-invocation options and call `execute(&claude)`.
 //!
 //! ```no_run
-//! use claude_wrapper::McpConfigBuilder;
+//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, PermissionMode, Effort};
 //!
-//! # fn example() -> claude_wrapper::Result<()> {
-//! let config = McpConfigBuilder::new()
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! // Configure once, reuse across commands
+//! let claude = Claude::builder()
+//!     .env("AWS_REGION", "us-west-2")
+//!     .timeout_secs(300)
+//!     .build()?;
+//!
+//! // Each command is a separate builder
+//! let output = QueryCommand::new("review the code in src/main.rs")
+//!     .model("opus")
+//!     .system_prompt("You are a senior Rust developer")
+//!     .permission_mode(PermissionMode::Plan)
+//!     .effort(Effort::High)
+//!     .max_turns(5)
+//!     .no_session_persistence()
+//!     .execute(&claude)
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # JSON Output Parsing
+//!
+//! Use `execute_json()` to get structured results:
+//!
+//! ```no_run
+//! use claude_wrapper::{Claude, QueryCommand};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let result = QueryCommand::new("what is 2+2?")
+//!     .execute_json(&claude)
+//!     .await?;
+//!
+//! println!("answer: {}", result.result);
+//! println!("cost: ${:.4}", result.cost_usd.unwrap_or(0.0));
+//! println!("session: {}", result.session_id);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # MCP Config Generation
+//!
+//! Generate `.mcp.json` files for use with `--mcp-config`:
+//!
+//! ```no_run
+//! use claude_wrapper::{Claude, ClaudeCommand, McpConfigBuilder, QueryCommand};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! // Build a config file with multiple servers
+//! let config_path = McpConfigBuilder::new()
 //!     .http_server("my-hub", "http://127.0.0.1:9090")
+//!     .stdio_server("my-tool", "npx", ["my-mcp-server"])
+//!     .stdio_server_with_env(
+//!         "secure-tool", "node", ["server.js"],
+//!         [("API_KEY", "secret")],
+//!     )
 //!     .write_to("/tmp/my-project/.mcp.json")?;
+//!
+//! // Use it in a query
+//! let claude = Claude::builder().build()?;
+//! let output = QueryCommand::new("list available tools")
+//!     .mcp_config("/tmp/my-project/.mcp.json")
+//!     .execute(&claude)
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Working with Multiple Directories
+//!
+//! Clone the client with a different working directory:
+//!
+//! ```no_run
+//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//!
+//! for project in &["/srv/project-a", "/srv/project-b"] {
+//!     let local = claude.with_working_dir(project);
+//!     QueryCommand::new("summarize this project")
+//!         .no_session_persistence()
+//!         .execute(&local)
+//!         .await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Streaming
+//!
+//! Process NDJSON events in real time:
+//!
+//! ```no_run
+//! use claude_wrapper::{Claude, QueryCommand, OutputFormat};
+//! use claude_wrapper::streaming::{StreamEvent, stream_query};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let cmd = QueryCommand::new("explain quicksort")
+//!     .output_format(OutputFormat::StreamJson);
+//!
+//! let output = stream_query(&claude, &cmd, |event: StreamEvent| {
+//!     if event.is_result() {
+//!         println!("Result: {}", event.result_text().unwrap_or(""));
+//!     }
+//! }).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Escape Hatch
+//!
+//! For subcommands or flags not yet covered by the typed API:
+//!
+//! ```no_run
+//! use claude_wrapper::{Claude, ClaudeCommand, RawCommand};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let output = RawCommand::new("some-future-command")
+//!     .arg("--new-flag")
+//!     .arg("value")
+//!     .execute(&claude)
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```

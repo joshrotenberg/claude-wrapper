@@ -30,7 +30,7 @@ async fn test_auth_status() {
         .execute_json(&claude)
         .await
         .unwrap();
-    assert!(status.authenticated);
+    assert!(status.logged_in);
 }
 
 #[tokio::test]

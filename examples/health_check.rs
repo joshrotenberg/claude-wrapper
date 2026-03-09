@@ -17,7 +17,7 @@ async fn main() -> claude_wrapper::Result<()> {
     // Auth status
     match AuthStatusCommand::new().execute_json(&claude).await {
         Ok(status) => {
-            println!("Authenticated: {}", status.authenticated);
+            println!("Logged in: {}", status.logged_in);
             if let Some(email) = &status.email {
                 println!("Email: {email}");
             }

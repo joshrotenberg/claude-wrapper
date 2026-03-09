@@ -113,16 +113,47 @@ impl Scope {
 }
 
 /// Authentication status returned by `claude auth status --json`.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> claude_wrapper::Result<()> {
+/// let claude = claude_wrapper::Claude::builder().build()?;
+/// let status = claude_wrapper::AuthStatusCommand::new()
+///     .execute_json(&claude).await?;
+///
+/// if status.logged_in {
+///     println!("Logged in as {}", status.email.unwrap_or_default());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "json")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthStatus {
+    /// Whether the user is currently logged in.
     #[serde(default)]
-    pub authenticated: bool,
+    pub logged_in: bool,
+    /// Authentication method (e.g. "claude.ai").
     #[serde(default)]
-    pub account_type: Option<String>,
+    pub auth_method: Option<String>,
+    /// API provider (e.g. "firstParty").
+    #[serde(default)]
+    pub api_provider: Option<String>,
+    /// Authenticated user's email address.
     #[serde(default)]
     pub email: Option<String>,
-    // Capture any additional fields
+    /// Organization ID.
+    #[serde(default)]
+    pub org_id: Option<String>,
+    /// Organization name.
+    #[serde(default)]
+    pub org_name: Option<String>,
+    /// Subscription type (e.g. "pro", "max").
+    #[serde(default)]
+    pub subscription_type: Option<String>,
+    /// Any additional fields not explicitly modeled.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }

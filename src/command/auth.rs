@@ -13,7 +13,7 @@ use crate::exec::{self, CommandOutput};
 /// # async fn example() -> claude_wrapper::Result<()> {
 /// let claude = Claude::builder().build()?;
 /// let status = AuthStatusCommand::new().execute_json(&claude).await?;
-/// println!("authenticated: {}", status.authenticated);
+/// println!("logged in: {}", status.logged_in);
 /// # Ok(())
 /// # }
 /// ```
