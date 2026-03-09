@@ -57,6 +57,7 @@ pub struct QueryCommand {
     strict_mcp_config: bool,
     settings: Option<String>,
     fork_session: bool,
+    retry_policy: Option<crate::retry::RetryPolicy>,
 }
 
 impl QueryCommand {
@@ -93,6 +94,7 @@ impl QueryCommand {
             strict_mcp_config: false,
             settings: None,
             fork_session: false,
+            retry_policy: None,
         }
     }
 
@@ -310,6 +312,34 @@ impl QueryCommand {
         self
     }
 
+    /// Set a per-command retry policy, overriding the client default.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, RetryPolicy};
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    ///
+    /// let output = QueryCommand::new("explain quicksort")
+    ///     .retry(RetryPolicy::new()
+    ///         .max_attempts(5)
+    ///         .initial_backoff(Duration::from_secs(2))
+    ///         .exponential()
+    ///         .retry_on_timeout(true))
+    ///     .execute(&claude)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn retry(mut self, policy: crate::retry::RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
     /// Execute the query and parse the JSON result.
     ///
     /// This is a convenience method that sets `OutputFormat::Json` and
@@ -325,7 +355,7 @@ impl QueryCommand {
             args.push("json".to_string());
         }
 
-        let output = exec::run_claude(claude, args).await?;
+        let output = exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?;
 
         serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
             message: format!("failed to parse query result: {e}"),
@@ -485,7 +515,7 @@ impl ClaudeCommand for QueryCommand {
     }
 
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
-        exec::run_claude(claude, self.args()).await
+        exec::run_claude_with_retry(claude, self.args(), self.retry_policy.as_ref()).await
     }
 }
 

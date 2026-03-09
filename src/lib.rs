@@ -168,6 +168,7 @@ pub mod command;
 pub mod error;
 pub mod exec;
 pub mod mcp_config;
+pub mod retry;
 pub mod streaming;
 pub mod types;
 pub mod version;
@@ -200,6 +201,7 @@ pub use exec::CommandOutput;
 #[cfg(feature = "tempfile")]
 pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
+pub use retry::{BackoffStrategy, RetryPolicy};
 pub use types::*;
 pub use version::{CliVersion, VersionParseError};
 
@@ -213,6 +215,7 @@ pub struct Claude {
     pub(crate) env: HashMap<String, String>,
     pub(crate) global_args: Vec<String>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) retry_policy: Option<RetryPolicy>,
 }
 
 impl Claude {
@@ -316,6 +319,7 @@ pub struct ClaudeBuilder {
     env: HashMap<String, String>,
     global_args: Vec<String>,
     timeout: Option<Duration>,
+    retry_policy: Option<RetryPolicy>,
 }
 
 impl ClaudeBuilder {
@@ -379,6 +383,33 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Set a default retry policy for all commands.
+    ///
+    /// Individual commands can override this via their own retry settings.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, RetryPolicy};
+    /// use std::time::Duration;
+    ///
+    /// # fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder()
+    ///     .retry(RetryPolicy::new()
+    ///         .max_attempts(3)
+    ///         .initial_backoff(Duration::from_secs(2))
+    ///         .exponential()
+    ///         .retry_on_timeout(true))
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -392,6 +423,7 @@ impl ClaudeBuilder {
             env: self.env,
             global_args: self.global_args,
             timeout: self.timeout,
+            retry_policy: self.retry_policy,
         })
     }
 }
