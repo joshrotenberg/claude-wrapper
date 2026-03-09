@@ -16,7 +16,31 @@ pub struct CommandOutput {
 }
 
 /// Run a claude command with the given arguments.
+///
+/// If the [`Claude`] client has a retry policy set, transient errors will be
+/// retried according to that policy. A per-command retry policy can be passed
+/// to override the client default.
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
+    run_claude_with_retry(claude, args, None).await
+}
+
+/// Run a claude command with an optional per-command retry policy override.
+pub async fn run_claude_with_retry(
+    claude: &Claude,
+    args: Vec<String>,
+    retry_override: Option<&crate::retry::RetryPolicy>,
+) -> Result<CommandOutput> {
+    let policy = retry_override.or(claude.retry_policy.as_ref());
+
+    match policy {
+        Some(policy) => {
+            crate::retry::with_retry(policy, || run_claude_once(claude, args.clone())).await
+        }
+        None => run_claude_once(claude, args).await,
+    }
+}
+
+async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     let mut command_args = Vec::new();
 
     // Global args first (before subcommand)
