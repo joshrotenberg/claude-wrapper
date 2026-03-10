@@ -141,6 +141,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              cargo, gh) but not MCP access. Default to inline when uncertain; user can say \
              \"workerize it.\" \
              \
+             Task sizing: Single task (pool_run) = one clear action with one clear output; if using \
+             \"and\" more than once, use a chain instead. Chain = workflow where steps feed into each \
+             other; natural unit is a deliverable (PR, report, resolved issue); each step should be \
+             independently verifiable (can't describe success of step N without referencing N+1 = \
+             steps too coupled). Fan-out = N independent instances of same work; use if items don't \
+             depend on each other; use chain if they do. \
+             \
              Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
              pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
              with per-step progress), context_set/get/list (shared state), pool_configure_worker. \
