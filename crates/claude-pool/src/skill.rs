@@ -5,6 +5,7 @@
 //! then references them by name in `pool/run` or `pool/submit`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,36 @@ impl SkillRegistry {
     /// Remove a skill by name.
     pub fn remove(&mut self, name: &str) -> Option<Skill> {
         self.skills.remove(name)
+    }
+
+    /// Load skill definitions from JSON files in a directory.
+    ///
+    /// Each `.json` file in the directory is deserialized as a [`Skill`] and
+    /// registered. Skills loaded this way override any existing skill with the
+    /// same name. Files are loaded in sorted order for deterministic behavior.
+    ///
+    /// Returns the number of skills loaded. If the directory does not exist,
+    /// returns `Ok(0)` without error.
+    pub fn load_from_dir(&mut self, dir: &Path) -> crate::Result<usize> {
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        let mut count = 0;
+        for entry in entries {
+            let contents = std::fs::read_to_string(entry.path())?;
+            let skill: Skill = serde_json::from_str(&contents)?;
+            self.register(skill);
+            count += 1;
+        }
+
+        Ok(count)
     }
 }
 
@@ -576,6 +607,80 @@ mod tests {
 
         registry.remove("test");
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn load_from_nonexistent_dir() {
+        let mut registry = SkillRegistry::new();
+        let count = registry
+            .load_from_dir(Path::new("/tmp/does-not-exist-claude-pool-test"))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_from_dir_with_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill_json = serde_json::json!({
+            "name": "my_skill",
+            "description": "A test skill",
+            "prompt": "Do {thing}",
+            "arguments": [
+                { "name": "thing", "description": "What to do", "required": true }
+            ],
+            "config": null
+        });
+        std::fs::write(
+            dir.path().join("my_skill.json"),
+            serde_json::to_string_pretty(&skill_json).unwrap(),
+        )
+        .unwrap();
+
+        // Non-json file should be ignored.
+        std::fs::write(dir.path().join("readme.txt"), "not a skill").unwrap();
+
+        let mut registry = SkillRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 1);
+
+        let skill = registry.get("my_skill").unwrap();
+        assert_eq!(skill.description, "A test skill");
+        assert_eq!(skill.arguments.len(), 1);
+        assert!(skill.arguments[0].required);
+    }
+
+    #[test]
+    fn project_skills_override_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let override_json = serde_json::json!({
+            "name": "code_review",
+            "description": "Custom project review",
+            "prompt": "Review with custom rules: {target}",
+            "arguments": [
+                { "name": "target", "description": "What to review", "required": true }
+            ],
+            "config": null
+        });
+        std::fs::write(
+            dir.path().join("code_review.json"),
+            serde_json::to_string_pretty(&override_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::with_builtins();
+        assert_eq!(
+            registry.get("code_review").unwrap().description,
+            "Review code for bugs, style issues, and improvements."
+        );
+
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            registry.get("code_review").unwrap().description,
+            "Custom project review"
+        );
     }
 
     #[test]
