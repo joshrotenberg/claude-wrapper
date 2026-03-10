@@ -559,11 +559,7 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
         .handler(move |input: FanOutChainsInput| {
             let state = Arc::clone(&state);
             async move {
-                let chains = input
-                    .chains
-                    .into_iter()
-                    .map(convert_chain_steps)
-                    .collect();
+                let chains = input.chains.into_iter().map(convert_chain_steps).collect();
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
                 };
