@@ -467,6 +467,42 @@ pub fn builtin_skills() -> Vec<Skill> {
             ],
             config: None,
         },
+        Skill {
+            name: "create_pr".into(),
+            description: "Create a pull request for the current branch.".into(),
+            prompt: "Create a pull request using `gh pr create`.\n\n\
+                     Title: {title}\n\n\
+                     Body:\n{body}\n\n\
+                     If an issue number is provided, append \"Closes #{issue}\" to the body.\n\
+                     Issue: {issue}\n\n\
+                     Steps:\n\
+                     1. Check if the current branch has an upstream. If not, push with \
+                        `git push -u origin HEAD`.\n\
+                     2. Create the PR with `gh pr create --title \"...\" --body \"...\"`.\n\
+                     3. Do NOT merge the PR.\n\
+                     4. Do NOT include Co-Authored-By or \"Generated with Claude Code\" \
+                        signatures in the PR body.\n\
+                     5. Report the PR URL when done."
+                .into(),
+            arguments: vec![
+                SkillArgument {
+                    name: "title".into(),
+                    description: "PR title (short, under 70 characters).".into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "body".into(),
+                    description: "PR description/body.".into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "issue".into(),
+                    description: "Issue number to close (e.g. 42). Omit if none.".into(),
+                    required: false,
+                },
+            ],
+            config: None,
+        },
     ]
 }
 
@@ -545,7 +581,7 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        assert_eq!(registry.list().len(), 13);
+        assert_eq!(registry.list().len(), 14);
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
         assert!(registry.get("write_tests").is_some());
@@ -559,5 +595,6 @@ mod tests {
         assert!(registry.get("project_pr").is_some());
         assert!(registry.get("issue_watcher").is_some());
         assert!(registry.get("loop_monitor").is_some());
+        assert!(registry.get("create_pr").is_some());
     }
 }
