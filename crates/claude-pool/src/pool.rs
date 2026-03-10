@@ -481,6 +481,47 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(task_id)
     }
 
+    /// Submit multiple chains for parallel execution, returning all task IDs immediately.
+    ///
+    /// Each chain runs on its own worker concurrently. Use [`Pool::chain_progress`] to check
+    /// per-step progress, or [`Pool::result`] to get the final result once complete.
+    pub async fn fan_out_chains(
+        &self,
+        chains: Vec<Vec<crate::chain::ChainStep>>,
+        skills: &SkillRegistry,
+        options: crate::chain::ChainOptions,
+    ) -> Result<Vec<TaskId>> {
+        self.check_shutdown()?;
+        self.check_budget()?;
+
+        let mut handles = Vec::with_capacity(chains.len());
+
+        for chain_steps in chains {
+            let pool = self.clone();
+            let skills = skills.clone();
+            let options = options.clone();
+            handles.push(tokio::spawn(async move {
+                pool.submit_chain(chain_steps, &skills, options).await
+            }));
+        }
+
+        let mut task_ids = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(task_id)) => task_ids.push(task_id),
+                Ok(Err(e)) => {
+                    // Log the error but continue collecting other task IDs
+                    tracing::warn!("failed to submit chain: {}", e);
+                }
+                Err(e) => {
+                    tracing::warn!("chain submission task panicked: {}", e);
+                }
+            }
+        }
+
+        Ok(task_ids)
+    }
+
     /// Submit a workflow template for async execution.
     ///
     /// Instantiates the workflow by substituting placeholders with arguments,
@@ -1387,5 +1428,59 @@ mod tests {
 
         let new_count = pool.set_target_workers(3).await.unwrap();
         assert_eq!(new_count, 3);
+    }
+
+    #[tokio::test]
+    async fn fan_out_chains_submits_all_chains() {
+        let pool = Pool::builder(mock_claude())
+            .workers(2)
+            .build()
+            .await
+            .unwrap();
+
+        let skills = crate::skill::SkillRegistry::new();
+        let options = crate::chain::ChainOptions { tags: vec![] };
+
+        // Create two chains, each with one prompt step.
+        let chain1 = vec![crate::chain::ChainStep {
+            name: "step1".into(),
+            action: crate::chain::StepAction::Prompt {
+                prompt: "prompt 1".into(),
+            },
+            config: None,
+            failure_policy: crate::chain::StepFailurePolicy {
+                retries: 0,
+                recovery_prompt: None,
+            },
+        }];
+
+        let chain2 = vec![crate::chain::ChainStep {
+            name: "step1".into(),
+            action: crate::chain::StepAction::Prompt {
+                prompt: "prompt 2".into(),
+            },
+            config: None,
+            failure_policy: crate::chain::StepFailurePolicy {
+                retries: 0,
+                recovery_prompt: None,
+            },
+        }];
+
+        let chains = vec![chain1, chain2];
+
+        // Submit both chains in parallel.
+        let task_ids = pool.fan_out_chains(chains, &skills, options).await.unwrap();
+
+        // Should have 2 task IDs.
+        assert_eq!(task_ids.len(), 2);
+
+        // Verify task IDs are different.
+        assert_ne!(task_ids[0].0, task_ids[1].0);
+
+        // Verify tasks exist in the store.
+        for task_id in &task_ids {
+            let task = pool.store().get_task(task_id).await.unwrap();
+            assert!(task.is_some());
+        }
     }
 }
