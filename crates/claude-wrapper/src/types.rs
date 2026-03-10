@@ -23,7 +23,8 @@ impl OutputFormat {
 }
 
 /// Permission mode for `--permission-mode`.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     /// Default interactive permissions.
     #[default]
@@ -73,19 +74,29 @@ impl InputFormat {
 }
 
 /// Effort level for `--effort`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Effort {
+    /// Minimal effort, fastest responses.
+    Min,
+    /// Low effort.
     Low,
+    /// Medium effort (default).
     Medium,
+    /// High effort.
     High,
+    /// Maximum effort, most thorough.
+    Max,
 }
 
 impl Effort {
     pub(crate) fn as_arg(&self) -> &'static str {
         match self {
+            Self::Min => "min",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Max => "max",
         }
     }
 }

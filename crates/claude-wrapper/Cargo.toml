@@ -1,0 +1,35 @@
+[package]
+name = "claude-wrapper"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A type-safe Claude Code CLI wrapper for Rust"
+documentation = "https://docs.rs/claude-wrapper"
+keywords = ["claude", "cli", "wrapper", "ai", "mcp"]
+categories = ["development-tools", "api-bindings"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["json", "tempfile"]
+json = ["serde_json"]
+tempfile = ["dep:tempfile"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { version = "1", optional = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["process", "time", "io-util"] }
+tracing = { workspace = true }
+tempfile = { version = "3", optional = true }
+which = "8"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+tokio = { workspace = true }
