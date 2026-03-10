@@ -89,6 +89,7 @@ fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<Wor
 
 pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_status")
+        .title("Pool Status")
         .description("Get pool status: workers, tasks in flight, budget")
         .read_only()
         .no_params_handler(move || {
@@ -105,6 +106,7 @@ pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_run")
+        .title("Run Task (Sync)")
         .description(
             "Run a task synchronously on the next available worker. Blocks until completion.",
         )
@@ -123,6 +125,7 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit")
+        .title("Submit Task (Async)")
         .description("Submit a task for async execution. Returns a task_id immediately.")
         .handler(move |input: SubmitInput| {
             let state = Arc::clone(&state);
@@ -146,6 +149,7 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_result")
+        .title("Get Task Result")
         .description("Check/collect result for a submitted task. Returns null if still running.")
         .read_only()
         .handler(move |input: TaskIdInput| {
@@ -166,6 +170,7 @@ pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_cancel")
+        .title("Cancel Task")
         .description("Cancel a pending or running task.")
         .handler(move |input: TaskIdInput| {
             let state = Arc::clone(&state);
@@ -182,6 +187,7 @@ pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_fan_out")
+        .title("Fan Out (Parallel)")
         .description(
             "Execute multiple tasks in parallel across available workers. Returns all results.",
         )
@@ -202,6 +208,7 @@ pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_drain")
+        .title("Drain Pool")
         .description(
             "Gracefully shut down the pool. Waits for in-flight tasks, then stops all workers.",
         )
@@ -222,6 +229,7 @@ pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn context_set_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_set")
+        .title("Set Context")
         .description("Set a shared context value. Context is injected into worker system prompts.")
         .handler(move |input: ContextSetInput| {
             let state = Arc::clone(&state);
@@ -235,6 +243,7 @@ pub fn context_set_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn context_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_get")
+        .title("Get Context")
         .description("Get a shared context value by key.")
         .read_only()
         .handler(move |input: ContextKeyInput| {
@@ -254,6 +263,7 @@ pub fn context_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn context_delete_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_delete")
+        .title("Delete Context")
         .description("Delete a shared context value by key.")
         .handler(move |input: ContextKeyInput| {
             let state = Arc::clone(&state);
@@ -267,6 +277,7 @@ pub fn context_delete_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 
 pub fn context_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_list")
+        .title("List Context")
         .description("List all shared context keys and values.")
         .read_only()
         .no_params_handler(move || {
@@ -322,6 +333,7 @@ pub struct ChainStepInput {
 
 pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_run")
+        .title("Run Skill")
         .description("Run a registered skill by name with arguments. Blocks until completion.")
         .handler(move |input: SkillRunInput| {
             let state = Arc::clone(&state);
@@ -361,6 +373,7 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 
 pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain")
+        .title("Run Chain")
         .description(
             "Execute a sequential pipeline of steps. Each step's output feeds the next. \
              Steps can be inline prompts or skill references.",
