@@ -439,13 +439,8 @@ impl<S: PoolStore + 'static> Pool<S> {
         let tid = task_id.clone();
         let skills = skills.clone();
         tokio::spawn(async move {
-            let result = crate::chain::execute_chain_with_progress(
-                &pool,
-                &skills,
-                &steps,
-                Some(&tid),
-            )
-            .await;
+            let result =
+                crate::chain::execute_chain_with_progress(&pool, &skills, &steps, Some(&tid)).await;
 
             // Store the chain result as the task result.
             if let Some(mut task) = pool.inner.store.get_task(&tid).await.ok().flatten() {

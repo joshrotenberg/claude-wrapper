@@ -507,11 +507,7 @@ pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
                 };
-                match state
-                    .pool
-                    .submit_chain(steps, &state.skills, options)
-                    .await
-                {
+                match state.pool.submit_chain(steps, &state.skills, options).await {
                     Ok(task_id) => Ok(CallToolResult::json(
                         serde_json::json!({ "task_id": task_id.0 }),
                     )),
@@ -535,15 +531,15 @@ pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
             async move {
                 let task_id = claude_pool::TaskId(input.task_id.clone());
                 match state.pool.chain_progress(&task_id) {
-                    Some(progress) => {
-                        Ok(CallToolResult::json(serde_json::to_value(&progress).unwrap()))
-                    }
+                    Some(progress) => Ok(CallToolResult::json(
+                        serde_json::to_value(&progress).unwrap(),
+                    )),
                     None => {
                         // Fall back to checking if the task exists at all.
                         match state.pool.result(&task_id).await {
-                            Ok(Some(r)) => Ok(CallToolResult::json(
-                                serde_json::to_value(&r).unwrap(),
-                            )),
+                            Ok(Some(r)) => {
+                                Ok(CallToolResult::json(serde_json::to_value(&r).unwrap()))
+                            }
                             Ok(None) => Ok(CallToolResult::error(format!(
                                 "no chain found for task_id: {}",
                                 input.task_id,

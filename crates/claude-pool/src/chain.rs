@@ -168,14 +168,8 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
 
         let prompt = render_step_prompt(step, &previous_output, skills)?;
 
-        let (step_result, step_cost) = execute_step_with_retries(
-            pool,
-            step,
-            &prompt,
-            &previous_output,
-            skills,
-        )
-        .await;
+        let (step_result, step_cost) =
+            execute_step_with_retries(pool, step, &prompt, &previous_output, skills).await;
 
         total_cost += step_cost;
 
@@ -185,7 +179,14 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
                 step_results.push(result);
 
                 if !step_results.last().unwrap().success {
-                    update_chain_progress_final(pool, chain_task_id, steps.len(), &step_results, ChainStatus::Failed).await;
+                    update_chain_progress_final(
+                        pool,
+                        chain_task_id,
+                        steps.len(),
+                        &step_results,
+                        ChainStatus::Failed,
+                    )
+                    .await;
                     return Ok(ChainResult {
                         final_output: previous_output,
                         steps: step_results,
@@ -202,7 +203,14 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
                     cost_microdollars: 0,
                     retries_used: step.failure_policy.retries,
                 });
-                update_chain_progress_final(pool, chain_task_id, steps.len(), &step_results, ChainStatus::Failed).await;
+                update_chain_progress_final(
+                    pool,
+                    chain_task_id,
+                    steps.len(),
+                    &step_results,
+                    ChainStatus::Failed,
+                )
+                .await;
                 return Ok(ChainResult {
                     final_output: output,
                     steps: step_results,
@@ -213,7 +221,14 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
         }
     }
 
-    update_chain_progress_final(pool, chain_task_id, steps.len(), &step_results, ChainStatus::Completed).await;
+    update_chain_progress_final(
+        pool,
+        chain_task_id,
+        steps.len(),
+        &step_results,
+        ChainStatus::Completed,
+    )
+    .await;
 
     Ok(ChainResult {
         final_output: previous_output,
@@ -310,7 +325,10 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
 
         tracing::info!(step = %step.name, "attempting recovery prompt");
 
-        match pool.run_with_config(&recovery_prompt, step.config.clone()).await {
+        match pool
+            .run_with_config(&recovery_prompt, step.config.clone())
+            .await
+        {
             Ok(task_result) => {
                 total_cost += task_result.cost_microdollars;
                 return (
