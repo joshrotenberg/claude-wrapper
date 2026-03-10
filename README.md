@@ -7,6 +7,19 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, w
 [![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/claude-wrapper.svg)](LICENSE-MIT)
 
+## What is claude-pool?
+
+**claude-pool** is measured parallelism for Claude Code: selective, human-in-the-loop worker coordination. Run multiple Claude CLI instances simultaneously without orchestration overhead. Sit between solo Claude sessions and full automation platforms.
+
+**Not** a full orchestration framework or a leave-it-running daemon. This is for applications, scripts, and interactive sessions that need occasional parallel execution under human control—submit tasks, get results, stay in the loop.
+
+### Key Differentiators
+
+- **Session-scoped**: Workers live only as long as your application. No external state.
+- **Conversation-first**: Inject shared context across workers. Workers inherit your session state.
+- **Selective**: Choose what offloads—chains, parallel tasks, or isolated execution. Human decides when to parallelize.
+- **MCP-native**: Expose the pool as an MCP server for use directly from Claude Code.
+
 ## The Three Crates
 
 ```
