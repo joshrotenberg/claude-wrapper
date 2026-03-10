@@ -69,6 +69,9 @@ pub struct GlobalWorkerConfig {
 
     /// Enable git worktree isolation for workers.
     pub worktree_isolation: bool,
+
+    /// Maximum time to wait for an idle worker before failing a task (in seconds).
+    pub worker_assignment_timeout_secs: u64,
 }
 
 impl Default for GlobalWorkerConfig {
@@ -85,6 +88,7 @@ impl Default for GlobalWorkerConfig {
             worker_mode: WorkerMode::default(),
             max_restarts: 3,
             worktree_isolation: false,
+            worker_assignment_timeout_secs: 300,
         }
     }
 }
@@ -124,6 +128,9 @@ pub struct WorkerConfig {
 
     /// Optional description of the worker's purpose or responsibilities.
     pub description: Option<String>,
+
+    /// Override worker assignment timeout (in seconds).
+    pub worker_assignment_timeout_secs: Option<u64>,
 }
 
 /// Current state of a worker.
