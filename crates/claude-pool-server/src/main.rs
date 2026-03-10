@@ -43,9 +43,24 @@ struct Cli {
     #[arg(short, long)]
     system_prompt: Option<String>,
 
+    /// Permission mode for workers (default, acceptEdits, bypassPermissions, plan, auto).
+    #[arg(short, long, default_value = "plan")]
+    permission_mode: String,
+
     /// Disable built-in skills.
     #[arg(long)]
     no_builtins: bool,
+}
+
+fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
+    match s.to_lowercase().as_str() {
+        "default" => claude_pool::PermissionMode::Default,
+        "acceptedits" => claude_pool::PermissionMode::AcceptEdits,
+        "bypasspermissions" => claude_pool::PermissionMode::BypassPermissions,
+        "dontask" => claude_pool::PermissionMode::DontAsk,
+        "auto" => claude_pool::PermissionMode::Auto,
+        _ => claude_pool::PermissionMode::Plan,
+    }
 }
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -76,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         effort: cli.effort.and_then(|e| parse_effort(&e)),
         budget_microdollars: cli.budget_usd.map(|b| (b * 1_000_000.0) as u64),
         system_prompt: cli.system_prompt,
-        permission_mode: Some(claude_pool::PermissionMode::Plan),
+        permission_mode: Some(parse_permission_mode(&cli.permission_mode)),
         ..Default::default()
     };
 

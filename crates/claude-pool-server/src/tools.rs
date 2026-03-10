@@ -191,7 +191,7 @@ pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
                 let prompts: Vec<&str> = input.prompts.iter().map(|s| s.as_str()).collect();
                 match state.pool.fan_out(&prompts).await {
                     Ok(results) => Ok(CallToolResult::json(
-                        serde_json::to_value(&results).unwrap(),
+                        serde_json::json!({ "results": results }),
                     )),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }

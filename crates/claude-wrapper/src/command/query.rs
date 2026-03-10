@@ -340,6 +340,34 @@ impl QueryCommand {
         self
     }
 
+    /// Return the full command as a string that could be run in a shell.
+    ///
+    /// Constructs a command string using the binary path from the Claude instance
+    /// and the arguments from this query. Arguments containing spaces or special
+    /// shell characters are shell-quoted to be safe for shell execution.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, QueryCommand};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    ///
+    /// let cmd = QueryCommand::new("explain quicksort")
+    ///     .model("sonnet");
+    ///
+    /// let command_str = cmd.to_command_string(&claude);
+    /// println!("Would run: {}", command_str);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_command_string(&self, claude: &Claude) -> String {
+        let args = self.build_args();
+        let quoted_args = args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>();
+        format!("{} {}", claude.binary().display(), quoted_args.join(" "))
+    }
+
     /// Execute the query and parse the JSON result.
     ///
     /// This is a convenience method that sets `OutputFormat::Json` and
@@ -519,6 +547,17 @@ impl ClaudeCommand for QueryCommand {
     }
 }
 
+/// Shell-quote an argument if it contains spaces or special characters.
+fn shell_quote(arg: &str) -> String {
+    // Check if the argument needs quoting (contains whitespace or shell metacharacters)
+    if arg.contains(|c: char| c.is_whitespace() || "\"'$\\`|;<>&()[]{}".contains(c)) {
+        // Use single quotes and escape any existing single quotes
+        format!("'{}'", arg.replace("'", "'\\''"))
+    } else {
+        arg.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +601,66 @@ mod tests {
         assert!(args.contains(&"--no-session-persistence".to_string()));
         // Prompt is last
         assert_eq!(args.last().unwrap(), "explain this");
+    }
+
+    #[test]
+    fn test_to_command_string_simple() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .unwrap();
+
+        let cmd = QueryCommand::new("hello");
+        let command_str = cmd.to_command_string(&claude);
+
+        assert!(command_str.starts_with("/usr/local/bin/claude"));
+        assert!(command_str.contains("--print"));
+        assert!(command_str.contains("hello"));
+    }
+
+    #[test]
+    fn test_to_command_string_with_spaces() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .unwrap();
+
+        let cmd = QueryCommand::new("hello world").model("sonnet");
+        let command_str = cmd.to_command_string(&claude);
+
+        assert!(command_str.starts_with("/usr/local/bin/claude"));
+        assert!(command_str.contains("--print"));
+        // Prompt with spaces should be quoted
+        assert!(command_str.contains("'hello world'"));
+        assert!(command_str.contains("--model"));
+        assert!(command_str.contains("sonnet"));
+    }
+
+    #[test]
+    fn test_to_command_string_with_special_chars() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .unwrap();
+
+        let cmd = QueryCommand::new("test $VAR and `cmd`");
+        let command_str = cmd.to_command_string(&claude);
+
+        // Arguments with special shell characters should be quoted
+        assert!(command_str.contains("'test $VAR and `cmd`'"));
+    }
+
+    #[test]
+    fn test_to_command_string_with_single_quotes() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .unwrap();
+
+        let cmd = QueryCommand::new("it's");
+        let command_str = cmd.to_command_string(&claude);
+
+        // Single quotes should be escaped in shell
+        assert!(command_str.contains("'it'\\''s'"));
     }
 }
