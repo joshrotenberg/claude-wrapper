@@ -161,6 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
              pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
              with per-step progress), context_set/get/list (shared state), pool_configure_slot. \
+             Both effort and model can be overridden per-task (pool_run config) and per-chain-step \
+             (step config) to fine-tune cost and quality. \
+             \
+             Model guidance: default to the pool's configured model; override per-task/step with \
+             the model field when needed. Haiku: bounded single tasks (create issue, run checks, \
+             rebase, label), template-driven work, high-volume fan-outs where speed matters. \
+             Sonnet: code review needing subtlety, multi-file changes with dependencies, planning \
+             steps where quality matters. Opus: large mechanical refactors where one mistake breaks \
+             compilation, complex architectural reasoning, tasks where you would want a senior \
+             engineer. Rule of thumb: how much does the task benefit from deeper thinking? \
              \
              Skills available as prompts: code_review, implement, write_tests, refactor, summarize. \
              \
