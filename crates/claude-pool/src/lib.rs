@@ -1,9 +1,9 @@
-//! MCP server for managing a pool of Claude CLI workers.
+//! MCP server for managing a pool of Claude CLI slots.
 //!
 //! `claude-pool` manages N Claude CLI instances behind an MCP server interface.
 //! A coordinator (typically an interactive Claude session) calls MCP tools to
 //! submit work, fan out tasks, chain pipelines, and track budgets. The pool
-//! handles worker lifecycle, session resumption, restarts, and shared context.
+//! handles slot lifecycle, session resumption, restarts, and shared context.
 //!
 //! # Architecture
 //!
@@ -11,12 +11,12 @@
 //! Coordinator (interactive Claude session)
 //!   +-- .mcp.json includes "claude-pool"
 //!         +-- claude-pool MCP server
-//!               +-- worker-0 (Claude instance)
-//!               +-- worker-1 (Claude instance)
-//!               +-- worker-N
+//!               +-- slot-0 (Claude instance)
+//!               +-- slot-1 (Claude instance)
+//!               +-- slot-N
 //! ```
 //!
-//! One server. N workers. Nothing else.
+//! One server. N slots. Nothing else.
 
 pub mod chain;
 pub mod config;

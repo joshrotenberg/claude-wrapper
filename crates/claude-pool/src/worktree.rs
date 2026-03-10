@@ -1,15 +1,15 @@
-//! Git worktree isolation for parallel workers.
+//! Git worktree isolation for parallel slots.
 //!
-//! When multiple workers operate on the same repository, they need
+//! When multiple slots operate on the same repository, they need
 //! isolated working directories to avoid stepping on each other's
 //! git state. This module manages git worktree creation and cleanup.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::types::WorkerId;
+use crate::types::SlotId;
 
-/// Manages git worktrees for pool workers.
+/// Manages git worktrees for pool slots.
 #[derive(Debug)]
 pub struct WorktreeManager {
     /// Root directory for worktrees (e.g. `/tmp/claude-pool/worktrees`).
@@ -31,12 +31,12 @@ impl WorktreeManager {
         Self { base_dir, repo_dir }
     }
 
-    /// Create a worktree for a worker.
+    /// Create a worktree for a slot.
     ///
-    /// Creates a git worktree at `{base_dir}/{worker_id}` branched from
+    /// Creates a git worktree at `{base_dir}/{slot_id}` branched from
     /// the current HEAD.
-    pub async fn create(&self, worker_id: &WorkerId) -> Result<PathBuf> {
-        let worktree_path = self.base_dir.join(&worker_id.0);
+    pub async fn create(&self, slot_id: &SlotId) -> Result<PathBuf> {
+        let worktree_path = self.base_dir.join(&slot_id.0);
 
         // Ensure base directory exists.
         tokio::fs::create_dir_all(&self.base_dir)
@@ -45,10 +45,10 @@ impl WorktreeManager {
 
         // Remove existing worktree if it exists (stale from previous run).
         if worktree_path.exists() {
-            self.remove(worker_id).await?;
+            self.remove(slot_id).await?;
         }
 
-        let branch_name = format!("claude-pool/{}", worker_id.0);
+        let branch_name = format!("claude-pool/{}", slot_id.0);
         let output = tokio::process::Command::new("git")
             .args([
                 "worktree",
@@ -69,7 +69,7 @@ impl WorktreeManager {
         }
 
         tracing::info!(
-            worker_id = %worker_id.0,
+            slot_id = %slot_id.0,
             path = %worktree_path.display(),
             "created git worktree"
         );
@@ -77,9 +77,9 @@ impl WorktreeManager {
         Ok(worktree_path)
     }
 
-    /// Remove a worker's worktree and its branch.
-    pub async fn remove(&self, worker_id: &WorkerId) -> Result<()> {
-        let worktree_path = self.base_dir.join(&worker_id.0);
+    /// Remove a slot's worktree and its branch.
+    pub async fn remove(&self, slot_id: &SlotId) -> Result<()> {
+        let worktree_path = self.base_dir.join(&slot_id.0);
 
         if worktree_path.exists() {
             let output = tokio::process::Command::new("git")
@@ -97,7 +97,7 @@ impl WorktreeManager {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 tracing::warn!(
-                    worker_id = %worker_id.0,
+                    slot_id = %slot_id.0,
                     error = %stderr,
                     "failed to remove worktree, cleaning up manually"
                 );
@@ -107,7 +107,7 @@ impl WorktreeManager {
         }
 
         // Clean up the branch.
-        let branch_name = format!("claude-pool/{}", worker_id.0);
+        let branch_name = format!("claude-pool/{}", slot_id.0);
         let _ = tokio::process::Command::new("git")
             .args(["branch", "-D", &branch_name])
             .current_dir(&self.repo_dir)
@@ -115,7 +115,7 @@ impl WorktreeManager {
             .await;
 
         tracing::debug!(
-            worker_id = %worker_id.0,
+            slot_id = %slot_id.0,
             "removed git worktree"
         );
 
@@ -123,8 +123,8 @@ impl WorktreeManager {
     }
 
     /// Remove all worktrees managed by this pool.
-    pub async fn cleanup_all(&self, worker_ids: &[WorkerId]) -> Result<()> {
-        for id in worker_ids {
+    pub async fn cleanup_all(&self, slot_ids: &[SlotId]) -> Result<()> {
+        for id in slot_ids {
             self.remove(id).await?;
         }
 
@@ -138,9 +138,9 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// Get the worktree path for a worker (may not exist yet).
-    pub fn worktree_path(&self, worker_id: &WorkerId) -> PathBuf {
-        self.base_dir.join(&worker_id.0)
+    /// Get the worktree path for a slot (may not exist yet).
+    pub fn worktree_path(&self, slot_id: &SlotId) -> PathBuf {
+        self.base_dir.join(&slot_id.0)
     }
 
     /// Get the base directory for all worktrees.
@@ -161,8 +161,8 @@ mod tests {
     #[test]
     fn worktree_path_construction() {
         let mgr = WorktreeManager::new("/repo", Some(PathBuf::from("/tmp/wt")));
-        let id = WorkerId("worker-0".into());
-        assert_eq!(mgr.worktree_path(&id), PathBuf::from("/tmp/wt/worker-0"));
+        let id = SlotId("slot-0".into());
+        assert_eq!(mgr.worktree_path(&id), PathBuf::from("/tmp/wt/slot-0"));
     }
 
     #[test]

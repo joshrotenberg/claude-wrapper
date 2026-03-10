@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::WorkerConfig;
+use crate::types::SlotConfig;
 
 /// A reusable skill template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,7 +26,7 @@ pub struct Skill {
     pub arguments: Vec<SkillArgument>,
 
     /// Per-skill config overrides (model, effort, etc.).
-    pub config: Option<WorkerConfig>,
+    pub config: Option<SlotConfig>,
 }
 
 /// An argument accepted by a skill.
@@ -268,7 +268,7 @@ pub fn builtin_skills() -> Vec<Skill> {
                  ✓ Builder pattern for CLIs and command APIs\n\
                  ✓ Typed outputs over stringly-typed\n\n\
                  WORKSPACE CONTEXT:\n\
-                 - claude-pool: core skill/worker system\n\
+                 - claude-pool: core skill/slot system\n\
                  - claude-pool-server: MCP server exposing pool\n\
                  - claude-wrapper: CLI wrapper library\n\
                  - Dependencies: pool → pool-server, both used by wrapper\n\n\

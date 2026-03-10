@@ -1,17 +1,17 @@
-//! Core pool engine for managing Claude CLI workers.
+//! Core pool engine for managing Claude CLI slots.
 //!
-//! The [`Pool`] struct is the main entry point. It manages worker lifecycle,
+//! The [`Pool`] struct is the main entry point. It manages slot lifecycle,
 //! task assignment, budget tracking, and shared context.
 //!
 //! # Example
 //!
 //! ```no_run
 //! # async fn example() -> claude_pool::Result<()> {
-//! use claude_pool::{Pool, GlobalWorkerConfig};
+//! use claude_pool::{Pool, PoolConfig};
 //!
 //! let claude = claude_wrapper::Claude::builder().build()?;
 //! let pool = Pool::builder(claude)
-//!     .workers(4)
+//!     .slots(4)
 //!     .build()
 //!     .await?;
 //!
@@ -40,13 +40,13 @@ use crate::types::*;
 /// Shared pool state behind an `Arc`.
 struct PoolInner<S: PoolStore> {
     claude: Claude,
-    config: GlobalWorkerConfig,
+    config: PoolConfig,
     store: S,
     total_spend: AtomicU64,
     shutdown: AtomicBool,
-    /// Context key-value pairs injected into worker system prompts.
+    /// Context key-value pairs injected into slot system prompts.
     context: dashmap::DashMap<String, String>,
-    /// Mutex for worker assignment to avoid races.
+    /// Mutex for slot assignment to avoid races.
     assignment_lock: Mutex<()>,
     /// Worktree manager, if worktree isolation is enabled.
     worktree_manager: Option<crate::worktree::WorktreeManager>,
@@ -54,9 +54,9 @@ struct PoolInner<S: PoolStore> {
     chain_progress: dashmap::DashMap<String, crate::chain::ChainProgress>,
 }
 
-/// A pool of Claude CLI workers.
+/// A pool of Claude CLI slots.
 ///
-/// Created via [`Pool::builder`]. Manages worker lifecycle, task routing,
+/// Created via [`Pool::builder`]. Manages slot lifecycle, task routing,
 /// and budget enforcement.
 pub struct Pool<S: PoolStore> {
     inner: Arc<PoolInner<S>>,
@@ -74,36 +74,36 @@ impl<S: PoolStore> Clone for Pool<S> {
 /// Builder for constructing a [`Pool`].
 pub struct PoolBuilder<S: PoolStore> {
     claude: Claude,
-    worker_count: usize,
-    config: GlobalWorkerConfig,
+    slot_count: usize,
+    config: PoolConfig,
     store: S,
-    worker_configs: Vec<WorkerConfig>,
+    slot_configs: Vec<SlotConfig>,
 }
 
 impl<S: PoolStore + 'static> PoolBuilder<S> {
-    /// Set the number of workers to spawn.
-    pub fn workers(mut self, count: usize) -> Self {
-        self.worker_count = count;
+    /// Set the number of slots to spawn.
+    pub fn slots(mut self, count: usize) -> Self {
+        self.slot_count = count;
         self
     }
 
-    /// Set the global worker configuration.
-    pub fn config(mut self, config: GlobalWorkerConfig) -> Self {
+    /// Set the global slot configuration.
+    pub fn config(mut self, config: PoolConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// Add a per-worker configuration override.
+    /// Add a per-slot configuration override.
     ///
-    /// Call multiple times for multiple workers. Worker configs are applied
-    /// in order: the first call sets worker-0's config, the second worker-1's, etc.
-    /// Workers without an explicit config get [`WorkerConfig::default()`].
-    pub fn worker_config(mut self, config: WorkerConfig) -> Self {
-        self.worker_configs.push(config);
+    /// Call multiple times for multiple slots. Slot configs are applied
+    /// in order: the first call sets slot-0's config, the second slot-1's, etc.
+    /// Slots without an explicit config get [`SlotConfig::default()`].
+    pub fn slot_config(mut self, config: SlotConfig) -> Self {
+        self.slot_configs.push(config);
         self
     }
 
-    /// Build and initialize the pool, registering workers in the store.
+    /// Build and initialize the pool, registering slots in the store.
     pub async fn build(self) -> Result<Pool<S>> {
         // Set up worktree manager if isolation is enabled.
         let worktree_manager = if self.config.worktree_isolation {
@@ -129,24 +129,24 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             chain_progress: dashmap::DashMap::new(),
         });
 
-        // Register workers in the store.
-        for i in 0..self.worker_count {
-            let worker_config = self.worker_configs.get(i).cloned().unwrap_or_default();
+        // Register slots in the store.
+        for i in 0..self.slot_count {
+            let slot_config = self.slot_configs.get(i).cloned().unwrap_or_default();
 
-            let worker_id = WorkerId(format!("worker-{i}"));
+            let slot_id = SlotId(format!("slot-{i}"));
 
             // Create worktree if isolation is enabled.
             let worktree_path = if let Some(ref mgr) = inner.worktree_manager {
-                let path = mgr.create(&worker_id).await?;
+                let path = mgr.create(&slot_id).await?;
                 Some(path.to_string_lossy().into_owned())
             } else {
                 None
             };
 
-            let record = WorkerRecord {
-                id: worker_id,
-                state: WorkerState::Idle,
-                config: worker_config,
+            let record = SlotRecord {
+                id: slot_id,
+                state: SlotState::Idle,
+                config: slot_config,
                 current_task: None,
                 session_id: None,
                 tasks_completed: 0,
@@ -154,7 +154,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
                 restart_count: 0,
                 worktree_path,
             };
-            inner.store.put_worker(record).await?;
+            inner.store.put_slot(record).await?;
         }
 
         Ok(Pool { inner })
@@ -166,10 +166,10 @@ impl Pool<crate::store::InMemoryStore> {
     pub fn builder(claude: Claude) -> PoolBuilder<crate::store::InMemoryStore> {
         PoolBuilder {
             claude,
-            worker_count: 1,
-            config: GlobalWorkerConfig::default(),
+            slot_count: 1,
+            config: PoolConfig::default(),
             store: crate::store::InMemoryStore::new(),
-            worker_configs: Vec::new(),
+            slot_configs: Vec::new(),
         }
     }
 }
@@ -179,16 +179,16 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub fn builder_with_store(claude: Claude, store: S) -> PoolBuilder<S> {
         PoolBuilder {
             claude,
-            worker_count: 1,
-            config: GlobalWorkerConfig::default(),
+            slot_count: 1,
+            config: PoolConfig::default(),
             store,
-            worker_configs: Vec::new(),
+            slot_configs: Vec::new(),
         }
     }
 
     /// Run a task synchronously, blocking until completion.
     ///
-    /// Assigns the task to the next idle worker, executes the prompt,
+    /// Assigns the task to the next idle slot, executes the prompt,
     /// and returns the result.
     pub async fn run(&self, prompt: &str) -> Result<TaskResult> {
         self.run_with_config(prompt, None).await
@@ -198,7 +198,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn run_with_config(
         &self,
         prompt: &str,
-        task_config: Option<WorkerConfig>,
+        task_config: Option<SlotConfig>,
     ) -> Result<TaskResult> {
         self.check_shutdown()?;
         self.check_budget()?;
@@ -209,19 +209,19 @@ impl<S: PoolStore + 'static> Pool<S> {
             id: task_id.clone(),
             prompt: prompt.to_string(),
             state: TaskState::Pending,
-            worker_id: None,
+            slot_id: None,
             result: None,
             tags: vec![],
             config: task_config,
         };
         self.inner.store.put_task(record).await?;
 
-        let (worker_id, worker_config) = self.assign_worker(&task_id).await?;
+        let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
         let result = self
-            .execute_task(&task_id, prompt, &worker_id, &worker_config)
+            .execute_task(&task_id, prompt, &slot_id, &slot_config)
             .await;
 
-        self.release_worker(&worker_id, &task_id, &result).await?;
+        self.release_slot(&slot_id, &task_id, &result).await?;
 
         let task_result = result?;
         // Update task record with result.
@@ -249,7 +249,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn submit_with_config(
         &self,
         prompt: &str,
-        task_config: Option<WorkerConfig>,
+        task_config: Option<SlotConfig>,
         tags: Vec<String>,
     ) -> Result<TaskId> {
         self.check_shutdown()?;
@@ -262,7 +262,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             id: task_id.clone(),
             prompt: prompt.clone(),
             state: TaskState::Pending,
-            worker_id: None,
+            slot_id: None,
             result: None,
             tags,
             config: task_config,
@@ -278,13 +278,13 @@ impl<S: PoolStore + 'static> Pool<S> {
                 _ => return,
             };
 
-            match pool.assign_worker(&tid).await {
-                Ok((worker_id, worker_config)) => {
+            match pool.assign_slot(&tid).await {
+                Ok((slot_id, slot_config)) => {
                     let result = pool
-                        .execute_task(&tid, &prompt, &worker_id, &worker_config)
+                        .execute_task(&tid, &prompt, &slot_id, &slot_config)
                         .await;
 
-                    let _ = pool.release_worker(&worker_id, &tid, &result).await;
+                    let _ = pool.release_slot(&slot_id, &tid, &result).await;
 
                     let mut updated = task;
                     match result {
@@ -365,10 +365,10 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
     }
 
-    /// Execute tasks in parallel across available workers, collecting all results.
+    /// Execute tasks in parallel across available slots, collecting all results.
     ///
-    /// Queues excess prompts until a worker becomes idle. Returns once all
-    /// prompts complete or timeout waiting for worker availability.
+    /// Queues excess prompts until a slot becomes idle. Returns once all
+    /// prompts complete or timeout waiting for slot availability.
     pub async fn fan_out(&self, prompts: &[&str]) -> Result<Vec<TaskResult>> {
         self.check_shutdown()?;
         self.check_budget()?;
@@ -413,7 +413,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             id: task_id.clone(),
             prompt: format!("chain: {} steps", steps.len()),
             state: TaskState::Pending,
-            worker_id: None,
+            slot_id: None,
             result: None,
             tags: options.tags,
             config: None,
@@ -483,7 +483,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
     /// Submit multiple chains for parallel execution, returning all task IDs immediately.
     ///
-    /// Each chain runs on its own worker concurrently. Use [`Pool::chain_progress`] to check
+    /// Each chain runs on its own slot concurrently. Use [`Pool::chain_progress`] to check
     /// per-step progress, or [`Pool::result`] to get the final result once complete.
     pub async fn fan_out_chains(
         &self,
@@ -569,7 +569,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
     /// Set a shared context value.
     ///
-    /// Context is injected into worker system prompts at task start.
+    /// Context is injected into slot system prompts at task start.
     pub fn set_context(&self, key: impl Into<String>, value: impl Into<String>) {
         self.inner.context.insert(key.into(), value.into());
     }
@@ -616,22 +616,22 @@ impl<S: PoolStore + 'static> Pool<S> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // Mark all workers as stopped.
-        let workers = self.inner.store.list_workers().await?;
+        // Mark all slots as stopped.
+        let slots = self.inner.store.list_slots().await?;
         let mut total_cost = 0u64;
         let mut total_tasks = 0u64;
-        let worker_ids: Vec<_> = workers.iter().map(|w| w.id.clone()).collect();
+        let slot_ids: Vec<_> = slots.iter().map(|w| w.id.clone()).collect();
 
-        for mut worker in workers {
-            total_cost += worker.cost_microdollars;
-            total_tasks += worker.tasks_completed;
-            worker.state = WorkerState::Stopped;
-            self.inner.store.put_worker(worker).await?;
+        for mut slot in slots {
+            total_cost += slot.cost_microdollars;
+            total_tasks += slot.tasks_completed;
+            slot.state = SlotState::Stopped;
+            self.inner.store.put_slot(slot).await?;
         }
 
         // Clean up worktrees if isolation was enabled.
         if let Some(ref mgr) = self.inner.worktree_manager {
-            mgr.cleanup_all(&worker_ids).await?;
+            mgr.cleanup_all(&slot_ids).await?;
         }
 
         Ok(DrainSummary {
@@ -642,15 +642,9 @@ impl<S: PoolStore + 'static> Pool<S> {
 
     /// Get a snapshot of pool status.
     pub async fn status(&self) -> Result<PoolStatus> {
-        let workers = self.inner.store.list_workers().await?;
-        let idle = workers
-            .iter()
-            .filter(|w| w.state == WorkerState::Idle)
-            .count();
-        let busy = workers
-            .iter()
-            .filter(|w| w.state == WorkerState::Busy)
-            .count();
+        let slots = self.inner.store.list_slots().await?;
+        let idle = slots.iter().filter(|w| w.state == SlotState::Idle).count();
+        let busy = slots.iter().filter(|w| w.state == SlotState::Busy).count();
 
         let running_tasks = self
             .inner
@@ -673,9 +667,9 @@ impl<S: PoolStore + 'static> Pool<S> {
             .len();
 
         Ok(PoolStatus {
-            total_workers: workers.len(),
-            idle_workers: idle,
-            busy_workers: busy,
+            total_slots: slots.len(),
+            idle_slots: idle,
+            busy_slots: busy,
             running_tasks,
             pending_tasks,
             total_spend_microdollars: self.inner.total_spend.load(Ordering::Relaxed),
@@ -689,50 +683,50 @@ impl<S: PoolStore + 'static> Pool<S> {
         &self.inner.store
     }
 
-    /// Scale up the pool by adding N new workers.
+    /// Scale up the pool by adding N new slots.
     ///
-    /// Returns the new total worker count.
-    /// Fails if the new count exceeds max_workers.
+    /// Returns the new total slot count.
+    /// Fails if the new count exceeds max_slots.
     pub async fn scale_up(&self, count: usize) -> Result<usize> {
         if count == 0 {
-            return Ok(self.inner.store.list_workers().await?.len());
+            return Ok(self.inner.store.list_slots().await?.len());
         }
 
-        let current_workers = self.inner.store.list_workers().await?;
-        let current_count = current_workers.len();
+        let current_slots = self.inner.store.list_slots().await?;
+        let current_count = current_slots.len();
         let new_count = current_count + count;
 
-        if new_count > self.inner.config.scaling.max_workers {
+        if new_count > self.inner.config.scaling.max_slots {
             return Err(Error::Store(format!(
-                "cannot scale up to {} workers: exceeds max_workers ({})",
-                new_count, self.inner.config.scaling.max_workers
+                "cannot scale up to {} slots: exceeds max_slots ({})",
+                new_count, self.inner.config.scaling.max_slots
             )));
         }
 
-        // Find the next available worker ID.
-        let existing_ids: Vec<usize> = current_workers
+        // Find the next available slot ID.
+        let existing_ids: Vec<usize> = current_slots
             .iter()
-            .filter_map(|w| w.id.0.strip_prefix("worker-").and_then(|s| s.parse().ok()))
+            .filter_map(|w| w.id.0.strip_prefix("slot-").and_then(|s| s.parse().ok()))
             .collect();
         let mut next_id = existing_ids.iter().max().unwrap_or(&0) + 1;
 
-        // Create and register new workers.
+        // Create and register new slots.
         for _ in 0..count {
-            let worker_id = WorkerId(format!("worker-{next_id}"));
+            let slot_id = SlotId(format!("slot-{next_id}"));
             next_id += 1;
 
             // Create worktree if isolation is enabled.
             let worktree_path = if let Some(ref mgr) = self.inner.worktree_manager {
-                let path = mgr.create(&worker_id).await?;
+                let path = mgr.create(&slot_id).await?;
                 Some(path.to_string_lossy().into_owned())
             } else {
                 None
             };
 
-            let record = WorkerRecord {
-                id: worker_id,
-                state: WorkerState::Idle,
-                config: WorkerConfig::default(),
+            let record = SlotRecord {
+                id: slot_id,
+                state: SlotState::Idle,
+                config: SlotConfig::default(),
                 current_task: None,
                 session_id: None,
                 tasks_completed: 0,
@@ -740,46 +734,46 @@ impl<S: PoolStore + 'static> Pool<S> {
                 restart_count: 0,
                 worktree_path,
             };
-            self.inner.store.put_worker(record).await?;
+            self.inner.store.put_slot(record).await?;
         }
 
         Ok(new_count)
     }
 
-    /// Scale down the pool by removing N workers.
+    /// Scale down the pool by removing N slots.
     ///
-    /// Removes idle workers first. If not enough idle workers are available,
-    /// waits for busy workers to complete (with timeout) before removing them.
-    /// Returns the new total worker count.
-    /// Fails if the new count drops below min_workers.
+    /// Removes idle slots first. If not enough idle slots are available,
+    /// waits for busy slots to complete (with timeout) before removing them.
+    /// Returns the new total slot count.
+    /// Fails if the new count drops below min_slots.
     pub async fn scale_down(&self, count: usize) -> Result<usize> {
         if count == 0 {
-            return Ok(self.inner.store.list_workers().await?.len());
+            return Ok(self.inner.store.list_slots().await?.len());
         }
 
-        let mut workers = self.inner.store.list_workers().await?;
-        let current_count = workers.len();
+        let mut slots = self.inner.store.list_slots().await?;
+        let current_count = slots.len();
         let new_count = current_count.saturating_sub(count);
 
-        if new_count < self.inner.config.scaling.min_workers {
+        if new_count < self.inner.config.scaling.min_slots {
             return Err(Error::Store(format!(
-                "cannot scale down to {} workers: below min_workers ({})",
-                new_count, self.inner.config.scaling.min_workers
+                "cannot scale down to {} slots: below min_slots ({})",
+                new_count, self.inner.config.scaling.min_slots
             )));
         }
 
-        // Sort to prioritize removing least-active workers.
-        workers.sort_by_key(|w| std::cmp::Reverse(w.tasks_completed));
+        // Sort to prioritize removing least-active slots.
+        slots.sort_by_key(|w| std::cmp::Reverse(w.tasks_completed));
 
-        let workers_to_remove = &workers[..count];
+        let slots_to_remove = &slots[..count];
         let timeout = std::time::Duration::from_secs(30);
 
-        for worker in workers_to_remove {
-            // Wait for worker to finish any running task (with timeout).
+        for slot in slots_to_remove {
+            // Wait for slot to finish any running task (with timeout).
             let deadline = std::time::Instant::now() + timeout;
             loop {
-                if let Some(w) = self.inner.store.get_worker(&worker.id).await? {
-                    if w.state != WorkerState::Busy {
+                if let Some(w) = self.inner.store.get_slot(&slot.id).await? {
+                    if w.state != SlotState::Busy {
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
@@ -794,21 +788,21 @@ impl<S: PoolStore + 'static> Pool<S> {
 
             // Cleanup worktree if applicable.
             if let Some(ref mgr) = self.inner.worktree_manager
-                && worker.worktree_path.is_some()
+                && slot.worktree_path.is_some()
             {
-                let _ = mgr.cleanup_all(std::slice::from_ref(&worker.id)).await;
+                let _ = mgr.cleanup_all(std::slice::from_ref(&slot.id)).await;
             }
 
-            // Delete worker record.
-            self.inner.store.delete_worker(&worker.id).await?;
+            // Delete slot record.
+            self.inner.store.delete_slot(&slot.id).await?;
         }
 
         Ok(new_count)
     }
 
-    /// Set the target number of workers, scaling up or down as needed.
-    pub async fn set_target_workers(&self, target: usize) -> Result<usize> {
-        let current = self.inner.store.list_workers().await?.len();
+    /// Set the target number of slots, scaling up or down as needed.
+    pub async fn set_target_slots(&self, target: usize) -> Result<usize> {
+        let current = self.inner.store.list_slots().await?.len();
         if target > current {
             self.scale_up(target - current).await
         } else if target < current {
@@ -841,8 +835,8 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(())
     }
 
-    /// Wait for an idle worker to become available, with exponential backoff.
-    async fn wait_for_idle_worker_with_timeout(&self, timeout_secs: u64) -> Result<WorkerRecord> {
+    /// Wait for an idle slot to become available, with exponential backoff.
+    async fn wait_for_idle_slot_with_timeout(&self, timeout_secs: u64) -> Result<SlotRecord> {
         use std::time::{Duration, Instant};
 
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -852,15 +846,15 @@ impl<S: PoolStore + 'static> Pool<S> {
         loop {
             self.check_shutdown()?;
 
-            let workers = self.inner.store.list_workers().await?;
-            for worker in workers {
-                if worker.state == WorkerState::Idle {
-                    return Ok(worker);
+            let slots = self.inner.store.list_slots().await?;
+            for slot in slots {
+                if slot.state == SlotState::Idle {
+                    return Ok(slot);
                 }
             }
 
             if Instant::now() >= deadline {
-                return Err(Error::NoWorkerAvailable { timeout_secs });
+                return Err(Error::NoSlotAvailable { timeout_secs });
             }
 
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
@@ -868,43 +862,43 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
     }
 
-    /// Find an idle worker and assign the task to it, waiting if necessary.
-    async fn assign_worker(&self, task_id: &TaskId) -> Result<(WorkerId, WorkerConfig)> {
+    /// Find an idle slot and assign the task to it, waiting if necessary.
+    async fn assign_slot(&self, task_id: &TaskId) -> Result<(SlotId, SlotConfig)> {
         let _lock = self.inner.assignment_lock.lock().await;
 
-        let timeout = self.inner.config.worker_assignment_timeout_secs;
-        let mut worker = self.wait_for_idle_worker_with_timeout(timeout).await?;
-        let config = worker.config.clone();
+        let timeout = self.inner.config.slot_assignment_timeout_secs;
+        let mut slot = self.wait_for_idle_slot_with_timeout(timeout).await?;
+        let config = slot.config.clone();
 
-        worker.state = WorkerState::Busy;
-        worker.current_task = Some(task_id.clone());
-        self.inner.store.put_worker(worker.clone()).await?;
+        slot.state = SlotState::Busy;
+        slot.current_task = Some(task_id.clone());
+        self.inner.store.put_slot(slot.clone()).await?;
 
-        // Update task with assigned worker.
+        // Update task with assigned slot.
         if let Some(mut task) = self.inner.store.get_task(task_id).await? {
             task.state = TaskState::Running;
-            task.worker_id = Some(worker.id.clone());
+            task.slot_id = Some(slot.id.clone());
             self.inner.store.put_task(task).await?;
         }
 
-        Ok((worker.id, config))
+        Ok((slot.id, config))
     }
 
-    /// Release a worker back to idle after task completion.
-    async fn release_worker(
+    /// Release a slot back to idle after task completion.
+    async fn release_slot(
         &self,
-        worker_id: &WorkerId,
+        slot_id: &SlotId,
         _task_id: &TaskId,
         result: &std::result::Result<TaskResult, Error>,
     ) -> Result<()> {
-        if let Some(mut worker) = self.inner.store.get_worker(worker_id).await? {
-            worker.state = WorkerState::Idle;
-            worker.current_task = None;
+        if let Some(mut slot) = self.inner.store.get_slot(slot_id).await? {
+            slot.state = SlotState::Idle;
+            slot.current_task = None;
 
             if let Ok(task_result) = result {
-                worker.tasks_completed += 1;
-                worker.cost_microdollars += task_result.cost_microdollars;
-                worker.session_id = task_result.session_id.clone();
+                slot.tasks_completed += 1;
+                slot.cost_microdollars += task_result.cost_microdollars;
+                slot.session_id = task_result.session_id.clone();
 
                 // Update global spend tracker.
                 self.inner
@@ -912,26 +906,26 @@ impl<S: PoolStore + 'static> Pool<S> {
                     .fetch_add(task_result.cost_microdollars, Ordering::Relaxed);
             }
 
-            self.inner.store.put_worker(worker).await?;
+            self.inner.store.put_slot(slot).await?;
         }
         Ok(())
     }
 
-    /// Execute a task on a specific worker by invoking the Claude CLI.
+    /// Execute a task on a specific slot by invoking the Claude CLI.
     async fn execute_task(
         &self,
         _task_id: &TaskId,
         prompt: &str,
-        worker_id: &WorkerId,
-        worker_config: &WorkerConfig,
+        slot_id: &SlotId,
+        slot_config: &SlotConfig,
     ) -> Result<TaskResult> {
         let task_record = self.inner.store.get_task(_task_id).await?;
         let task_cfg = task_record.as_ref().and_then(|t| t.config.as_ref());
 
-        let resolved = ResolvedConfig::resolve(&self.inner.config, worker_config, task_cfg);
+        let resolved = ResolvedConfig::resolve(&self.inner.config, slot_config, task_cfg);
 
         // Build the system prompt with identity and context injection.
-        let system_prompt = self.build_system_prompt(&resolved, worker_config);
+        let system_prompt = self.build_system_prompt(&resolved, slot_config);
 
         // Build and execute the query.
         let mut cmd = claude_wrapper::QueryCommand::new(prompt)
@@ -958,14 +952,14 @@ impl<S: PoolStore + 'static> Pool<S> {
             cmd = cmd.allowed_tools(&resolved.allowed_tools);
         }
 
-        // Use worktree working dir if the worker has one, otherwise use default.
-        let claude_instance = if let Some(worker) = self.inner.store.get_worker(worker_id).await? {
-            // Resume session if the worker has one.
-            if let Some(ref session_id) = worker.session_id {
+        // Use worktree working dir if the slot has one, otherwise use default.
+        let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
+            // Resume session if the slot has one.
+            if let Some(ref session_id) = slot.session_id {
                 cmd = cmd.resume(session_id);
             }
 
-            if let Some(ref wt_path) = worker.worktree_path {
+            if let Some(ref wt_path) = slot.worktree_path {
                 self.inner.claude.with_working_dir(wt_path)
             } else {
                 self.inner.claude.clone()
@@ -975,7 +969,7 @@ impl<S: PoolStore + 'static> Pool<S> {
         };
 
         tracing::debug!(
-            worker_id = %worker_id.0,
+            slot_id = %slot_id.0,
             model = ?resolved.model,
             effort = ?resolved.effort,
             "executing task"
@@ -997,18 +991,18 @@ impl<S: PoolStore + 'static> Pool<S> {
         })
     }
 
-    /// Build the system prompt by combining worker identity, resolved config and context.
+    /// Build the system prompt by combining slot identity, resolved config and context.
     fn build_system_prompt(
         &self,
         resolved: &ResolvedConfig,
-        worker_config: &WorkerConfig,
+        slot_config: &SlotConfig,
     ) -> Option<String> {
         let context_entries: Vec<_> = self.list_context();
 
         // Check if there's any content to include
-        let has_identity = worker_config.name.is_some()
-            || worker_config.role.is_some()
-            || worker_config.description.is_some();
+        let has_identity = slot_config.name.is_some()
+            || slot_config.role.is_some()
+            || slot_config.description.is_some();
 
         if resolved.system_prompt.is_none() && context_entries.is_empty() && !has_identity {
             return None;
@@ -1016,26 +1010,26 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let mut parts = Vec::new();
 
-        // Inject worker identity
+        // Inject slot identity
         if has_identity {
             let mut identity = String::new();
             identity.push_str("You are ");
 
-            if let Some(ref name) = worker_config.name {
+            if let Some(ref name) = slot_config.name {
                 identity.push_str(name);
             } else {
-                identity.push_str("a worker");
+                identity.push_str("a slot");
             }
 
-            if let Some(ref role) = worker_config.role {
+            if let Some(ref role) = slot_config.role {
                 identity.push_str(", a ");
                 identity.push_str(role);
             }
 
-            if let Some(ref description) = worker_config.description {
+            if let Some(ref description) = slot_config.description {
                 identity.push_str(". ");
                 identity.push_str(description);
-            } else if worker_config.role.is_some() {
+            } else if slot_config.role.is_some() {
                 identity.push('.');
             }
 
@@ -1060,7 +1054,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 /// Summary returned by [`Pool::drain`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrainSummary {
-    /// Total cost across all workers in microdollars.
+    /// Total cost across all slots in microdollars.
     pub total_cost_microdollars: u64,
     /// Total number of tasks completed.
     pub total_tasks_completed: u64,
@@ -1069,12 +1063,12 @@ pub struct DrainSummary {
 /// Snapshot of pool status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolStatus {
-    /// Total number of workers.
-    pub total_workers: usize,
-    /// Number of idle workers.
-    pub idle_workers: usize,
-    /// Number of busy workers.
-    pub busy_workers: usize,
+    /// Total number of slots.
+    pub total_slots: usize,
+    /// Number of idle slots.
+    pub idle_slots: usize,
+    /// Number of busy slots.
+    pub busy_slots: usize,
     /// Number of currently running tasks.
     pub running_tasks: usize,
     /// Number of pending (queued) tasks.
@@ -1110,26 +1104,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_pool_registers_workers() {
-        let pool = Pool::builder(mock_claude())
-            .workers(3)
-            .build()
-            .await
-            .unwrap();
+    async fn build_pool_registers_slots() {
+        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
 
-        let workers = pool.store().list_workers().await.unwrap();
-        assert_eq!(workers.len(), 3);
+        let slots = pool.store().list_slots().await.unwrap();
+        assert_eq!(slots.len(), 3);
 
-        for worker in &workers {
-            assert_eq!(worker.state, WorkerState::Idle);
+        for slot in &slots {
+            assert_eq!(slot.state, SlotState::Idle);
         }
     }
 
     #[tokio::test]
-    async fn pool_with_worker_configs() {
+    async fn pool_with_slot_configs() {
         let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .worker_config(WorkerConfig {
+            .slots(2)
+            .slot_config(SlotConfig {
                 model: Some("opus".into()),
                 role: Some("reviewer".into()),
                 ..Default::default()
@@ -1138,22 +1128,18 @@ mod tests {
             .await
             .unwrap();
 
-        let workers = pool.store().list_workers().await.unwrap();
-        let w0 = workers.iter().find(|w| w.id.0 == "worker-0").unwrap();
-        let w1 = workers.iter().find(|w| w.id.0 == "worker-1").unwrap();
+        let slots = pool.store().list_slots().await.unwrap();
+        let w0 = slots.iter().find(|w| w.id.0 == "slot-0").unwrap();
+        let w1 = slots.iter().find(|w| w.id.0 == "slot-1").unwrap();
         assert_eq!(w0.config.model.as_deref(), Some("opus"));
         assert_eq!(w0.config.role.as_deref(), Some("reviewer"));
-        // Worker 1 gets default config.
+        // Slot 1 gets default config.
         assert!(w1.config.model.is_none());
     }
 
     #[tokio::test]
     async fn context_operations() {
-        let pool = Pool::builder(mock_claude())
-            .workers(1)
-            .build()
-            .await
-            .unwrap();
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
 
         pool.set_context("repo", "claude-wrapper");
         pool.set_context("branch", "main");
@@ -1166,19 +1152,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_marks_workers_stopped() {
-        let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .build()
-            .await
-            .unwrap();
+    async fn drain_marks_slots_stopped() {
+        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
         let summary = pool.drain().await.unwrap();
         assert_eq!(summary.total_tasks_completed, 0);
 
-        let workers = pool.store().list_workers().await.unwrap();
-        for w in &workers {
-            assert_eq!(w.state, WorkerState::Stopped);
+        let slots = pool.store().list_slots().await.unwrap();
+        for w in &slots {
+            assert_eq!(w.state, SlotState::Stopped);
         }
 
         // Pool rejects new work after drain.
@@ -1188,8 +1170,8 @@ mod tests {
     #[tokio::test]
     async fn budget_enforcement() {
         let pool = Pool::builder(mock_claude())
-            .workers(1)
-            .config(GlobalWorkerConfig {
+            .slots(1)
+            .config(PoolConfig {
                 budget_microdollars: Some(100),
                 ..Default::default()
             })
@@ -1207,8 +1189,8 @@ mod tests {
     #[tokio::test]
     async fn status_snapshot() {
         let pool = Pool::builder(mock_claude())
-            .workers(3)
-            .config(GlobalWorkerConfig {
+            .slots(3)
+            .config(PoolConfig {
                 budget_microdollars: Some(1_000_000),
                 ..Default::default()
             })
@@ -1217,69 +1199,65 @@ mod tests {
             .unwrap();
 
         let status = pool.status().await.unwrap();
-        assert_eq!(status.total_workers, 3);
-        assert_eq!(status.idle_workers, 3);
-        assert_eq!(status.busy_workers, 0);
+        assert_eq!(status.total_slots, 3);
+        assert_eq!(status.idle_slots, 3);
+        assert_eq!(status.busy_slots, 0);
         assert_eq!(status.budget_microdollars, Some(1_000_000));
         assert!(!status.shutdown);
     }
 
     #[tokio::test]
-    async fn no_idle_workers_timeout() {
+    async fn no_idle_slots_timeout() {
         let pool = Pool::builder(mock_claude())
-            .workers(1)
-            .config(GlobalWorkerConfig {
-                worker_assignment_timeout_secs: 1,
+            .slots(1)
+            .config(PoolConfig {
+                slot_assignment_timeout_secs: 1,
                 ..Default::default()
             })
             .build()
             .await
             .unwrap();
 
-        // Manually mark the worker as busy.
-        let mut workers = pool.store().list_workers().await.unwrap();
-        workers[0].state = WorkerState::Busy;
-        pool.store().put_worker(workers[0].clone()).await.unwrap();
+        // Manually mark the slot as busy.
+        let mut slots = pool.store().list_slots().await.unwrap();
+        slots[0].state = SlotState::Busy;
+        pool.store().put_slot(slots[0].clone()).await.unwrap();
 
         let err = pool.run("hello").await.unwrap_err();
-        assert!(matches!(err, Error::NoWorkerAvailable { timeout_secs: 1 }));
+        assert!(matches!(err, Error::NoSlotAvailable { timeout_secs: 1 }));
     }
 
     #[tokio::test]
     async fn fan_out_with_excess_prompts() {
         // This test verifies that fan_out can queue excess prompts.
-        // With 2 workers and 4 prompts, all 4 should eventually complete.
+        // With 2 slots and 4 prompts, all 4 should eventually complete.
         // Since we use mock_claude (non-existent binary), actual execution will fail,
-        // but we're testing that the queueing mechanism works (assignment tries to get a worker).
-        let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .build()
-            .await
-            .unwrap();
+        // but we're testing that the queueing mechanism works (assignment tries to get a slot).
+        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
         let prompts = vec!["prompt1", "prompt2", "prompt3", "prompt4"];
 
         // This will fail due to mock binary, but the key point is that
-        // it tries to execute all prompts even though we only have 2 workers.
-        // Before the fix, excess prompts would fail with "no idle workers" immediately.
+        // it tries to execute all prompts even though we only have 2 slots.
+        // Before the fix, excess prompts would fail with "no idle slots" immediately.
         // After the fix, they queue and wait.
         let results = pool.fan_out(&prompts).await;
 
         // We expect all 4 tasks to be attempted (the mock binary failure is expected).
-        // The test is that we get 4 results (not an immediate failure due to worker count).
+        // The test is that we get 4 results (not an immediate failure due to slot count).
         match results {
             Ok(_) | Err(_) => {
                 // Both outcomes are ok; we're testing that fan_out doesn't fail
-                // with immediate "no idle workers" error when prompts > workers.
+                // with immediate "no idle slots" error when prompts > slots.
             }
         }
     }
 
     #[tokio::test]
-    async fn worker_identity_fields_persisted() {
+    async fn slot_identity_fields_persisted() {
         let pool = Pool::builder(mock_claude())
-            .workers(1)
-            .worker_config(WorkerConfig {
+            .slots(1)
+            .slot_config(SlotConfig {
                 name: Some("reviewer".into()),
                 role: Some("code_review".into()),
                 description: Some("Reviews PRs for correctness and style".into()),
@@ -1289,47 +1267,43 @@ mod tests {
             .await
             .unwrap();
 
-        let workers = pool.store().list_workers().await.unwrap();
-        let worker = workers.iter().find(|w| w.id.0 == "worker-0").unwrap();
+        let slots = pool.store().list_slots().await.unwrap();
+        let slot = slots.iter().find(|w| w.id.0 == "slot-0").unwrap();
 
-        assert_eq!(worker.config.name.as_deref(), Some("reviewer"));
-        assert_eq!(worker.config.role.as_deref(), Some("code_review"));
+        assert_eq!(slot.config.name.as_deref(), Some("reviewer"));
+        assert_eq!(slot.config.role.as_deref(), Some("code_review"));
         assert_eq!(
-            worker.config.description.as_deref(),
+            slot.config.description.as_deref(),
             Some("Reviews PRs for correctness and style")
         );
     }
 
     #[tokio::test]
-    async fn scale_up_increases_worker_count() {
-        let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .build()
-            .await
-            .unwrap();
+    async fn scale_up_increases_slot_count() {
+        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
-        let initial_count = pool.store().list_workers().await.unwrap().len();
+        let initial_count = pool.store().list_slots().await.unwrap().len();
         assert_eq!(initial_count, 2);
 
         let new_count = pool.scale_up(3).await.unwrap();
         assert_eq!(new_count, 5);
 
-        let workers = pool.store().list_workers().await.unwrap();
-        assert_eq!(workers.len(), 5);
+        let slots = pool.store().list_slots().await.unwrap();
+        assert_eq!(slots.len(), 5);
 
-        // Verify new workers are idle.
-        for worker in workers.iter().skip(2) {
-            assert_eq!(worker.state, WorkerState::Idle);
+        // Verify new slots are idle.
+        for slot in slots.iter().skip(2) {
+            assert_eq!(slot.state, SlotState::Idle);
         }
     }
 
     #[tokio::test]
-    async fn scale_up_respects_max_workers() {
-        let mut config = GlobalWorkerConfig::default();
-        config.scaling.max_workers = 4;
+    async fn scale_up_respects_max_slots() {
+        let mut config = PoolConfig::default();
+        config.scaling.max_slots = 4;
 
         let pool = Pool::builder(mock_claude())
-            .workers(2)
+            .slots(2)
             .config(config)
             .build()
             .await
@@ -1342,37 +1316,33 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("exceeds max_workers")
+                .contains("exceeds max_slots")
         );
 
         // Verify count unchanged.
-        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+        assert_eq!(pool.store().list_slots().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn scale_down_reduces_worker_count() {
-        let pool = Pool::builder(mock_claude())
-            .workers(4)
-            .build()
-            .await
-            .unwrap();
+    async fn scale_down_reduces_slot_count() {
+        let pool = Pool::builder(mock_claude()).slots(4).build().await.unwrap();
 
-        let initial = pool.store().list_workers().await.unwrap().len();
+        let initial = pool.store().list_slots().await.unwrap().len();
         assert_eq!(initial, 4);
 
         let new_count = pool.scale_down(2).await.unwrap();
         assert_eq!(new_count, 2);
 
-        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+        assert_eq!(pool.store().list_slots().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn scale_down_respects_min_workers() {
-        let mut config = GlobalWorkerConfig::default();
-        config.scaling.min_workers = 2;
+    async fn scale_down_respects_min_slots() {
+        let mut config = PoolConfig::default();
+        config.scaling.min_slots = 2;
 
         let pool = Pool::builder(mock_claude())
-            .workers(3)
+            .slots(3)
             .config(config)
             .build()
             .await
@@ -1381,62 +1351,41 @@ mod tests {
         // Try to scale below min.
         let result = pool.scale_down(2).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("below min_workers")
-        );
+        assert!(result.unwrap_err().to_string().contains("below min_slots"));
 
         // Verify count unchanged.
-        assert_eq!(pool.store().list_workers().await.unwrap().len(), 3);
+        assert_eq!(pool.store().list_slots().await.unwrap().len(), 3);
     }
 
     #[tokio::test]
-    async fn set_target_workers_scales_up() {
-        let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .build()
-            .await
-            .unwrap();
+    async fn set_target_slots_scales_up() {
+        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
-        let new_count = pool.set_target_workers(5).await.unwrap();
+        let new_count = pool.set_target_slots(5).await.unwrap();
         assert_eq!(new_count, 5);
-        assert_eq!(pool.store().list_workers().await.unwrap().len(), 5);
+        assert_eq!(pool.store().list_slots().await.unwrap().len(), 5);
     }
 
     #[tokio::test]
-    async fn set_target_workers_scales_down() {
-        let pool = Pool::builder(mock_claude())
-            .workers(5)
-            .build()
-            .await
-            .unwrap();
+    async fn set_target_slots_scales_down() {
+        let pool = Pool::builder(mock_claude()).slots(5).build().await.unwrap();
 
-        let new_count = pool.set_target_workers(2).await.unwrap();
+        let new_count = pool.set_target_slots(2).await.unwrap();
         assert_eq!(new_count, 2);
-        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+        assert_eq!(pool.store().list_slots().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn set_target_workers_no_op_when_equal() {
-        let pool = Pool::builder(mock_claude())
-            .workers(3)
-            .build()
-            .await
-            .unwrap();
+    async fn set_target_slots_no_op_when_equal() {
+        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
 
-        let new_count = pool.set_target_workers(3).await.unwrap();
+        let new_count = pool.set_target_slots(3).await.unwrap();
         assert_eq!(new_count, 3);
     }
 
     #[tokio::test]
     async fn fan_out_chains_submits_all_chains() {
-        let pool = Pool::builder(mock_claude())
-            .workers(2)
-            .build()
-            .await
-            .unwrap();
+        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
         let skills = crate::skill::SkillRegistry::new();
         let options = crate::chain::ChainOptions { tags: vec![] };

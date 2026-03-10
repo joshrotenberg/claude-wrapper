@@ -13,83 +13,83 @@ pub use claude_wrapper::types::{Effort, PermissionMode};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
-/// Unique identifier for a worker.
+/// Unique identifier for a slot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WorkerId(pub String);
+pub struct SlotId(pub String);
 
-// ── Worker types ─────────────────────────────────────────────────────
+// ── Slot types ─────────────────────────────────────────────────────
 
-/// Worker persistence mode.
+/// Slot persistence mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkerMode {
-    /// Persistent workers stay alive across tasks, resuming sessions.
+pub enum SlotMode {
+    /// Persistent slots stay alive across tasks, resuming sessions.
     #[default]
     Persistent,
-    /// Ephemeral workers are created per task and destroyed after.
+    /// Ephemeral slots are created per task and destroyed after.
     Ephemeral,
 }
 
-/// Configuration for dynamic worker pool scaling.
+/// Configuration for dynamic slot pool scaling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScalingConfig {
-    /// Minimum number of workers (default: 1).
-    pub min_workers: usize,
-    /// Maximum number of workers (default: 16).
-    pub max_workers: usize,
+    /// Minimum number of slots (default: 1).
+    pub min_slots: usize,
+    /// Maximum number of slots (default: 16).
+    pub max_slots: usize,
 }
 
 impl Default for ScalingConfig {
     fn default() -> Self {
         Self {
-            min_workers: 1,
-            max_workers: 16,
+            min_slots: 1,
+            max_slots: 16,
         }
     }
 }
 
-/// Configuration that applies to all workers by default.
+/// Configuration that applies to all slots by default.
 ///
-/// Individual workers can override any of these fields via [`WorkerConfig`].
+/// Individual slots can override any of these fields via [`SlotConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalWorkerConfig {
+pub struct PoolConfig {
     /// Claude model to use (e.g. "claude-haiku-4-5-20251001").
     pub model: Option<String>,
 
-    /// Permission mode for workers.
+    /// Permission mode for slots.
     pub permission_mode: Option<PermissionMode>,
 
     /// Maximum turns per task.
     pub max_turns: Option<u32>,
 
-    /// System prompt prepended to all worker tasks.
+    /// System prompt prepended to all slot tasks.
     pub system_prompt: Option<String>,
 
-    /// Allowed tools for workers.
+    /// Allowed tools for slots.
     pub allowed_tools: Vec<String>,
 
-    /// MCP servers available to workers.
+    /// MCP servers available to slots.
     pub mcp_servers: HashMap<String, serde_json::Value>,
 
-    /// Default effort level for workers (maps to `--effort`).
+    /// Default effort level for slots (maps to `--effort`).
     pub effort: Option<Effort>,
 
     /// Total budget cap for the pool in microdollars.
-    /// When cumulative spend across all workers reaches this limit,
+    /// When cumulative spend across all slots reaches this limit,
     /// new tasks are rejected with [`crate::Error::BudgetExhausted`].
     pub budget_microdollars: Option<u64>,
 
-    /// Default worker mode.
-    pub worker_mode: WorkerMode,
+    /// Default slot mode.
+    pub slot_mode: SlotMode,
 
-    /// Maximum number of restarts per worker before marking as errored.
+    /// Maximum number of restarts per slot before marking as errored.
     pub max_restarts: u32,
 
-    /// Enable git worktree isolation for workers.
+    /// Enable git worktree isolation for slots.
     pub worktree_isolation: bool,
 
-    /// Maximum time to wait for an idle worker before failing a task (in seconds).
-    pub worker_assignment_timeout_secs: u64,
+    /// Maximum time to wait for an idle slot before failing a task (in seconds).
+    pub slot_assignment_timeout_secs: u64,
 
     /// Dynamic scaling configuration (min/max bounds).
     pub scaling: ScalingConfig,
@@ -102,7 +102,7 @@ pub struct GlobalWorkerConfig {
     pub detect_permission_prompts: bool,
 }
 
-impl Default for GlobalWorkerConfig {
+impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             model: None,
@@ -113,10 +113,10 @@ impl Default for GlobalWorkerConfig {
             mcp_servers: HashMap::new(),
             effort: None,
             budget_microdollars: None,
-            worker_mode: WorkerMode::default(),
+            slot_mode: SlotMode::default(),
             max_restarts: 3,
             worktree_isolation: false,
-            worker_assignment_timeout_secs: 300,
+            slot_assignment_timeout_secs: 300,
             scaling: ScalingConfig::default(),
             unattended_mode: false,
             detect_permission_prompts: true,
@@ -124,22 +124,22 @@ impl Default for GlobalWorkerConfig {
     }
 }
 
-/// Per-worker configuration overrides.
+/// Per-slot configuration overrides.
 ///
 /// Any `Some` field here takes precedence over the corresponding field
-/// in [`GlobalWorkerConfig`].
+/// in [`PoolConfig`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkerConfig {
-    /// Override model for this worker.
+pub struct SlotConfig {
+    /// Override model for this slot.
     pub model: Option<String>,
 
-    /// Override permission mode for this worker.
+    /// Override permission mode for this slot.
     pub permission_mode: Option<PermissionMode>,
 
-    /// Override max turns for this worker.
+    /// Override max turns for this slot.
     pub max_turns: Option<u32>,
 
-    /// Override system prompt for this worker.
+    /// Override system prompt for this slot.
     pub system_prompt: Option<String>,
 
     /// Additional allowed tools (merged with global).
@@ -148,47 +148,47 @@ pub struct WorkerConfig {
     /// Additional MCP servers (merged with global).
     pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
 
-    /// Override effort level for this worker.
+    /// Override effort level for this slot.
     pub effort: Option<Effort>,
 
-    /// Optional name/role for this worker (e.g. "reviewer", "coder").
+    /// Optional name/role for this slot (e.g. "reviewer", "coder").
     pub role: Option<String>,
 
-    /// Optional human-readable name for the worker (e.g. "reviewer", "writer").
+    /// Optional human-readable name for the slot (e.g. "reviewer", "writer").
     pub name: Option<String>,
 
-    /// Optional description of the worker's purpose or responsibilities.
+    /// Optional description of the slot's purpose or responsibilities.
     pub description: Option<String>,
 
-    /// Override worker assignment timeout (in seconds).
-    pub worker_assignment_timeout_secs: Option<u64>,
+    /// Override slot assignment timeout (in seconds).
+    pub slot_assignment_timeout_secs: Option<u64>,
 }
 
-/// Current state of a worker.
+/// Current state of a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkerState {
-    /// Worker is ready to accept a task.
+pub enum SlotState {
+    /// Slot is ready to accept a task.
     Idle,
-    /// Worker is currently executing a task.
+    /// Slot is currently executing a task.
     Busy,
-    /// Worker process has exited or been stopped.
+    /// Slot process has exited or been stopped.
     Stopped,
-    /// Worker encountered an error and needs attention.
+    /// Slot encountered an error and needs attention.
     Errored,
 }
 
-/// Record of a worker in the pool.
+/// Record of a slot in the pool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerRecord {
-    /// Unique worker identifier.
-    pub id: WorkerId,
+pub struct SlotRecord {
+    /// Unique slot identifier.
+    pub id: SlotId,
 
     /// Current state.
-    pub state: WorkerState,
+    pub state: SlotState,
 
-    /// Per-worker config overrides.
-    pub config: WorkerConfig,
+    /// Per-slot config overrides.
+    pub config: SlotConfig,
 
     /// The task currently being executed, if any.
     pub current_task: Option<TaskId>,
@@ -196,13 +196,13 @@ pub struct WorkerRecord {
     /// Claude session ID for session resumption.
     pub session_id: Option<String>,
 
-    /// Number of tasks completed by this worker.
+    /// Number of tasks completed by this slot.
     pub tasks_completed: u64,
 
     /// Cumulative cost in microdollars.
     pub cost_microdollars: u64,
 
-    /// Number of times this worker has been restarted.
+    /// Number of times this slot has been restarted.
     pub restart_count: u32,
 
     /// Git worktree path, if worktree isolation is enabled.
@@ -215,9 +215,9 @@ pub struct WorkerRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
-    /// Task is waiting for a worker.
+    /// Task is waiting for a slot.
     Pending,
-    /// Task is being executed by a worker.
+    /// Task is being executed by a slot.
     Running,
     /// Task completed successfully.
     Completed,
@@ -239,8 +239,8 @@ pub struct TaskRecord {
     /// Current state.
     pub state: TaskState,
 
-    /// Worker assigned to this task.
-    pub worker_id: Option<WorkerId>,
+    /// Slot assigned to this task.
+    pub slot_id: Option<SlotId>,
 
     /// Task result, available when state is `Completed` or `Failed`.
     pub result: Option<TaskResult>,
@@ -248,8 +248,8 @@ pub struct TaskRecord {
     /// Optional tags for filtering and grouping.
     pub tags: Vec<String>,
 
-    /// Per-task config overrides (takes precedence over worker and global config).
-    pub config: Option<WorkerConfig>,
+    /// Per-task config overrides (takes precedence over slot and global config).
+    pub config: Option<SlotConfig>,
 }
 
 /// The result of a completed task.
@@ -277,8 +277,8 @@ pub struct TaskFilter {
     /// Filter by state.
     pub state: Option<TaskState>,
 
-    /// Filter by worker.
-    pub worker_id: Option<WorkerId>,
+    /// Filter by slot.
+    pub slot_id: Option<SlotId>,
 
     /// Filter by tags (any match).
     pub tags: Option<Vec<String>>,
