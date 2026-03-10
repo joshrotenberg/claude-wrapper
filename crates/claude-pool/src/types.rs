@@ -93,13 +93,6 @@ pub struct GlobalWorkerConfig {
 
     /// Dynamic scaling configuration (min/max bounds).
     pub scaling: ScalingConfig,
-
-    /// Enable unattended mode: use stricter permission defaults to prevent prompts.
-    /// When true, defaults to `DontAsk` permission mode if not explicitly set.
-    pub unattended_mode: bool,
-
-    /// If true, detect permission prompt patterns in stderr and provide actionable errors.
-    pub detect_permission_prompts: bool,
 }
 
 impl Default for GlobalWorkerConfig {
@@ -118,8 +111,6 @@ impl Default for GlobalWorkerConfig {
             worktree_isolation: false,
             worker_assignment_timeout_secs: 300,
             scaling: ScalingConfig::default(),
-            unattended_mode: false,
-            detect_permission_prompts: true,
         }
     }
 }
