@@ -11,9 +11,9 @@ pub enum Error {
     #[error("task not found: {0}")]
     TaskNotFound(String),
 
-    /// No idle workers are available to accept work.
-    #[error("no idle workers available")]
-    NoIdleWorkers,
+    /// No worker became available within the timeout period.
+    #[error("no worker available after waiting {timeout_secs}s")]
+    NoWorkerAvailable { timeout_secs: u64 },
 
     /// The pool has been shut down and is no longer accepting work.
     #[error("pool is shut down")]
