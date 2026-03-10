@@ -7,6 +7,7 @@ mod prompts;
 mod resources;
 mod tools;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -63,6 +64,14 @@ struct Cli {
     /// Disable built-in skills.
     #[arg(long)]
     no_builtins: bool,
+
+    /// Directory to load project-local skill definitions from.
+    #[arg(long, default_value = ".claude-pool/skills")]
+    skills_dir: PathBuf,
+
+    /// Skip loading project-local skills.
+    #[arg(long)]
+    no_project_skills: bool,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -122,11 +131,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("failed to build pool: {e}"))?;
 
-    let skills = if cli.no_builtins {
+    let mut skills = if cli.no_builtins {
         SkillRegistry::new()
     } else {
         SkillRegistry::with_builtins()
     };
+
+    if !cli.no_project_skills {
+        let count = skills.load_from_dir(&cli.skills_dir)?;
+        if count > 0 {
+            tracing::info!(count, dir = %cli.skills_dir.display(), "loaded project skills");
+        }
+    }
 
     let workflows = WorkflowRegistry::with_builtins();
 

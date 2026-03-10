@@ -52,6 +52,10 @@ pub enum Error {
         slot_id: String,
     },
 
+    /// Filesystem I/O error.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// An error from the store backend.
     #[error("store error: {0}")]
     Store(String),
