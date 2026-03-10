@@ -47,6 +47,10 @@ struct Cli {
     #[arg(short, long, default_value = "plan")]
     permission_mode: String,
 
+    /// Enable git worktree isolation for workers.
+    #[arg(short = 'w', long)]
+    worktree: bool,
+
     /// Disable built-in skills.
     #[arg(long)]
     no_builtins: bool,
@@ -92,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         budget_microdollars: cli.budget_usd.map(|b| (b * 1_000_000.0) as u64),
         system_prompt: cli.system_prompt,
         permission_mode: Some(parse_permission_mode(&cli.permission_mode)),
+        worktree_isolation: cli.worktree,
         ..Default::default()
     };
 
