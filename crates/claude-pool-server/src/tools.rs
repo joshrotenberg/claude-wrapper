@@ -62,6 +62,18 @@ pub struct ContextKeyInput {
     pub key: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureWorkerInput {
+    /// Worker ID to configure (e.g. "worker-0").
+    pub worker_id: String,
+    /// Human-readable name for the worker.
+    pub name: Option<String>,
+    /// Role classification for the worker.
+    pub role: Option<String>,
+    /// Description of the worker's purpose.
+    pub description: Option<String>,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -294,6 +306,57 @@ pub fn context_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+pub fn pool_configure_worker_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_configure_worker")
+        .title("Configure Worker")
+        .description("Set name/role/description for a worker to give it persistent identity")
+        .handler(move |input: ConfigureWorkerInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let worker_id = claude_pool::WorkerId(input.worker_id.clone());
+
+                match state.pool.store().get_worker(&worker_id).await {
+                    Ok(Some(mut worker)) => {
+                        // Update identity fields
+                        if let Some(name) = input.name {
+                            worker.config.name = Some(name);
+                        }
+                        if let Some(role) = input.role {
+                            worker.config.role = Some(role);
+                        }
+                        if let Some(description) = input.description {
+                            worker.config.description = Some(description);
+                        }
+
+                        // Persist updated worker
+                        match state.pool.store().put_worker(worker.clone()).await {
+                            Ok(_) => {
+                                let response = serde_json::json!({
+                                    "worker_id": worker_id.0,
+                                    "name": worker.config.name,
+                                    "role": worker.config.role,
+                                    "description": worker.config.description,
+                                });
+                                Ok(CallToolResult::json(response))
+                            }
+                            Err(e) => Ok(CallToolResult::error(format!(
+                                "failed to update worker: {e}"
+                            ))),
+                        }
+                    }
+                    Ok(None) => Ok(CallToolResult::error(format!(
+                        "worker not found: {}",
+                        input.worker_id
+                    ))),
+                    Err(e) => Ok(CallToolResult::error(format!(
+                        "failed to fetch worker: {e}"
+                    ))),
+                }
+            }
+        })
+        .build()
+}
+
 // ── Skill + chain tools ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -426,5 +489,6 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         context_get_tool(Arc::clone(state)),
         context_delete_tool(Arc::clone(state)),
         context_list_tool(Arc::clone(state)),
+        pool_configure_worker_tool(Arc::clone(state)),
     ]
 }

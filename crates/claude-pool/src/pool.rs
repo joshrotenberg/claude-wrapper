@@ -602,8 +602,8 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let resolved = ResolvedConfig::resolve(&self.inner.config, worker_config, task_cfg);
 
-        // Build the system prompt with context injection.
-        let system_prompt = self.build_system_prompt(&resolved);
+        // Build the system prompt with identity and context injection.
+        let system_prompt = self.build_system_prompt(&resolved, worker_config);
 
         // Build and execute the query.
         let mut cmd = claude_wrapper::QueryCommand::new(prompt)
@@ -669,15 +669,50 @@ impl<S: PoolStore + 'static> Pool<S> {
         })
     }
 
-    /// Build the system prompt by combining resolved config and context.
-    fn build_system_prompt(&self, resolved: &ResolvedConfig) -> Option<String> {
+    /// Build the system prompt by combining worker identity, resolved config and context.
+    fn build_system_prompt(
+        &self,
+        resolved: &ResolvedConfig,
+        worker_config: &WorkerConfig,
+    ) -> Option<String> {
         let context_entries: Vec<_> = self.list_context();
 
-        if resolved.system_prompt.is_none() && context_entries.is_empty() {
+        // Check if there's any content to include
+        let has_identity = worker_config.name.is_some()
+            || worker_config.role.is_some()
+            || worker_config.description.is_some();
+
+        if resolved.system_prompt.is_none() && context_entries.is_empty() && !has_identity {
             return None;
         }
 
         let mut parts = Vec::new();
+
+        // Inject worker identity
+        if has_identity {
+            let mut identity = String::new();
+            identity.push_str("You are ");
+
+            if let Some(ref name) = worker_config.name {
+                identity.push_str(name);
+            } else {
+                identity.push_str("a worker");
+            }
+
+            if let Some(ref role) = worker_config.role {
+                identity.push_str(", a ");
+                identity.push_str(role);
+            }
+
+            if let Some(ref description) = worker_config.description {
+                identity.push_str(". ");
+                identity.push_str(description);
+            } else if worker_config.role.is_some() {
+                identity.push('.');
+            }
+
+            parts.push(identity);
+        }
 
         if let Some(ref sp) = resolved.system_prompt {
             parts.push(sp.clone());
@@ -876,5 +911,30 @@ mod tests {
 
         let err = pool.run("hello").await.unwrap_err();
         assert!(matches!(err, Error::NoIdleWorkers));
+    }
+
+    #[tokio::test]
+    async fn worker_identity_fields_persisted() {
+        let pool = Pool::builder(mock_claude())
+            .workers(1)
+            .worker_config(WorkerConfig {
+                name: Some("reviewer".into()),
+                role: Some("code_review".into()),
+                description: Some("Reviews PRs for correctness and style".into()),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let workers = pool.store().list_workers().await.unwrap();
+        let worker = workers.iter().find(|w| w.id.0 == "worker-0").unwrap();
+
+        assert_eq!(worker.config.name.as_deref(), Some("reviewer"));
+        assert_eq!(worker.config.role.as_deref(), Some("code_review"));
+        assert_eq!(
+            worker.config.description.as_deref(),
+            Some("Reviews PRs for correctness and style")
+        );
     }
 }
