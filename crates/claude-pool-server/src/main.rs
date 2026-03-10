@@ -134,16 +134,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut router = McpRouter::new()
         .server_info("claude-pool", env!("CARGO_PKG_VERSION"))
         .instructions(
-            "Claude worker pool. Use pool_run to execute tasks synchronously, \
-             pool_submit/pool_result for async. pool_fan_out for parallel execution. \
-             pool_chain for synchronous sequential pipelines, pool_submit_chain/pool_chain_result \
-             for async chains with per-step progress tracking. context_set/get/list for shared state. \
-             pool_configure_worker to set worker identity. \
-             Skills are available as prompts (code_review, implement, write_tests, refactor, summarize). \
-             To run a worker or chain on a recurring schedule, use Claude Code's /loop command \
-             (e.g. `/loop 30m check pool status` or `/loop 1h submit a review chain for open PRs`). \
-             /loop fires prompts while the REPL is idle (session-only, not persistent across restarts). \
-             For unattended scheduling, use cron or systemd timers calling `claude -p` directly. \
+            "Execution modes: use inline for decisions and interactive work; pool_run for simple \
+             administrative tasks; pool_submit_chain for multi-step workflows (plan/code/review/PR) \
+             to keep conversations responsive; pool_fan_out for parallel tasks; Agent tool for \
+             research requiring MCP tools (GitHub, crates.io). Pool workers have CLI tools (git, \
+             cargo, gh) but not MCP access. Default to inline when uncertain; user can say \
+             \"workerize it.\" \
+             \
+             Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
+             pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
+             with per-step progress), context_set/get/list (shared state), pool_configure_worker. \
+             \
+             Skills available as prompts: code_review, implement, write_tests, refactor, summarize. \
+             \
+             Scheduling: use Claude Code's /loop to run tasks on a recurring interval \
+             (e.g. `/loop 30m check pool status`). /loop fires while idle (session-only). For \
+             unattended scheduling, use cron or systemd timers calling `claude -p` directly. \
              The pool server is stateless and reactive; scheduling is handled by the client.",
         )
         .tools(tool_list)
