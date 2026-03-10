@@ -10,13 +10,16 @@ mod tools;
 use std::sync::Arc;
 
 use clap::Parser;
-use claude_pool::{GlobalWorkerConfig, InMemoryStore, Pool, PoolStore, SkillRegistry};
+use claude_pool::{
+    GlobalWorkerConfig, InMemoryStore, Pool, PoolStore, SkillRegistry, WorkflowRegistry,
+};
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Shared state accessible by all tool/resource handlers.
 pub struct State<S: PoolStore> {
     pub pool: Pool<S>,
     pub skills: SkillRegistry,
+    pub workflows: WorkflowRegistry,
 }
 
 /// MCP server for managing a pool of Claude CLI workers.
@@ -115,7 +118,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SkillRegistry::with_builtins()
     };
 
-    let state = Arc::new(State { pool, skills });
+    let workflows = WorkflowRegistry::with_builtins();
+
+    let state = Arc::new(State {
+        pool,
+        skills,
+        workflows,
+    });
 
     let tool_list = tools::all_tools(&state);
     let resource_list = resources::all_resources(&state);

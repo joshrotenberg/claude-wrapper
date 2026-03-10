@@ -30,6 +30,24 @@ pub enum WorkerMode {
     Ephemeral,
 }
 
+/// Configuration for dynamic worker pool scaling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScalingConfig {
+    /// Minimum number of workers (default: 1).
+    pub min_workers: usize,
+    /// Maximum number of workers (default: 16).
+    pub max_workers: usize,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            min_workers: 1,
+            max_workers: 16,
+        }
+    }
+}
+
 /// Configuration that applies to all workers by default.
 ///
 /// Individual workers can override any of these fields via [`WorkerConfig`].
@@ -72,6 +90,9 @@ pub struct GlobalWorkerConfig {
 
     /// Maximum time to wait for an idle worker before failing a task (in seconds).
     pub worker_assignment_timeout_secs: u64,
+
+    /// Dynamic scaling configuration (min/max bounds).
+    pub scaling: ScalingConfig,
 }
 
 impl Default for GlobalWorkerConfig {
@@ -89,6 +110,7 @@ impl Default for GlobalWorkerConfig {
             max_restarts: 3,
             worktree_isolation: false,
             worker_assignment_timeout_secs: 300,
+            scaling: ScalingConfig::default(),
         }
     }
 }
