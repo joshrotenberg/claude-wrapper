@@ -393,7 +393,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// Submit a chain for async execution, returning a task ID immediately.
     ///
     /// Use [`Pool::chain_progress`] to check per-step progress, or
-    /// [`Pool::result`] to get the final [`ChainResult`] (serialized as JSON)
+    /// [`Pool::result`] to get the final [`crate::ChainResult`] (serialized as JSON)
     /// once complete.
     pub async fn submit_chain(
         &self,
