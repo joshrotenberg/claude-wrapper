@@ -11,6 +11,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::SlotConfig;
 
+/// How a skill was registered in the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSource {
+    /// Ships with the pool binary.
+    Builtin,
+    /// Loaded from a `.claude-pool/skills/` JSON file.
+    Project,
+    /// Added at runtime via `pool_skill_add`.
+    Runtime,
+}
+
+impl std::fmt::Display for SkillSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builtin => write!(f, "builtin"),
+            Self::Project => write!(f, "project"),
+            Self::Runtime => write!(f, "runtime"),
+        }
+    }
+}
+
+/// A skill paired with its registration source.
+#[derive(Debug, Clone)]
+pub struct RegisteredSkill {
+    /// The skill definition.
+    pub skill: Skill,
+    /// How this skill was registered.
+    pub source: SkillSource,
+}
+
 /// Where a skill is intended to run.
 ///
 /// Advisory only — the pool does not enforce scope. Coordinators and agents
@@ -104,7 +135,7 @@ impl Skill {
 /// Registry of available skills.
 #[derive(Debug, Clone, Default)]
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    skills: HashMap<String, RegisteredSkill>,
 }
 
 impl SkillRegistry {
@@ -117,29 +148,40 @@ impl SkillRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         for skill in builtin_skills() {
-            registry.register(skill);
+            registry.register(skill, SkillSource::Builtin);
         }
         registry
     }
 
-    /// Register a skill.
-    pub fn register(&mut self, skill: Skill) {
-        self.skills.insert(skill.name.clone(), skill);
+    /// Register a skill with a given source.
+    pub fn register(&mut self, skill: Skill, source: SkillSource) {
+        self.skills
+            .insert(skill.name.clone(), RegisteredSkill { skill, source });
     }
 
     /// Look up a skill by name.
     pub fn get(&self, name: &str) -> Option<&Skill> {
+        self.skills.get(name).map(|rs| &rs.skill)
+    }
+
+    /// Look up a registered skill (with source metadata) by name.
+    pub fn get_registered(&self, name: &str) -> Option<&RegisteredSkill> {
         self.skills.get(name)
     }
 
     /// List all registered skills.
     pub fn list(&self) -> Vec<&Skill> {
+        self.skills.values().map(|rs| &rs.skill).collect()
+    }
+
+    /// List all registered skills with source metadata.
+    pub fn list_registered(&self) -> Vec<&RegisteredSkill> {
         self.skills.values().collect()
     }
 
-    /// Remove a skill by name.
+    /// Remove a skill by name. Returns the removed skill if found.
     pub fn remove(&mut self, name: &str) -> Option<Skill> {
-        self.skills.remove(name)
+        self.skills.remove(name).map(|rs| rs.skill)
     }
 
     /// Remove multiple skills by name.
@@ -151,14 +193,19 @@ impl SkillRegistry {
 
     /// List skills filtered by scope.
     pub fn list_by_scope(&self, scope: SkillScope) -> Vec<&Skill> {
-        self.skills.values().filter(|s| s.scope == scope).collect()
+        self.skills
+            .values()
+            .filter(|rs| rs.skill.scope == scope)
+            .map(|rs| &rs.skill)
+            .collect()
     }
 
     /// Load skill definitions from JSON files in a directory.
     ///
     /// Each `.json` file in the directory is deserialized as a [`Skill`] and
-    /// registered. Skills loaded this way override any existing skill with the
-    /// same name. Files are loaded in sorted order for deterministic behavior.
+    /// registered with [`SkillSource::Project`]. Skills loaded this way
+    /// override any existing skill with the same name. Files are loaded in
+    /// sorted order for deterministic behavior.
     ///
     /// Returns the number of skills loaded. If the directory does not exist,
     /// returns `Ok(0)` without error.
@@ -177,7 +224,7 @@ impl SkillRegistry {
         for entry in entries {
             let contents = std::fs::read_to_string(entry.path())?;
             let skill: Skill = serde_json::from_str(&contents)?;
-            self.register(skill);
+            self.register(skill, SkillSource::Project);
             count += 1;
         }
 
@@ -504,14 +551,17 @@ mod tests {
         let mut registry = SkillRegistry::new();
         assert!(registry.list().is_empty());
 
-        registry.register(Skill {
-            name: "test".into(),
-            description: "A test skill".into(),
-            prompt: "do {thing}".into(),
-            arguments: vec![],
-            config: None,
-            scope: SkillScope::Task,
-        });
+        registry.register(
+            Skill {
+                name: "test".into(),
+                description: "A test skill".into(),
+                prompt: "do {thing}".into(),
+                arguments: vec![],
+                config: None,
+                scope: SkillScope::Task,
+            },
+            SkillSource::Runtime,
+        );
 
         assert_eq!(registry.list().len(), 1);
         assert!(registry.get("test").is_some());
@@ -648,5 +698,89 @@ mod tests {
 
         let serialized = serde_json::to_value(scope).unwrap();
         assert_eq!(serialized, "coordinator");
+    }
+
+    #[test]
+    fn source_tracking() {
+        let registry = SkillRegistry::with_builtins();
+        let rs = registry.get_registered("code_review").unwrap();
+        assert_eq!(rs.source, SkillSource::Builtin);
+    }
+
+    #[test]
+    fn list_registered_includes_source() {
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            Skill {
+                name: "a".into(),
+                description: "A".into(),
+                prompt: "do a".into(),
+                arguments: vec![],
+                config: None,
+                scope: SkillScope::Task,
+            },
+            SkillSource::Builtin,
+        );
+        registry.register(
+            Skill {
+                name: "b".into(),
+                description: "B".into(),
+                prompt: "do b".into(),
+                arguments: vec![],
+                config: None,
+                scope: SkillScope::Task,
+            },
+            SkillSource::Runtime,
+        );
+
+        let all = registry.list_registered();
+        assert_eq!(all.len(), 2);
+
+        let builtin = registry.get_registered("a").unwrap();
+        assert_eq!(builtin.source, SkillSource::Builtin);
+
+        let runtime = registry.get_registered("b").unwrap();
+        assert_eq!(runtime.source, SkillSource::Runtime);
+    }
+
+    #[test]
+    fn project_skills_have_project_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_json = serde_json::json!({
+            "name": "proj_skill",
+            "description": "Project skill",
+            "prompt": "do {thing}",
+            "arguments": [
+                { "name": "thing", "description": "What", "required": true }
+            ]
+        });
+        std::fs::write(
+            dir.path().join("proj_skill.json"),
+            serde_json::to_string_pretty(&skill_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        registry.load_from_dir(dir.path()).unwrap();
+
+        let rs = registry.get_registered("proj_skill").unwrap();
+        assert_eq!(rs.source, SkillSource::Project);
+    }
+
+    #[test]
+    fn source_serde_roundtrip() {
+        let json = serde_json::json!("runtime");
+        let source: SkillSource = serde_json::from_value(json).unwrap();
+        assert_eq!(source, SkillSource::Runtime);
+
+        let serialized = serde_json::to_value(source).unwrap();
+        assert_eq!(serialized, "runtime");
+    }
+
+    #[test]
+    fn source_display() {
+        assert_eq!(SkillSource::Builtin.to_string(), "builtin");
+        assert_eq!(SkillSource::Project.to_string(), "project");
+        assert_eq!(SkillSource::Runtime.to_string(), "runtime");
     }
 }
