@@ -64,10 +64,10 @@ async fn run_supervised(
             .max_turns(20)
             .no_session_persistence();
 
-        if config.resume_session {
-            if let Some(ref session_id) = state.last_session_id {
-                cmd = cmd.resume(session_id);
-            }
+        if config.resume_session
+            && let Some(ref session_id) = state.last_session_id
+        {
+            cmd = cmd.resume(session_id);
         }
 
         println!(

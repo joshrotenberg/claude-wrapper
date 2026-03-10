@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude-pool": {
+      "command": "/Users/joshrotenberg/Code/active/claude-wrapper/target/debug/claude-pool-server",
+      "args": ["-n", "2", "--model", "claude-haiku-4-5-20251001", "--permission-mode", "auto"],
+      "env": {
+        "RUST_LOG": "claude_pool=debug,claude_pool_server=debug"
+      }
+    }
+  }
+}

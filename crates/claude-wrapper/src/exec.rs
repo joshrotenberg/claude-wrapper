@@ -106,8 +106,12 @@ async fn run_internal(
     let mut cmd = Command::new(binary);
     cmd.args(args);
 
-    // Remove CLAUDECODE env var to prevent nested session detection
+    // Prevent child from inheriting/blocking on parent's stdin.
+    cmd.stdin(std::process::Stdio::null());
+
+    // Remove Claude Code env vars to prevent nested session detection
     cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);

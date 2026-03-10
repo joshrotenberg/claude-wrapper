@@ -1,35 +1,30 @@
-[package]
-name = "claude-wrapper"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = [
+    "crates/claude-wrapper",
+    "crates/claude-pool",
+    "crates/claude-pool-server",
+]
+
+[workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.90.0"
 authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
-description = "A type-safe Claude Code CLI wrapper for Rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/claude-wrapper"
-documentation = "https://docs.rs/claude-wrapper"
-keywords = ["claude", "cli", "wrapper", "ai", "mcp"]
-categories = ["development-tools", "api-bindings"]
 
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
-[features]
-default = ["json", "tempfile"]
-json = ["serde_json"]
-tempfile = ["dep:tempfile"]
-
-[dependencies]
+[workspace.dependencies]
+claude-wrapper = { path = "crates/claude-wrapper" }
+claude-pool = { path = "crates/claude-pool" }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", optional = true }
-thiserror = "2"
-tokio = { version = "1", features = ["process", "time", "io-util"] }
-tracing = "0.1"
-tempfile = { version = "3", optional = true }
-which = "8"
-
-[dev-dependencies]
 serde_json = "1"
-tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+anyhow = "1"
+async-trait = "0.1"
+dashmap = "6"
+tower-mcp = "0.8"
+schemars = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
