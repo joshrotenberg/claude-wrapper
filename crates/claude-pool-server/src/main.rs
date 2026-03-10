@@ -48,6 +48,14 @@ struct Cli {
     #[arg(short, long, default_value = "plan")]
     permission_mode: String,
 
+    /// Minimum number of slots (floor for scale-down). Default: 1.
+    #[arg(long, default_value = "1")]
+    min_slots: usize,
+
+    /// Maximum number of slots (ceiling for scale-up). Default: 16.
+    #[arg(long, default_value = "16")]
+    max_slots: usize,
+
     /// Enable git worktree isolation for slots.
     #[arg(short = 'w', long)]
     worktree: bool,
@@ -98,6 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: cli.system_prompt,
         permission_mode: Some(parse_permission_mode(&cli.permission_mode)),
         worktree_isolation: cli.worktree,
+        scaling: claude_pool::ScalingConfig {
+            min_slots: cli.min_slots,
+            max_slots: cli.max_slots,
+        },
         ..Default::default()
     };
 

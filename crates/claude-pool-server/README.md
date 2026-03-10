@@ -101,6 +101,13 @@ After reloading, run a quick smoke test from your Claude session:
 |------|------|-------------|
 | `--budget-usd` | `AMOUNT` | Total budget cap in USD (e.g. 10.0) |
 
+### Scaling Bounds
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--min-slots` | `NUMBER` | 1 | Minimum slots (floor for `pool_scale_down`) |
+| `--max-slots` | `NUMBER` | 16 | Maximum slots (ceiling for `pool_scale_up`) |
+
 ### Advanced Options
 
 | Flag | Type | Description |
@@ -365,6 +372,53 @@ Returns: {
   total_spend: 3.45
 }
 ```
+
+### Dynamic Scaling
+
+Grow or shrink the pool at runtime. Bounded by `--min-slots` and `--max-slots`.
+
+#### pool_scale_up
+
+Add slots to the pool:
+
+```
+@mcp pool_scale_up count: 2
+
+Returns: { success: true, new_slot_count: 6, details: "Scaled up by 2 slots" }
+```
+
+Parameters:
+- `count` (number, required) - Number of slots to add
+
+Fails if the new total would exceed `--max-slots`.
+
+#### pool_scale_down
+
+Remove slots from the pool (idle slots first):
+
+```
+@mcp pool_scale_down count: 2
+
+Returns: { success: true, new_slot_count: 2, details: "Scaled down by 2 slots" }
+```
+
+Parameters:
+- `count` (number, required) - Number of slots to remove
+
+Busy slots are given 30 seconds to finish before removal. Fails if the new total would drop below `--min-slots`.
+
+#### pool_set_target_slots
+
+Set the pool to an exact size, scaling up or down as needed:
+
+```
+@mcp pool_set_target_slots target: 8
+
+Returns: { success: true, new_slot_count: 8, target: 8 }
+```
+
+Parameters:
+- `target` (number, required) - Desired number of slots
 
 ### Skills
 
