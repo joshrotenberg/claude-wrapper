@@ -130,7 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              pool_chain for synchronous sequential pipelines, pool_submit_chain/pool_chain_result \
              for async chains with per-step progress tracking. context_set/get/list for shared state. \
              pool_configure_worker to set worker identity. \
-             Skills are available as prompts (code_review, implement, write_tests, refactor, summarize).",
+             Skills are available as prompts (code_review, implement, write_tests, refactor, summarize). \
+             To run a worker or chain on a recurring schedule, use Claude Code's /loop command \
+             (e.g. `/loop 30m pool_submit_chain ...`). The pool server is stateless and reactive; \
+             scheduling is handled by the client.",
         )
         .tools(tool_list)
         .resources(resource_list)
