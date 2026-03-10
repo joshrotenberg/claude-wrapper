@@ -179,6 +179,24 @@ pub fn builtin_skills() -> Vec<Skill> {
             }],
             config: None,
         },
+        Skill {
+            name: "pre_push".into(),
+            description: "Run all checks required before pushing: format, lint, tests, docs."
+                .into(),
+            prompt: "Run the following checks in order. Stop and fix any failures before \
+                     proceeding to the next step. Report the result of each step.\n\n\
+                     1. `cargo fmt --all -- --check` (formatting)\n\
+                     2. `cargo clippy --all-targets --all-features -- -D warnings` (lint)\n\
+                     3. `cargo test --lib --all-features` (unit tests)\n\
+                     4. `cargo test --test '*' --all-features` (integration tests)\n\
+                     5. `cargo doc --no-deps --all-features` (docs build)\n\
+                     6. `cargo test --doc --all-features` (doc tests)\n\n\
+                     If all checks pass, report success. If any fail, fix the issue and re-run \
+                     that step before continuing. Summarize what was fixed, if anything."
+                .into(),
+            arguments: vec![],
+            config: None,
+        },
     ]
 }
 
@@ -257,11 +275,12 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        assert_eq!(registry.list().len(), 5);
+        assert_eq!(registry.list().len(), 6);
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
         assert!(registry.get("write_tests").is_some());
         assert!(registry.get("refactor").is_some());
         assert!(registry.get("summarize").is_some());
+        assert!(registry.get("pre_push").is_some());
     }
 }
