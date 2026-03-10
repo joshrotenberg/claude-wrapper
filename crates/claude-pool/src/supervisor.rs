@@ -2,8 +2,8 @@
 //!
 //! The supervisor periodically checks slot health and automatically restarts
 //! errored slots that haven't exceeded their restart limit. Enable it via
-//! [`PoolConfig::supervisor_enabled`] and configure the interval with
-//! [`PoolConfig::supervisor_interval_secs`].
+//! [`crate::PoolConfig::supervisor_enabled`] and configure the interval with
+//! [`crate::PoolConfig::supervisor_interval_secs`].
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -15,7 +15,7 @@ use crate::types::{SlotRecord, SlotState};
 /// Handle to a running supervisor loop.
 ///
 /// Returned by [`Pool::start_supervisor`]. Dropping the handle does **not**
-/// stop the loop — call [`Pool::stop_supervisor`] or [`SupervisorHandle::stop`]
+/// stop the loop — call [`SupervisorHandle::stop`]
 /// explicitly.
 pub struct SupervisorHandle {
     stop_tx: watch::Sender<bool>,
