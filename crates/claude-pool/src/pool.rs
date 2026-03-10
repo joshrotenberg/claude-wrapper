@@ -975,7 +975,16 @@ impl<S: PoolStore + 'static> Pool<S> {
             "executing task"
         );
 
-        let query_result = cmd.execute_json(&claude_instance).await?;
+        let query_result = match cmd.execute_json(&claude_instance).await {
+            Ok(r) => r,
+            Err(e) if self.inner.config.detect_permission_prompts => {
+                if let Some(detected) = detect_permission_prompt(&e, &slot_id.0) {
+                    return Err(detected);
+                }
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let cost_microdollars = query_result
             .cost_usd
@@ -1091,6 +1100,75 @@ fn new_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{nanos:x}")
+}
+
+// ── Permission prompt detection ─────────────────────────────────────
+
+/// Patterns in stderr that indicate the CLI is waiting for permission/tool approval.
+const PERMISSION_PATTERNS: &[&str] = &[
+    "Allow",
+    "allow this action",
+    "approve",
+    "permission",
+    "Do you want to",
+    "tool requires approval",
+    "wants to use",
+    "Press Enter",
+    "y/n",
+    "Y/n",
+    "(yes/no)",
+];
+
+/// Inspect a claude-wrapper error for signs of a permission prompt.
+///
+/// Returns `Some(Error::PermissionPromptDetected)` if the stderr in a
+/// `CommandFailed` error contains permission prompt patterns.
+fn detect_permission_prompt(err: &claude_wrapper::Error, slot_id: &str) -> Option<Error> {
+    let stderr = match err {
+        claude_wrapper::Error::CommandFailed { stderr, .. } => stderr,
+        _ => return None,
+    };
+
+    if stderr.is_empty() {
+        return None;
+    }
+
+    for pattern in PERMISSION_PATTERNS {
+        if stderr.contains(pattern) {
+            let tool_name = extract_tool_name(stderr);
+            tracing::warn!(
+                slot_id,
+                tool = %tool_name,
+                "permission prompt detected in slot stderr"
+            );
+            return Some(Error::PermissionPromptDetected {
+                tool_name,
+                stderr: stderr.clone(),
+                slot_id: slot_id.to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+/// Best-effort extraction of the tool name from stderr text.
+fn extract_tool_name(stderr: &str) -> String {
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Allow ")
+            && let Some(tool) = rest.split_whitespace().next()
+        {
+            return tool.trim_end_matches('?').to_string();
+        }
+        if let Some(idx) = trimmed.find("wants to use ") {
+            let after = &trimmed[idx + "wants to use ".len()..];
+            if let Some(tool) = after.split_whitespace().next() {
+                return tool.trim_end_matches(['.', '?', ',']).to_string();
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 #[cfg(test)]
@@ -1431,5 +1509,95 @@ mod tests {
             let task = pool.store().get_task(task_id).await.unwrap();
             assert!(task.is_some());
         }
+    }
+
+    // ── Permission prompt detection tests ────────────────────────────
+
+    #[test]
+    fn detect_allow_bash_in_stderr() {
+        let err = claude_wrapper::Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Allow Bash tool? (y/n)".into(),
+        };
+        let result = detect_permission_prompt(&err, "slot-1");
+        assert!(result.is_some());
+        let err = result.unwrap();
+        match err {
+            Error::PermissionPromptDetected {
+                tool_name, slot_id, ..
+            } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(slot_id, "slot-1");
+            }
+            other => panic!("expected PermissionPromptDetected, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn detect_wants_to_use_pattern() {
+        let err = claude_wrapper::Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Claude wants to use Edit tool.".into(),
+        };
+        let result = detect_permission_prompt(&err, "slot-2");
+        assert!(result.is_some());
+        match result.unwrap() {
+            Error::PermissionPromptDetected { tool_name, .. } => {
+                assert_eq!(tool_name, "Edit");
+            }
+            other => panic!("expected PermissionPromptDetected, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn no_detection_on_clean_stderr() {
+        let err = claude_wrapper::Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "some unrelated error output".into(),
+        };
+        assert!(detect_permission_prompt(&err, "slot-1").is_none());
+    }
+
+    #[test]
+    fn no_detection_on_empty_stderr() {
+        let err = claude_wrapper::Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        assert!(detect_permission_prompt(&err, "slot-1").is_none());
+    }
+
+    #[test]
+    fn no_detection_on_timeout() {
+        let err = claude_wrapper::Error::Timeout {
+            timeout_seconds: 30,
+        };
+        assert!(detect_permission_prompt(&err, "slot-1").is_none());
+    }
+
+    #[test]
+    fn extract_tool_name_unknown_fallback() {
+        assert_eq!(extract_tool_name("some random text"), "unknown");
+    }
+
+    #[test]
+    fn extract_tool_name_allow_prefix() {
+        assert_eq!(extract_tool_name("Allow Write tool?"), "Write");
+    }
+
+    #[test]
+    fn extract_tool_name_wants_to_use() {
+        assert_eq!(
+            extract_tool_name("Claude wants to use Bash, proceed?"),
+            "Bash"
+        );
     }
 }

@@ -36,6 +36,22 @@ pub enum Error {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// The Claude CLI appears to have stalled on a permission prompt.
+    ///
+    /// This occurs when the CLI requests tool approval and no human is present
+    /// to respond. The slot blocks on stdin until it times out or is killed.
+    #[error(
+        "permission prompt detected: {tool_name}. Add it to allowed_tools or use a broader permission mode"
+    )]
+    PermissionPromptDetected {
+        /// The tool or permission that was requested (best-effort extraction).
+        tool_name: String,
+        /// The raw stderr that triggered detection.
+        stderr: String,
+        /// The slot that was blocked.
+        slot_id: String,
+    },
+
     /// An error from the store backend.
     #[error("store error: {0}")]
     Store(String),
