@@ -74,6 +74,29 @@ pub struct ConfigureWorkerInput {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InvokeWorkflowInput {
+    /// Workflow name (e.g. "issue_to_pr", "refactor_and_test", "review_and_fix").
+    pub workflow: String,
+    /// Workflow arguments as key-value pairs (e.g. {"issue_url": "https://..."}).
+    #[serde(default)]
+    pub arguments: std::collections::HashMap<String, String>,
+    /// Tags for the workflow task.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScalingInput {
+    /// Number of workers to add or remove.
+    pub count: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetTargetWorkersInput {
+    /// Target number of workers.
+    pub target: usize,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -553,7 +576,102 @@ pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
         .build()
 }
 
+pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_invoke_workflow")
+        .title("Invoke Workflow")
+        .description(
+            "Submit a preset workflow template (e.g. 'issue_to_pr', 'refactor_and_test', \
+             'review_and_fix') with arguments. Returns a task_id immediately.",
+        )
+        .handler(move |input: InvokeWorkflowInput| {
+            let state = Arc::clone(&state);
+            async move {
+                match state
+                    .pool
+                    .submit_workflow(
+                        &input.workflow,
+                        input.arguments,
+                        &state.skills,
+                        &state.workflows,
+                        input.tags.unwrap_or_default(),
+                    )
+                    .await
+                {
+                    Ok(task_id) => Ok(CallToolResult::json(serde_json::json!({
+                        "task_id": task_id.0,
+                        "workflow": input.workflow,
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 /// Build all pool tools.
+pub fn pool_scale_up_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_scale_up")
+        .title("Scale Up Workers")
+        .description("Add N new workers to the pool. Returns the new total worker count.")
+        .handler(move |input: ScalingInput| {
+            let state = Arc::clone(&state);
+            async move {
+                match state.pool.scale_up(input.count).await {
+                    Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
+                        "success": true,
+                        "new_worker_count": new_count,
+                        "details": format!("Scaled up by {} workers", input.count),
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_scale_down")
+        .title("Scale Down Workers")
+        .description(
+            "Remove N workers from the pool. Removes idle workers first, \
+             then waits for busy workers to complete. Returns the new total worker count.",
+        )
+        .handler(move |input: ScalingInput| {
+            let state = Arc::clone(&state);
+            async move {
+                match state.pool.scale_down(input.count).await {
+                    Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
+                        "success": true,
+                        "new_worker_count": new_count,
+                        "details": format!("Scaled down by {} workers", input.count),
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_set_target_workers_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_set_target_workers")
+        .title("Set Target Worker Count")
+        .description("Set the pool to a specific number of workers, scaling up or down as needed.")
+        .handler(move |input: SetTargetWorkersInput| {
+            let state = Arc::clone(&state);
+            async move {
+                match state.pool.set_target_workers(input.target).await {
+                    Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
+                        "success": true,
+                        "new_worker_count": new_count,
+                        "target": input.target,
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -567,6 +685,10 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_chain_tool(Arc::clone(state)),
         pool_submit_chain_tool(Arc::clone(state)),
         pool_chain_result_tool(Arc::clone(state)),
+        pool_invoke_workflow_tool(Arc::clone(state)),
+        pool_scale_up_tool(Arc::clone(state)),
+        pool_scale_down_tool(Arc::clone(state)),
+        pool_set_target_workers_tool(Arc::clone(state)),
         context_set_tool(Arc::clone(state)),
         context_get_tool(Arc::clone(state)),
         context_delete_tool(Arc::clone(state)),

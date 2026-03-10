@@ -16,7 +16,6 @@ name = "claude-pool-server"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true }
 claude-wrapper = { workspace = true }
 claude-pool = { workspace = true }
 clap = { workspace = true }

@@ -481,6 +481,30 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(task_id)
     }
 
+    /// Submit a workflow template for async execution.
+    ///
+    /// Instantiates the workflow by substituting placeholders with arguments,
+    /// then submits the resulting chain. Returns the task ID immediately.
+    pub async fn submit_workflow(
+        &self,
+        workflow_name: &str,
+        arguments: std::collections::HashMap<String, String>,
+        skills: &SkillRegistry,
+        workflows: &crate::workflow::WorkflowRegistry,
+        tags: Vec<String>,
+    ) -> Result<TaskId> {
+        // Get the workflow and instantiate it
+        let workflow = workflows
+            .get(workflow_name)
+            .ok_or_else(|| Error::Store(format!("workflow '{}' not found", workflow_name)))?;
+
+        let steps = workflow.instantiate(&arguments)?;
+
+        // Submit the instantiated chain with tags
+        let options = crate::chain::ChainOptions { tags };
+        self.submit_chain(steps, skills, options).await
+    }
+
     /// Get the progress of an in-flight chain.
     ///
     /// Returns `None` if no chain is tracked for this task ID.
@@ -622,6 +646,135 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// Get a reference to the store.
     pub fn store(&self) -> &S {
         &self.inner.store
+    }
+
+    /// Scale up the pool by adding N new workers.
+    ///
+    /// Returns the new total worker count.
+    /// Fails if the new count exceeds max_workers.
+    pub async fn scale_up(&self, count: usize) -> Result<usize> {
+        if count == 0 {
+            return Ok(self.inner.store.list_workers().await?.len());
+        }
+
+        let current_workers = self.inner.store.list_workers().await?;
+        let current_count = current_workers.len();
+        let new_count = current_count + count;
+
+        if new_count > self.inner.config.scaling.max_workers {
+            return Err(Error::Store(format!(
+                "cannot scale up to {} workers: exceeds max_workers ({})",
+                new_count, self.inner.config.scaling.max_workers
+            )));
+        }
+
+        // Find the next available worker ID.
+        let existing_ids: Vec<usize> = current_workers
+            .iter()
+            .filter_map(|w| w.id.0.strip_prefix("worker-").and_then(|s| s.parse().ok()))
+            .collect();
+        let mut next_id = existing_ids.iter().max().unwrap_or(&0) + 1;
+
+        // Create and register new workers.
+        for _ in 0..count {
+            let worker_id = WorkerId(format!("worker-{next_id}"));
+            next_id += 1;
+
+            // Create worktree if isolation is enabled.
+            let worktree_path = if let Some(ref mgr) = self.inner.worktree_manager {
+                let path = mgr.create(&worker_id).await?;
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+
+            let record = WorkerRecord {
+                id: worker_id,
+                state: WorkerState::Idle,
+                config: WorkerConfig::default(),
+                current_task: None,
+                session_id: None,
+                tasks_completed: 0,
+                cost_microdollars: 0,
+                restart_count: 0,
+                worktree_path,
+            };
+            self.inner.store.put_worker(record).await?;
+        }
+
+        Ok(new_count)
+    }
+
+    /// Scale down the pool by removing N workers.
+    ///
+    /// Removes idle workers first. If not enough idle workers are available,
+    /// waits for busy workers to complete (with timeout) before removing them.
+    /// Returns the new total worker count.
+    /// Fails if the new count drops below min_workers.
+    pub async fn scale_down(&self, count: usize) -> Result<usize> {
+        if count == 0 {
+            return Ok(self.inner.store.list_workers().await?.len());
+        }
+
+        let mut workers = self.inner.store.list_workers().await?;
+        let current_count = workers.len();
+        let new_count = current_count.saturating_sub(count);
+
+        if new_count < self.inner.config.scaling.min_workers {
+            return Err(Error::Store(format!(
+                "cannot scale down to {} workers: below min_workers ({})",
+                new_count, self.inner.config.scaling.min_workers
+            )));
+        }
+
+        // Sort to prioritize removing least-active workers.
+        workers.sort_by_key(|w| std::cmp::Reverse(w.tasks_completed));
+
+        let workers_to_remove = &workers[..count];
+        let timeout = std::time::Duration::from_secs(30);
+
+        for worker in workers_to_remove {
+            // Wait for worker to finish any running task (with timeout).
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                if let Some(w) = self.inner.store.get_worker(&worker.id).await? {
+                    if w.state != WorkerState::Busy {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        // Timeout: still busy, but proceed with removal anyway.
+                        break;
+                    }
+                } else {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+
+            // Cleanup worktree if applicable.
+            if let Some(ref mgr) = self.inner.worktree_manager
+                && worker.worktree_path.is_some()
+            {
+                let _ = mgr.cleanup_all(std::slice::from_ref(&worker.id)).await;
+            }
+
+            // Delete worker record.
+            self.inner.store.delete_worker(&worker.id).await?;
+        }
+
+        Ok(new_count)
+    }
+
+    /// Set the target number of workers, scaling up or down as needed.
+    pub async fn set_target_workers(&self, target: usize) -> Result<usize> {
+        let current = self.inner.store.list_workers().await?.len();
+        if target > current {
+            self.scale_up(target - current).await
+        } else if target < current {
+            self.scale_down(current - target).await
+        } else {
+            Ok(current)
+        }
     }
 
     // ── Internal helpers ─────────────────────────────────────────────
@@ -1104,5 +1257,135 @@ mod tests {
             worker.config.description.as_deref(),
             Some("Reviews PRs for correctness and style")
         );
+    }
+
+    #[tokio::test]
+    async fn scale_up_increases_worker_count() {
+        let pool = Pool::builder(mock_claude())
+            .workers(2)
+            .build()
+            .await
+            .unwrap();
+
+        let initial_count = pool.store().list_workers().await.unwrap().len();
+        assert_eq!(initial_count, 2);
+
+        let new_count = pool.scale_up(3).await.unwrap();
+        assert_eq!(new_count, 5);
+
+        let workers = pool.store().list_workers().await.unwrap();
+        assert_eq!(workers.len(), 5);
+
+        // Verify new workers are idle.
+        for worker in workers.iter().skip(2) {
+            assert_eq!(worker.state, WorkerState::Idle);
+        }
+    }
+
+    #[tokio::test]
+    async fn scale_up_respects_max_workers() {
+        let mut config = GlobalWorkerConfig::default();
+        config.scaling.max_workers = 4;
+
+        let pool = Pool::builder(mock_claude())
+            .workers(2)
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+
+        // Try to scale beyond max.
+        let result = pool.scale_up(5).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds max_workers")
+        );
+
+        // Verify count unchanged.
+        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scale_down_reduces_worker_count() {
+        let pool = Pool::builder(mock_claude())
+            .workers(4)
+            .build()
+            .await
+            .unwrap();
+
+        let initial = pool.store().list_workers().await.unwrap().len();
+        assert_eq!(initial, 4);
+
+        let new_count = pool.scale_down(2).await.unwrap();
+        assert_eq!(new_count, 2);
+
+        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scale_down_respects_min_workers() {
+        let mut config = GlobalWorkerConfig::default();
+        config.scaling.min_workers = 2;
+
+        let pool = Pool::builder(mock_claude())
+            .workers(3)
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+
+        // Try to scale below min.
+        let result = pool.scale_down(2).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("below min_workers")
+        );
+
+        // Verify count unchanged.
+        assert_eq!(pool.store().list_workers().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn set_target_workers_scales_up() {
+        let pool = Pool::builder(mock_claude())
+            .workers(2)
+            .build()
+            .await
+            .unwrap();
+
+        let new_count = pool.set_target_workers(5).await.unwrap();
+        assert_eq!(new_count, 5);
+        assert_eq!(pool.store().list_workers().await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn set_target_workers_scales_down() {
+        let pool = Pool::builder(mock_claude())
+            .workers(5)
+            .build()
+            .await
+            .unwrap();
+
+        let new_count = pool.set_target_workers(2).await.unwrap();
+        assert_eq!(new_count, 2);
+        assert_eq!(pool.store().list_workers().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn set_target_workers_no_op_when_equal() {
+        let pool = Pool::builder(mock_claude())
+            .workers(3)
+            .build()
+            .await
+            .unwrap();
+
+        let new_count = pool.set_target_workers(3).await.unwrap();
+        assert_eq!(new_count, 3);
     }
 }

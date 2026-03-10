@@ -25,6 +25,7 @@ pub mod pool;
 pub mod skill;
 pub mod store;
 pub mod types;
+pub mod workflow;
 pub mod worktree;
 
 pub use chain::{
@@ -36,4 +37,5 @@ pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
 pub use skill::{Skill, SkillArgument, SkillRegistry};
 pub use store::{InMemoryStore, PoolStore};
 pub use types::*;
+pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};
 pub use worktree::WorktreeManager;
