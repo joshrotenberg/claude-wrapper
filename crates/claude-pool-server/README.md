@@ -497,6 +497,37 @@ Consider:
 
 `--worktree` adds overhead but enables safe parallel file edits.
 
+## Multi-Worker Coordination
+
+When running parallel chains or multiple workers on the same repo, coordination prevents conflicts and ensures clean handoffs.
+
+### Enable Worktree Isolation
+
+For any workflow that chains multiple steps across different workers (e.g. plan → code → review → PR), **always use worktree isolation**:
+
+```bash
+claude-pool-server -n 4 --worktree
+```
+
+Each worker gets an isolated git worktree. Without this, concurrent `git checkout` and `git branch` operations interfere with each other, causing PRs to land on wrong branches and requiring manual cleanup.
+
+### Branch Best Practices
+
+When chains create PRs, follow these patterns:
+
+1. **Fresh main** - Fetch `origin/main` at chain start, branch from it (not stale local main)
+2. **Issue reference** - Include issue number in branch name: `feat/add-foo-#42`
+3. **Clear scope** - One issue per chain. Parallel chains on different issues won't conflict
+
+### Conflict Handling
+
+When parallel PRs edit the same files, Git flags them as conflicting:
+- Second PR to merge needs a rebase
+- Recovery: Run `git rebase origin/main` and resolve conflicts
+- Consider monitoring with `/loop 3m check PR conflicts` to surface issues early
+
+For strategies beyond worktree isolation (conflict awareness, branch automation, recovery prompts), see issue [#34](https://github.com/joshrotenberg/claude-wrapper/issues/34).
+
 ## License
 
 MIT OR Apache-2.0
