@@ -296,9 +296,9 @@ pub fn builtin_skills() -> Vec<Skill> {
                      1. Check if the current branch has an upstream. If not, push with \
                         `git push -u origin HEAD`.\n\
                      2. Create the PR with `gh pr create --title \"...\" --body \"...\"`.\n\
-                     3. Do NOT merge the PR.\n\
-                     4. Do NOT include Co-Authored-By or \"Generated with Claude Code\" \
-                        signatures in the PR body.\n\
+                     3. Leave the PR open for the user to merge.\n\
+                     4. Omit Co-Authored-By and \"Generated with Claude Code\" signatures \
+                        (per project convention).\n\
                      5. Report the PR URL when done."
                 .into(),
             arguments: vec![
