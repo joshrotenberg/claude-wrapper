@@ -118,6 +118,12 @@ pub struct WorkerConfig {
 
     /// Optional name/role for this worker (e.g. "reviewer", "coder").
     pub role: Option<String>,
+
+    /// Optional human-readable name for the worker (e.g. "reviewer", "writer").
+    pub name: Option<String>,
+
+    /// Optional description of the worker's purpose or responsibilities.
+    pub description: Option<String>,
 }
 
 /// Current state of a worker.

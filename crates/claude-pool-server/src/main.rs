@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Claude worker pool. Use pool_run to execute tasks synchronously, \
              pool_submit/pool_result for async. pool_fan_out for parallel execution. \
              pool_chain for sequential pipelines. context_set/get/list for shared state. \
+             pool_configure_worker to set worker identity. \
              Skills are available as prompts (code_review, implement, write_tests, refactor, summarize).",
         )
         .tools(tool_list)
