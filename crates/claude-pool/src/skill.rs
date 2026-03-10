@@ -197,6 +197,157 @@ pub fn builtin_skills() -> Vec<Skill> {
             arguments: vec![],
             config: None,
         },
+        Skill {
+            name: "project_pre_push".into(),
+            description: "Pre-push checks for claude-wrapper workspace (all 3 crates in order)."
+                .into(),
+            prompt:
+                "Run the pre-push checklist for the claude-wrapper workspace:\n\n\
+                 Workspace structure: claude-pool → claude-pool-server → claude-wrapper\n\
+                 MSRV: 1.90 | Edition: 2024 | License: MIT OR Apache-2.0\n\n\
+                 Run these checks IN ORDER and stop on first failure:\n\n\
+                 1. Format check:   `cargo fmt --all -- --check`\n\
+                 2. Clippy lint:    `cargo clippy --all-targets --all-features -- -D warnings`\n\
+                 3. Unit tests:     `cargo test --lib --all-features`\n\
+                 4. Integration:    `cargo test --test '*' --all-features`\n\
+                 5. Docs build:     `cargo doc --no-deps --all-features`\n\
+                 6. Doc tests:      `cargo test --doc --all-features`\n\n\
+                 If any check fails, fix the issue and re-run ONLY that check. \
+                 Do NOT skip to the next check.\n\n\
+                 Report:\n\
+                 - Each step result (pass/fail)\n\
+                 - What was fixed (if anything)\n\
+                 - Final status (ready to push / blocked)"
+                    .into(),
+            arguments: vec![],
+            config: None,
+        },
+        Skill {
+            name: "project_release".into(),
+            description: "Release readiness checks for all 3 crates in dependency order."
+                .into(),
+            prompt:
+                "Check release readiness for all 3 crates. Test in dependency order:\n\n\
+                 1. claude-pool (core crate)\n\
+                 2. claude-pool-server (depends on claude-pool)\n\
+                 3. claude-wrapper (leaf crate)\n\n\
+                 For EACH crate in order:\n\n\
+                 a) Run all pre-commit checks:\n\
+                    - `cargo fmt --all -- --check`\n\
+                    - `cargo clippy --all-targets --all-features -- -D warnings`\n\
+                    - `cargo test --lib --all-features`\n\
+                    - `cargo test --test '*' --all-features`\n\n\
+                 b) Run release-specific checks:\n\
+                    - `cargo doc --no-deps --all-features` (docs build without warnings)\n\
+                    - `cargo test --doc --all-features` (doc tests pass)\n\
+                    - `cargo publish --dry-run -p {crate}` (package builds)\n\n\
+                 Stop on first failure. Fix and re-run that crate, then continue.\n\n\
+                 Report:\n\
+                 - Crate-by-crate status\n\
+                 - Any failures with fixes applied\n\
+                 - Final readiness verdict (ready / blocked)"
+                    .into(),
+            arguments: vec![],
+            config: None,
+        },
+        Skill {
+            name: "project_review".into(),
+            description: "Review code/PR against claude-wrapper project standards."
+                .into(),
+            prompt:
+                "Review the following code/changes against claude-wrapper standards:\n\n\
+                 STANDARDS (from CLAUDE.md):\n\
+                 ✓ Rust 2024 edition\n\
+                 ✓ MSRV 1.90\n\
+                 ✓ thiserror for library errors, anyhow for app errors\n\
+                 ✓ ALL public APIs have doc comments (required)\n\
+                 ✓ `cargo fmt` applied\n\
+                 ✓ Conventional commits: feat/fix/docs/refactor/test/chore\n\
+                 ✓ Branch naming: fix/, feat/, docs/, refactor/, test/\n\
+                 ✓ No backward-compat hacks or unused code\n\
+                 ✓ Builder pattern for CLIs and command APIs\n\
+                 ✓ Typed outputs over stringly-typed\n\n\
+                 WORKSPACE CONTEXT:\n\
+                 - claude-pool: core skill/worker system\n\
+                 - claude-pool-server: MCP server exposing pool\n\
+                 - claude-wrapper: CLI wrapper library\n\
+                 - Dependencies: pool → pool-server, both used by wrapper\n\n\
+                 Review thoroughly for:\n\
+                 - Missing doc comments on public items\n\
+                 - Unconventional error handling\n\
+                 - Style/formatting issues\n\
+                 - Breaking changes without ! marker\n\
+                 - Architecture misalignment\n\n\
+                 {target}"
+                    .into(),
+            arguments: vec![SkillArgument {
+                name: "target".into(),
+                description: "Code diff, file path, or PR # to review.".into(),
+                required: true,
+            }],
+            config: None,
+        },
+        Skill {
+            name: "project_implement".into(),
+            description: "Implement features with claude-wrapper workspace context."
+                .into(),
+            prompt:
+                "Implement the following feature for claude-wrapper.\n\n\
+                 PROJECT CONTEXT:\n\
+                 - 3-crate workspace: claude-pool (core), claude-pool-server (MCP), claude-wrapper (CLI lib)\n\
+                 - Rust 2024 edition | MSRV 1.90\n\
+                 - License: MIT OR Apache-2.0\n\
+                 - Error handling: thiserror for libs, anyhow for apps\n\n\
+                 KEY PATTERNS:\n\
+                 - Builder pattern for command APIs (see QueryCommand, McpAddCommand examples)\n\
+                 - Typed outputs over stringly-typed returns\n\
+                 - All public APIs MUST have doc comments\n\
+                 - Streaming support for long operations (NDJSON)\n\
+                 - Process spawning with timeout and env control\n\n\
+                 CONVENTIONS:\n\
+                 - Use conventional commits (feat:, fix:, docs:, refactor:, test:, chore:)\n\
+                 - Features that change behavior use feat!: (minor version bump)\n\
+                 - No backward-compat hacks; delete unused code cleanly\n\
+                 - Over-engineering is anti-pattern: minimum complexity for task\n\n\
+                 BEFORE PUSHING:\n\
+                 1. Pass all pre-commit checks (fmt, clippy, tests)\n\
+                 2. Doc build and doc tests pass\n\
+                 3. New public APIs have comprehensive doc comments\n\
+                 4. Commit follows conventional format\n\n\
+                 {description}"
+                    .into(),
+            arguments: vec![SkillArgument {
+                name: "description".into(),
+                description: "Feature description, issue #, or requirements.".into(),
+                required: true,
+            }],
+            config: None,
+        },
+        Skill {
+            name: "project_pr".into(),
+            description: "Create a PR following claude-wrapper conventions."
+                .into(),
+            prompt:
+                "Create a pull request for the following changes.\n\n\
+                 CONVENTIONS:\n\
+                 - Title: Use conventional commit format (e.g., 'feat: add xyz', 'fix: resolve bug')\n\
+                 - Link: Reference issues for auto-closing (Closes #123)\n\
+                 - Description: Include what changed and why\n\
+                 - NO merge: PR author does not merge (maintainer will review and merge)\n\
+                 - NO signatures: Remove any 'Generated with Claude Code' or Co-Authored-By lines\n\n\
+                 BRANCH INFO:\n\
+                 - Branch naming: fix/, feat/, docs/, refactor/, test/, chore/\n\
+                 - Branch should be based on main\n\
+                 - Branch should be pushed before creating PR\n\n\
+                 {details}"
+                    .into(),
+            arguments: vec![SkillArgument {
+                name: "details".into(),
+                description: "PR details: branch name, issue ref, what changed.".into(),
+                required: true,
+            }],
+            config: None,
+        },
     ]
 }
 
@@ -275,12 +426,17 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        assert_eq!(registry.list().len(), 6);
+        assert_eq!(registry.list().len(), 11);
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
         assert!(registry.get("write_tests").is_some());
         assert!(registry.get("refactor").is_some());
         assert!(registry.get("summarize").is_some());
         assert!(registry.get("pre_push").is_some());
+        assert!(registry.get("project_pre_push").is_some());
+        assert!(registry.get("project_release").is_some());
+        assert!(registry.get("project_review").is_some());
+        assert!(registry.get("project_implement").is_some());
+        assert!(registry.get("project_pr").is_some());
     }
 }

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "MCP server binary for claude-pool"
 documentation = "https://docs.rs/claude-pool-server"
+readme = "README.md"
 keywords = ["claude", "mcp", "pool", "server"]
 categories = ["development-tools"]
 

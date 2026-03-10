@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "MCP server for managing a pool of Claude CLI workers"
 documentation = "https://docs.rs/claude-pool"
+readme = "README.md"
 keywords = ["claude", "mcp", "pool", "ai", "orchestration"]
 categories = ["development-tools", "asynchronous"]
 

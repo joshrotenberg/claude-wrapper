@@ -1,0 +1,369 @@
+# claude-pool
+
+Worker pool orchestration library for Claude CLI
+
+[![Crates.io](https://img.shields.io/crates/v/claude-pool.svg)](https://crates.io/crates/claude-pool)
+[![Documentation](https://docs.rs/claude-pool/badge.svg)](https://docs.rs/claude-pool)
+[![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/claude-pool.svg)](LICENSE-MIT)
+
+## Overview
+
+`claude-pool` manages N Claude CLI workers behind a unified interface. A coordinator (typically an interactive Claude session) submits work, and the pool routes tasks by availability, tracks budgets, and handles worker lifecycle and session management.
+
+Perfect for:
+- Scaling Claude work across multiple workers
+- Budget-aware task distribution
+- Parallel and sequential task orchestration
+- Worker isolation with optional Git worktrees
+
+## Architecture
+
+```
+Coordinator (your app or interactive session)
+  │
+  ├─ pool.run("task")           → synchronous
+  ├─ pool.submit("task")        → async, returns task ID
+  ├─ pool.fan_out([tasks])      → parallel execution
+  └─ execute_chain(steps)       → sequential pipeline
+        │
+        ├── Pool (task queue, context, budget)
+        │
+        ├── Worker-0 (Claude instance)
+        ├── Worker-1 (Claude instance)
+        └── Worker-N (Claude instance)
+```
+
+## Installation
+
+```bash
+cargo add claude-pool
+```
+
+Requires: `claude-wrapper` (included as dependency)
+
+## Quick Start
+
+```rust
+use claude_pool::Pool;
+use claude_wrapper::Claude;
+
+#[tokio::main]
+async fn main() -> claude_pool::Result<()> {
+    let claude = Claude::builder().build()?;
+    let pool = Pool::builder(claude)
+        .workers(4)
+        .build()
+        .await?;
+
+    let result = pool.run("write a haiku about rust").await?;
+    println!("{}", result.output);
+
+    pool.drain().await?;
+    Ok(())
+}
+```
+
+## Core Concepts
+
+### Synchronous vs Asynchronous Tasks
+
+**Synchronous (blocking):**
+```rust
+let result = pool.run("your task here").await?;
+println!("{}", result.output);
+```
+
+**Asynchronous (non-blocking):**
+```rust
+let task_id = pool.submit("long-running task").await?;
+// Do other work...
+let result = pool.result(&task_id).await??;
+```
+
+### Budget Control
+
+Track and limit spending:
+
+```rust
+let pool = Pool::builder(claude)
+    .workers(4)
+    .config(
+        GlobalWorkerConfig::default()
+            .with_budget_usd(50.0)  // Pool-level cap
+    )
+    .build()
+    .await?;
+```
+
+Budget is tracked atomically per task. When the pool reaches its cap, subsequent tasks are rejected.
+
+### Worker Identity
+
+Each worker has metadata for coordination:
+
+```rust
+pool.configure_worker("worker-0", "analyzer", "Code review specialist")
+    .await?;
+pool.configure_worker("worker-1", "writer", "Code generation specialist")
+    .await?;
+```
+
+Access worker info:
+```rust
+let status = pool.status().await?;
+for worker in status.workers {
+    println!("{}: {} ({} active)", worker.id, worker.role, worker.busy_tasks);
+}
+```
+
+### Shared Context
+
+Inject key-value pairs into all worker system prompts:
+
+```rust
+pool.context_set("language", "rust").await?;
+pool.context_set("framework", "tokio").await?;
+pool.context_set("style", "idiomatic").await?;
+
+// All workers now see these in their system prompts
+```
+
+Access context:
+```rust
+let value = pool.context_get("language").await??;
+pool.context_delete("framework").await?;
+let all = pool.context_list().await?;
+```
+
+## Pool Builder Configuration
+
+```rust
+use claude_pool::{Pool, GlobalWorkerConfig, Effort, PermissionMode};
+
+let pool = Pool::builder(claude)
+    .workers(8)
+    .config(
+        GlobalWorkerConfig::default()
+            .with_model("sonnet")
+            .with_effort(Effort::High)
+            .with_budget_usd(100.0)
+            .with_permission_mode(PermissionMode::Plan)
+            .with_system_prompt("You are a Rust expert")
+            .with_worktree(true)
+    )
+    .build()
+    .await?;
+```
+
+Available config options:
+- `with_model(name)` - Default model for all workers
+- `with_effort(level)` - Effort: Min, Low, Medium, High, Max
+- `with_budget_usd(amount)` - Total pool budget
+- `with_permission_mode(mode)` - Permission defaults
+- `with_system_prompt(text)` - Base system prompt
+- `with_worktree(true)` - Enable Git worktree per worker
+
+## Execution Patterns
+
+### Single Task (Synchronous)
+
+```rust
+let result = pool.run("fix the bug in main.rs").await?;
+println!("Output:\n{}", result.output);
+println!("Spend: ${}", result.spend_usd);
+```
+
+Result includes:
+- `output` - Claude's response
+- `spend_usd` - Cost of this task
+- `tokens_used` - Input and output tokens
+
+### Async Task Submission
+
+```rust
+// Submit and get task ID immediately
+let task_id = pool.submit("long-running analysis").await?;
+
+// Do other work...
+
+// Poll for result later
+let result = pool.result(&task_id).await??;
+```
+
+### Parallel Fan-Out
+
+Execute multiple prompts in parallel, all at once:
+
+```rust
+let prompts = vec![
+    "write a poem",
+    "write a haiku",
+    "write a limerick",
+];
+
+let results = pool.fan_out(&prompts).await?;
+for (i, result) in results.iter().enumerate() {
+    println!("Result {}: {}", i, result.output);
+}
+```
+
+All tasks run concurrently. Returns when all complete (or timeout).
+
+### Sequential Chains with Failure Policies
+
+Execute steps in order, with control over failures:
+
+```rust
+use claude_pool::{ChainStep, StepFailurePolicy};
+
+let steps = vec![
+    ChainStep::new("analyze the error").with_policy(StepFailurePolicy::Abort),
+    ChainStep::new("write a fix").with_policy(StepFailurePolicy::Retry(2)),
+    ChainStep::new("write tests").with_policy(StepFailurePolicy::Skip),
+];
+
+let result = execute_chain(&pool, steps, ChainOptions::default()).await?;
+println!("Chain result: {}", result.final_output);
+```
+
+Failure policies:
+- **Abort** - Stop chain on failure
+- **Retry(n)** - Retry up to N times
+- **Skip** - Skip this step, continue
+
+Access chain progress:
+```rust
+let progress = pool.chain_result(&chain_id).await?;
+for step in progress.steps {
+    println!("{}: {}", step.name, step.status);
+}
+```
+
+## Skills Registry
+
+Register reusable task patterns with argument validation:
+
+```rust
+use claude_pool::{Skill, SkillArgument, SkillRegistry};
+
+let mut registry = SkillRegistry::new();
+registry.register(Skill {
+    name: "code_review".to_string(),
+    description: "Review code for bugs and style".to_string(),
+    prompt: "Review the code at {path} for {criteria}".to_string(),
+    arguments: vec![
+        SkillArgument {
+            name: "path".to_string(),
+            description: "File to review".to_string(),
+            required: true,
+        },
+        SkillArgument {
+            name: "criteria".to_string(),
+            description: "What to focus on (bugs, style, performance)".to_string(),
+            required: false,
+        },
+    ],
+    config: None,
+});
+```
+
+Skills can be triggered via the MCP server or called programmatically.
+
+## Worktree Isolation
+
+Enable optional Git worktree per worker for safe, isolated execution:
+
+```rust
+let pool = Pool::builder(claude)
+    .workers(4)
+    .config(
+        GlobalWorkerConfig::default()
+            .with_worktree(true)
+    )
+    .build()
+    .await?;
+```
+
+Each worker gets an isolated worktree:
+- Independent filesystem
+- Safe for parallel edits
+- Cleanup on drain
+
+Benefits:
+- Parallel file edits without conflicts
+- Isolated git state
+- Safe cleanup
+
+## Worker Lifecycle
+
+### Spawning
+
+Workers are created during `build()` and remain alive until `drain()`.
+
+### Session Resumption
+
+Workers automatically resume sessions if available, reducing startup cost.
+
+### Graceful Shutdown
+
+```rust
+let summary = pool.drain().await?;
+println!("Processed {} tasks", summary.total_tasks);
+println!("Total spend: ${}", summary.total_spend_usd);
+println!("Errors: {}", summary.error_count);
+```
+
+All pending tasks are cancelled. Active tasks complete gracefully.
+
+## Status & Monitoring
+
+Get current pool state:
+
+```rust
+let status = pool.status().await?;
+println!("Workers: {}", status.workers.len());
+println!("Active tasks: {}", status.active_tasks);
+println!("Budget: ${} / ${}", status.spend_usd, status.budget_usd);
+println!("Remaining: ${}", status.budget_usd - status.spend_usd);
+```
+
+Status includes:
+- Worker list with ID, status, and active task count
+- Active and pending task counts
+- Total spend and budget
+- Budget remaining
+
+## Error Handling
+
+All operations return `Result<T>`:
+
+```rust
+use claude_pool::Error;
+
+match pool.run("task").await {
+    Ok(result) => println!("{}", result.output),
+    Err(Error::TaskFailed(msg)) => eprintln!("Task error: {}", msg),
+    Err(Error::BudgetExceeded) => eprintln!("Out of budget"),
+    Err(Error::NoWorkersAvailable) => eprintln!("All workers busy"),
+    Err(e) => eprintln!("Other error: {}", e),
+}
+```
+
+Common errors:
+- `TaskFailed` - Task execution failed
+- `BudgetExceeded` - Pool exceeded spending cap
+- `NoWorkersAvailable` - All workers busy/offline
+- `TaskNotFound` - Invalid task ID
+
+## Testing
+
+Requires the `claude` CLI binary:
+
+```bash
+cargo test --lib --all-features
+```
+
+## License
+
+MIT OR Apache-2.0
