@@ -74,20 +74,20 @@ impl PoolStore for InMemoryStore {
             .iter()
             .map(|r| r.value().clone())
             .filter(|t| {
-                if let Some(state) = filter.state {
-                    if t.state != state {
-                        return false;
-                    }
+                if let Some(state) = filter.state
+                    && t.state != state
+                {
+                    return false;
                 }
-                if let Some(ref wid) = filter.worker_id {
-                    if t.worker_id.as_ref() != Some(wid) {
-                        return false;
-                    }
+                if let Some(ref wid) = filter.worker_id
+                    && t.worker_id.as_ref() != Some(wid)
+                {
+                    return false;
                 }
-                if let Some(ref tags) = filter.tags {
-                    if !tags.iter().any(|tag| t.tags.contains(tag)) {
-                        return false;
-                    }
+                if let Some(ref tags) = filter.tags
+                    && !tags.iter().any(|tag| t.tags.contains(tag))
+                {
+                    return false;
                 }
                 true
             })

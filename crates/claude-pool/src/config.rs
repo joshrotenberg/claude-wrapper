@@ -63,10 +63,10 @@ impl ResolvedConfig {
         if let Some(ref wt) = worker.allowed_tools {
             allowed_tools.extend(wt.iter().cloned());
         }
-        if let Some(task_cfg) = task {
-            if let Some(ref tt) = task_cfg.allowed_tools {
-                allowed_tools.extend(tt.iter().cloned());
-            }
+        if let Some(task_cfg) = task
+            && let Some(ref tt) = task_cfg.allowed_tools
+        {
+            allowed_tools.extend(tt.iter().cloned());
         }
 
         Self {
