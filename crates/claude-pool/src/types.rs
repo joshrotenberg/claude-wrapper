@@ -100,6 +100,17 @@ pub struct PoolConfig {
 
     /// If true, detect permission prompt patterns in stderr and provide actionable errors.
     pub detect_permission_prompts: bool,
+
+    /// Enable the background supervisor loop for slot health monitoring.
+    ///
+    /// When enabled, the supervisor periodically checks for errored slots and
+    /// restarts them automatically (up to [`max_restarts`](Self::max_restarts)).
+    pub supervisor_enabled: bool,
+
+    /// Interval in seconds between supervisor health checks (default: 30).
+    ///
+    /// Only used when [`supervisor_enabled`](Self::supervisor_enabled) is true.
+    pub supervisor_interval_secs: u64,
 }
 
 impl Default for PoolConfig {
@@ -120,6 +131,8 @@ impl Default for PoolConfig {
             scaling: ScalingConfig::default(),
             unattended_mode: false,
             detect_permission_prompts: true,
+            supervisor_enabled: false,
+            supervisor_interval_secs: 30,
         }
     }
 }

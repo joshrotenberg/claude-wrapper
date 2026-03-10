@@ -683,6 +683,30 @@ impl<S: PoolStore + 'static> Pool<S> {
         &self.inner.store
     }
 
+    /// Get a reference to the pool configuration.
+    pub fn config(&self) -> &PoolConfig {
+        &self.inner.config
+    }
+
+    /// Start the background supervisor loop.
+    ///
+    /// The supervisor periodically checks for errored slots and restarts them
+    /// (up to [`PoolConfig::max_restarts`]). Returns a [`SupervisorHandle`]
+    /// that can be used to stop the loop.
+    ///
+    /// Returns `None` if [`PoolConfig::supervisor_enabled`] is false.
+    ///
+    /// [`SupervisorHandle`]: crate::supervisor::SupervisorHandle
+    pub fn start_supervisor(&self) -> Option<crate::supervisor::SupervisorHandle> {
+        if !self.inner.config.supervisor_enabled {
+            return None;
+        }
+        Some(crate::supervisor::spawn_supervisor(
+            self.clone(),
+            self.inner.config.supervisor_interval_secs,
+        ))
+    }
+
     /// Scale up the pool by adding N new slots.
     ///
     /// Returns the new total slot count.
