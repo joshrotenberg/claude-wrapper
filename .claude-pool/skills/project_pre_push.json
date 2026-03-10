@@ -1,0 +1,8 @@
+{
+  "name": "project_pre_push",
+  "description": "Pre-push checks for claude-wrapper workspace (all 3 crates in order).",
+  "prompt": "Run the pre-push checklist for the claude-wrapper workspace:\n\nWorkspace structure: claude-pool -> claude-pool-server -> claude-wrapper\nMSRV: 1.90 | Edition: 2024 | License: MIT OR Apache-2.0\n\nRun these checks IN ORDER and stop on first failure:\n\n1. Format check:   `cargo fmt --all -- --check`\n2. Clippy lint:    `cargo clippy --all-targets --all-features -- -D warnings`\n3. Unit tests:     `cargo test --lib --all-features`\n4. Integration:    `cargo test --test '*' --all-features`\n5. Docs build:     `cargo doc --no-deps --all-features`\n6. Doc tests:      `cargo test --doc --all-features`\n\nIf any check fails, fix the issue and re-run ONLY that check. Do NOT skip to the next check.\n\nReport:\n- Each step result (pass/fail)\n- What was fixed (if anything)\n- Final status (ready to push / blocked)",
+  "arguments": [],
+  "config": null,
+  "scope": "task"
+}

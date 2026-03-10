@@ -1,0 +1,10 @@
+{
+  "name": "project_implement",
+  "description": "Implement features with claude-wrapper workspace context.",
+  "prompt": "Implement the following feature for claude-wrapper.\n\nPROJECT CONTEXT:\n- 3-crate workspace: claude-pool (core), claude-pool-server (MCP), claude-wrapper (CLI lib)\n- Rust 2024 edition | MSRV 1.90\n- License: MIT OR Apache-2.0\n- Error handling: thiserror for libs, anyhow for apps\n\nKEY PATTERNS:\n- Builder pattern for command APIs (see QueryCommand, McpAddCommand examples)\n- Typed outputs over stringly-typed returns\n- All public APIs MUST have doc comments\n- Streaming support for long operations (NDJSON)\n- Process spawning with timeout and env control\n\nCONVENTIONS:\n- Use conventional commits (feat:, fix:, docs:, refactor:, test:, chore:)\n- Features that change behavior use feat!: (minor version bump)\n- No backward-compat hacks; delete unused code cleanly\n- Over-engineering is anti-pattern: minimum complexity for task\n\nBEFORE PUSHING:\n1. Pass all pre-commit checks (fmt, clippy, tests)\n2. Doc build and doc tests pass\n3. New public APIs have comprehensive doc comments\n4. Commit follows conventional format\n\n{description}",
+  "arguments": [
+    { "name": "description", "description": "Feature description, issue #, or requirements.", "required": true }
+  ],
+  "config": null,
+  "scope": "task"
+}

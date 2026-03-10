@@ -34,7 +34,7 @@ pub use chain::{
 };
 pub use error::{Error, Result};
 pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
-pub use skill::{Skill, SkillArgument, SkillRegistry};
+pub use skill::{Skill, SkillArgument, SkillRegistry, SkillScope};
 pub use store::{InMemoryStore, PoolStore};
 pub use types::*;
 pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};

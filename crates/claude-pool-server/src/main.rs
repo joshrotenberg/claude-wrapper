@@ -72,6 +72,10 @@ struct Cli {
     /// Skip loading project-local skills.
     #[arg(long)]
     no_project_skills: bool,
+
+    /// Disable specific skills by name (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    disable_skill: Vec<String>,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -142,6 +146,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if count > 0 {
             tracing::info!(count, dir = %cli.skills_dir.display(), "loaded project skills");
         }
+    }
+
+    if !cli.disable_skill.is_empty() {
+        let names: Vec<&str> = cli.disable_skill.iter().map(|s| s.as_str()).collect();
+        skills.remove_many(&names);
+        tracing::info!(disabled = ?cli.disable_skill, "disabled skills");
     }
 
     let workflows = WorkflowRegistry::with_builtins();
