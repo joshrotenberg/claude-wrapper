@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "A type-safe Claude Code CLI wrapper for Rust"
 documentation = "https://docs.rs/claude-wrapper"
+readme = "README.md"
 keywords = ["claude", "cli", "wrapper", "ai", "mcp"]
 categories = ["development-tools", "api-bindings"]
 
