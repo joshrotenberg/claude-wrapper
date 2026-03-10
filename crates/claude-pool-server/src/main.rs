@@ -171,18 +171,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .server_info("claude-pool", env!("CARGO_PKG_VERSION"))
         .instructions(
             "Execution modes: use inline for decisions and interactive work; pool_run for simple \
-             administrative tasks; pool_submit_chain for multi-step workflows (plan/code/review/PR) \
-             to keep conversations responsive; pool_fan_out for parallel tasks; Agent tool for \
-             research requiring MCP tools (GitHub, crates.io). Pool slots have CLI tools (git, \
-             cargo, gh) but not MCP access. Default to inline when uncertain; user can say \
-             \"slotize it.\" \
+             administrative tasks; pool_submit_chain for multi-step workflows to keep conversations \
+             responsive; pool_fan_out for parallel tasks; Agent tool for research requiring MCP \
+             tools. Pool slots have CLI tools (git, cargo, gh) but not MCP access. Default to \
+             inline when uncertain; user can say \"slotize it.\" \
              \
              Task sizing: Single task (pool_run) = one clear action with one clear output; if using \
              \"and\" more than once, use a chain instead. Chain = workflow where steps feed into each \
-             other; natural unit is a deliverable (PR, report, resolved issue); each step should be \
-             independently verifiable (can't describe success of step N without referencing N+1 = \
-             steps too coupled). Fan-out = N independent instances of same work; use if items don't \
-             depend on each other; use chain if they do. \
+             other; natural unit is a deliverable (e.g. a PR, report, or resolved issue); each step \
+             should be independently verifiable (can't describe success of step N without referencing \
+             N+1 = steps too coupled). Fan-out = N independent instances of same work; use if items \
+             don't depend on each other; use chain if they do. \
              \
              Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
              pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
@@ -191,8 +190,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              (step config) to fine-tune cost and quality. \
              \
              Model guidance: default to the pool's configured model; override per-task/step with \
-             the model field when needed. Haiku: bounded single tasks (create issue, run checks, \
-             rebase, label), template-driven work, high-volume fan-outs where speed matters. \
+             the model field when needed. Haiku: bounded single tasks (file a ticket, run checks, \
+             rebase, tag), template-driven work, high-volume fan-outs where speed matters. \
              Sonnet: code review needing subtlety, multi-file changes with dependencies, planning \
              steps where quality matters. Opus: large mechanical refactors where one mistake breaks \
              compilation, complex architectural reasoning, tasks where you would want a senior \

@@ -615,8 +615,8 @@ pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -
     ToolBuilder::new("pool_invoke_workflow")
         .title("Invoke Workflow")
         .description(
-            "Submit a preset workflow template (e.g. 'issue_to_pr', 'refactor_and_test', \
-             'review_and_fix') with arguments. Returns a task_id immediately.",
+            "Submit a named workflow template with arguments. Returns a task_id immediately. \
+             Example workflows: 'issue_to_pr', 'refactor_and_test', 'review_and_fix'.",
         )
         .handler(move |input: InvokeWorkflowInput| {
             let state = Arc::clone(&state);
