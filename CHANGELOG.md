@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+## [0.2.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.2.0...v0.2.1) - 2026-03-10
+
+### Added
+
+- add project-specific skills for claude-wrapper workspace ([#57](https://github.com/joshrotenberg/claude-wrapper/pull/57))
+
 ## [0.2.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.1.0...v0.2.0) - 2026-03-10
 
 ### Added
