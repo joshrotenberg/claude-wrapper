@@ -189,6 +189,40 @@ pub fn pool_result_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> Res
         )
 }
 
+pub fn pool_chain_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> ResourceTemplate {
+    ResourceTemplateBuilder::new("pool://chains/{chain_id}")
+        .name("Chain Progress")
+        .description("Per-step progress for an async chain")
+        .mime_type("application/json")
+        .handler(
+            move |uri: String, vars: std::collections::HashMap<String, String>| {
+                let state = Arc::clone(&state);
+                async move {
+                    let chain_id = vars
+                        .get("chain_id")
+                        .ok_or_else(|| tower_mcp::Error::internal("missing chain_id parameter"))?;
+                    let task_id = claude_pool::TaskId(chain_id.clone());
+                    match state.pool.chain_progress(&task_id) {
+                        Some(progress) => {
+                            let json = serde_json::to_string_pretty(&progress)?;
+                            Ok(text_resource(&uri, json))
+                        }
+                        None => match state.pool.result(&task_id).await {
+                            Ok(Some(result)) => {
+                                let json = serde_json::to_string_pretty(&result)?;
+                                Ok(text_resource(&uri, json))
+                            }
+                            Ok(None) => Err(tower_mcp::Error::internal(format!(
+                                "chain not found: {chain_id}"
+                            ))),
+                            Err(e) => Err(tower_mcp::Error::internal(e.to_string())),
+                        },
+                    }
+                }
+            },
+        )
+}
+
 /// Build all pool resources.
 pub fn all_resources<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Resource> {
     vec![
@@ -204,5 +238,6 @@ pub fn all_templates<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Resou
     vec![
         pool_worker_template(Arc::clone(state)),
         pool_result_template(Arc::clone(state)),
+        pool_chain_template(Arc::clone(state)),
     ]
 }
