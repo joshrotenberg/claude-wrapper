@@ -378,6 +378,14 @@ pub struct ChainInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitChainInput {
+    /// Ordered list of chain steps.
+    pub steps: Vec<ChainStepInput>,
+    /// Tags for grouping/filtering.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChainStepInput {
     /// Step name.
     pub name: String,
@@ -392,6 +400,36 @@ pub struct ChainStepInput {
     pub model: Option<String>,
     /// Effort override for this step.
     pub effort: Option<String>,
+    /// Number of retries on failure (default: 0).
+    pub retries: Option<u32>,
+    /// Recovery prompt template on exhausted retries. {error} and {previous_output} are substituted.
+    pub recovery_prompt: Option<String>,
+}
+
+fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep> {
+    steps
+        .into_iter()
+        .map(|s| {
+            let action = match s.step_type.as_str() {
+                "skill" => claude_pool::StepAction::Skill {
+                    skill: s.value,
+                    arguments: s.arguments.unwrap_or_default(),
+                },
+                _ => claude_pool::StepAction::Prompt { prompt: s.value },
+            };
+            let config = task_config_from(s.model, s.effort);
+            let failure_policy = claude_pool::StepFailurePolicy {
+                retries: s.retries.unwrap_or(0),
+                recovery_prompt: s.recovery_prompt,
+            };
+            claude_pool::ChainStep {
+                name: s.name,
+                action,
+                config,
+                failure_policy,
+            }
+        })
+        .collect()
 }
 
 pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
@@ -436,37 +474,79 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 
 pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain")
-        .title("Run Chain")
+        .title("Run Chain (Sync)")
         .description(
-            "Execute a sequential pipeline of steps. Each step's output feeds the next. \
-             Steps can be inline prompts or skill references.",
+            "Execute a sequential pipeline of steps synchronously. Each step's output feeds \
+             the next. Steps can be inline prompts or skill references. Blocks until all \
+             steps complete. For long chains, use pool_submit_chain instead.",
         )
         .handler(move |input: ChainInput| {
             let state = Arc::clone(&state);
             async move {
-                let steps: Vec<claude_pool::ChainStep> = input
-                    .steps
-                    .into_iter()
-                    .map(|s| {
-                        let action = match s.step_type.as_str() {
-                            "skill" => claude_pool::StepAction::Skill {
-                                skill: s.value,
-                                arguments: s.arguments.unwrap_or_default(),
-                            },
-                            _ => claude_pool::StepAction::Prompt { prompt: s.value },
-                        };
-                        let config = task_config_from(s.model, s.effort);
-                        claude_pool::ChainStep {
-                            name: s.name,
-                            action,
-                            config,
-                        }
-                    })
-                    .collect();
-
+                let steps = convert_chain_steps(input.steps);
                 match claude_pool::execute_chain(&state.pool, &state.skills, &steps).await {
                     Ok(result) => Ok(CallToolResult::json(serde_json::to_value(&result).unwrap())),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_submit_chain")
+        .title("Submit Chain (Async)")
+        .description(
+            "Submit a sequential pipeline for async execution. Returns a task_id immediately. \
+             Poll with pool_chain_result for per-step progress, or pool_result for final output.",
+        )
+        .handler(move |input: SubmitChainInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let steps = convert_chain_steps(input.steps);
+                let options = claude_pool::ChainOptions {
+                    tags: input.tags.unwrap_or_default(),
+                };
+                match state.pool.submit_chain(steps, &state.skills, options).await {
+                    Ok(task_id) => Ok(CallToolResult::json(
+                        serde_json::json!({ "task_id": task_id.0 }),
+                    )),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_chain_result")
+        .title("Get Chain Progress")
+        .description(
+            "Get per-step progress of an async chain. Shows which step is running, \
+             completed steps, and overall status.",
+        )
+        .read_only()
+        .handler(move |input: TaskIdInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let task_id = claude_pool::TaskId(input.task_id.clone());
+                match state.pool.chain_progress(&task_id) {
+                    Some(progress) => Ok(CallToolResult::json(
+                        serde_json::to_value(&progress).unwrap(),
+                    )),
+                    None => {
+                        // Fall back to checking if the task exists at all.
+                        match state.pool.result(&task_id).await {
+                            Ok(Some(r)) => {
+                                Ok(CallToolResult::json(serde_json::to_value(&r).unwrap()))
+                            }
+                            Ok(None) => Ok(CallToolResult::error(format!(
+                                "no chain found for task_id: {}",
+                                input.task_id,
+                            ))),
+                            Err(e) => Ok(CallToolResult::error(e.to_string())),
+                        }
+                    }
                 }
             }
         })
@@ -485,6 +565,8 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_drain_tool(Arc::clone(state)),
         pool_skill_run_tool(Arc::clone(state)),
         pool_chain_tool(Arc::clone(state)),
+        pool_submit_chain_tool(Arc::clone(state)),
+        pool_chain_result_tool(Arc::clone(state)),
         context_set_tool(Arc::clone(state)),
         context_get_tool(Arc::clone(state)),
         context_delete_tool(Arc::clone(state)),

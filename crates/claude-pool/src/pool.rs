@@ -33,6 +33,7 @@ use claude_wrapper::types::OutputFormat;
 
 use crate::config::ResolvedConfig;
 use crate::error::{Error, Result};
+use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::*;
 
@@ -49,6 +50,8 @@ struct PoolInner<S: PoolStore> {
     assignment_lock: Mutex<()>,
     /// Worktree manager, if worktree isolation is enabled.
     worktree_manager: Option<crate::worktree::WorktreeManager>,
+    /// In-flight chain progress, keyed by task ID.
+    chain_progress: dashmap::DashMap<String, crate::chain::ChainProgress>,
 }
 
 /// A pool of Claude CLI workers.
@@ -123,6 +126,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             context: dashmap::DashMap::new(),
             assignment_lock: Mutex::new(()),
             worktree_manager,
+            chain_progress: dashmap::DashMap::new(),
         });
 
         // Register workers in the store.
@@ -384,6 +388,115 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
 
         results.into_iter().collect()
+    }
+
+    /// Submit a chain for async execution, returning a task ID immediately.
+    ///
+    /// Use [`Pool::chain_progress`] to check per-step progress, or
+    /// [`Pool::result`] to get the final [`crate::ChainResult`] (serialized as JSON)
+    /// once complete.
+    pub async fn submit_chain(
+        &self,
+        steps: Vec<crate::chain::ChainStep>,
+        skills: &SkillRegistry,
+        options: crate::chain::ChainOptions,
+    ) -> Result<TaskId> {
+        self.check_shutdown()?;
+        self.check_budget()?;
+
+        let task_id = TaskId(format!("chain-{}", new_id()));
+
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: format!("chain: {} steps", steps.len()),
+            state: TaskState::Pending,
+            worker_id: None,
+            result: None,
+            tags: options.tags,
+            config: None,
+        };
+        self.inner.store.put_task(record).await?;
+
+        // Initialize progress.
+        let progress = crate::chain::ChainProgress {
+            total_steps: steps.len(),
+            current_step: None,
+            current_step_name: None,
+            completed_steps: vec![],
+            status: crate::chain::ChainStatus::Running,
+        };
+        self.inner
+            .chain_progress
+            .insert(task_id.0.clone(), progress);
+
+        // Mark as running.
+        if let Some(mut task) = self.inner.store.get_task(&task_id).await? {
+            task.state = TaskState::Running;
+            self.inner.store.put_task(task).await?;
+        }
+
+        let pool = self.clone();
+        let tid = task_id.clone();
+        let skills = skills.clone();
+        tokio::spawn(async move {
+            let result =
+                crate::chain::execute_chain_with_progress(&pool, &skills, &steps, Some(&tid)).await;
+
+            // Store the chain result as the task result.
+            if let Some(mut task) = pool.inner.store.get_task(&tid).await.ok().flatten() {
+                match result {
+                    Ok(chain_result) => {
+                        let success = chain_result.success;
+                        task.state = if success {
+                            TaskState::Completed
+                        } else {
+                            TaskState::Failed
+                        };
+                        task.result = Some(TaskResult {
+                            output: serde_json::to_string(&chain_result).unwrap_or_default(),
+                            success,
+                            cost_microdollars: chain_result.total_cost_microdollars,
+                            turns_used: 0,
+                            session_id: None,
+                        });
+                    }
+                    Err(e) => {
+                        task.state = TaskState::Failed;
+                        task.result = Some(TaskResult {
+                            output: e.to_string(),
+                            success: false,
+                            cost_microdollars: 0,
+                            turns_used: 0,
+                            session_id: None,
+                        });
+                    }
+                }
+                let _ = pool.inner.store.put_task(task).await;
+            }
+        });
+
+        Ok(task_id)
+    }
+
+    /// Get the progress of an in-flight chain.
+    ///
+    /// Returns `None` if no chain is tracked for this task ID.
+    pub fn chain_progress(&self, task_id: &TaskId) -> Option<crate::chain::ChainProgress> {
+        self.inner
+            .chain_progress
+            .get(&task_id.0)
+            .map(|v| v.value().clone())
+    }
+
+    /// Store chain progress (called internally by `execute_chain_with_progress`).
+    pub(crate) async fn set_chain_progress(
+        &self,
+        task_id: &TaskId,
+        progress: crate::chain::ChainProgress,
+    ) {
+        self.inner
+            .chain_progress
+            .insert(task_id.0.clone(), progress);
     }
 
     /// Set a shared context value.
