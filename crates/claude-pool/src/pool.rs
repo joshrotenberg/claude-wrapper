@@ -610,6 +610,10 @@ impl<S: PoolStore + 'static> Pool<S> {
             .output_format(OutputFormat::Json)
             .permission_mode(resolved.permission_mode);
 
+        if resolved.permission_mode == PermissionMode::BypassPermissions {
+            cmd = cmd.dangerously_skip_permissions();
+        }
+
         if let Some(ref model) = resolved.model {
             cmd = cmd.model(model);
         }

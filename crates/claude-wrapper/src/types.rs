@@ -77,8 +77,6 @@ impl InputFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
-    /// Minimal effort, fastest responses.
-    Min,
     /// Low effort.
     Low,
     /// Medium effort (default).
@@ -92,7 +90,6 @@ pub enum Effort {
 impl Effort {
     pub(crate) fn as_arg(&self) -> &'static str {
         match self {
-            Self::Min => "min",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",

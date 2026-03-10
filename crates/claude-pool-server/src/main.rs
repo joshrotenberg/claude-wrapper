@@ -50,8 +50,7 @@ struct Cli {
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
     match s.to_lowercase().as_str() {
-        "min" => Some(claude_pool::Effort::Min),
-        "low" => Some(claude_pool::Effort::Low),
+        "min" | "low" => Some(claude_pool::Effort::Low),
         "medium" => Some(claude_pool::Effort::Medium),
         "high" => Some(claude_pool::Effort::High),
         "max" => Some(claude_pool::Effort::Max),
@@ -77,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         effort: cli.effort.and_then(|e| parse_effort(&e)),
         budget_microdollars: cli.budget_usd.map(|b| (b * 1_000_000.0) as u64),
         system_prompt: cli.system_prompt,
-        permission_mode: Some(claude_pool::PermissionMode::BypassPermissions),
+        permission_mode: Some(claude_pool::PermissionMode::Plan),
         ..Default::default()
     };
 

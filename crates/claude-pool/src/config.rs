@@ -41,7 +41,7 @@ impl ResolvedConfig {
             .and_then(|t| t.permission_mode)
             .or(worker.permission_mode)
             .or(global.permission_mode)
-            .unwrap_or(PermissionMode::BypassPermissions);
+            .unwrap_or(PermissionMode::Plan);
 
         let max_turns = task
             .and_then(|t| t.max_turns)

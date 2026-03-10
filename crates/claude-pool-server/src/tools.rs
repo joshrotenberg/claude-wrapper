@@ -66,8 +66,7 @@ pub struct ContextKeyInput {
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
     match s.to_lowercase().as_str() {
-        "min" => Some(claude_pool::Effort::Min),
-        "low" => Some(claude_pool::Effort::Low),
+        "min" | "low" => Some(claude_pool::Effort::Low),
         "medium" => Some(claude_pool::Effort::Medium),
         "high" => Some(claude_pool::Effort::High),
         "max" => Some(claude_pool::Effort::Max),
