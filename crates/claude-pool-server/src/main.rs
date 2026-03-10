@@ -12,13 +12,19 @@ use std::sync::Arc;
 
 use clap::Parser;
 use claude_pool::{InMemoryStore, Pool, PoolConfig, PoolStore, SkillRegistry, WorkflowRegistry};
+use tokio::sync::RwLock;
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Shared state accessible by all tool/resource handlers.
 pub struct State<S: PoolStore> {
+    /// The pool instance.
     pub pool: Pool<S>,
-    pub skills: SkillRegistry,
+    /// Thread-safe skill registry (mutated by skill management tools).
+    pub skills: Arc<RwLock<SkillRegistry>>,
+    /// Workflow registry.
     pub workflows: WorkflowRegistry,
+    /// Directory for persisting project-local skills.
+    pub skills_dir: PathBuf,
 }
 
 /// MCP server for managing a pool of Claude CLI slots.
@@ -154,18 +160,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(disabled = ?cli.disable_skill, "disabled skills");
     }
 
+    // Build prompts before wrapping skills in RwLock (prompts are static at startup).
+    let prompt_list = prompts::skill_prompts(&skills);
+
     let workflows = WorkflowRegistry::with_builtins();
 
     let state = Arc::new(State {
         pool,
-        skills,
+        skills: Arc::new(RwLock::new(skills)),
         workflows,
+        skills_dir: cli.skills_dir,
     });
 
     let tool_list = tools::all_tools(&state);
     let resource_list = resources::all_resources(&state);
     let template_list = resources::all_templates(&state);
-    let prompt_list = prompts::skill_prompts(&state.skills);
 
     let mut router = McpRouter::new()
         .server_info("claude-pool", env!("CARGO_PKG_VERSION"))
@@ -199,6 +208,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              engineer. Rule of thumb: how much does the task benefit from deeper thinking? \
              \
              Skills available as prompts: code_review, implement, write_tests, refactor, summarize. \
+             Skills management: pool_skill_list (discover), pool_skill_get (inspect), \
+             pool_skill_add (register ephemeral), pool_skill_remove (unregister), \
+             pool_skill_save (persist to disk). \
              \
              Scheduling: use Claude Code's /loop to run tasks on a recurring interval \
              (e.g. `/loop 30m check pool status`). /loop fires while idle (session-only). For \

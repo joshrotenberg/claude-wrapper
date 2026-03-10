@@ -1,8 +1,10 @@
 //! MCP tool definitions for claude-pool.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use claude_pool::PoolStore;
+use claude_pool::skill::{SkillScope, SkillSource};
 use claude_pool::types::SlotConfig;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -97,6 +99,70 @@ pub struct SetTargetSlotsInput {
     pub target: usize,
 }
 
+// ── Skill management input schemas ──────────────────────────────────
+
+/// Input for listing skills with optional filters.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillListInput {
+    /// Filter by scope: "task", "coordinator", "chain".
+    pub scope: Option<String>,
+    /// Filter by source: "builtin", "project", "runtime".
+    pub source: Option<String>,
+}
+
+/// Input for getting a skill by name.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillGetInput {
+    /// Skill name.
+    pub name: String,
+}
+
+/// Argument definition for a skill being added.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillArgumentInput {
+    /// Argument name (used as `{name}` placeholder in the prompt template).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Whether this argument is required.
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Input for adding a new skill at runtime.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillAddInput {
+    /// Unique skill name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Prompt template. Use `{arg_name}` placeholders for arguments.
+    pub prompt: String,
+    /// Argument definitions.
+    #[serde(default)]
+    pub arguments: Vec<SkillArgumentInput>,
+    /// Where this skill runs: "task" (default), "coordinator", "chain".
+    pub scope: Option<String>,
+    /// Per-skill config overrides as JSON (model, effort, etc.).
+    pub config: Option<serde_json::Value>,
+}
+
+/// Input for removing a skill by name.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillRemoveInput {
+    /// Skill name to remove.
+    pub name: String,
+}
+
+/// Input for saving a skill to disk.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillSaveInput {
+    /// Skill name to save.
+    pub name: String,
+    /// Directory to save to. Defaults to the configured skills_dir.
+    pub dir: Option<String>,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -118,6 +184,23 @@ fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<Slo
         effort: effort.and_then(|e| parse_effort(&e)),
         ..Default::default()
     })
+}
+
+fn parse_scope(s: &str) -> SkillScope {
+    match s {
+        "coordinator" => SkillScope::Coordinator,
+        "chain" => SkillScope::Chain,
+        _ => SkillScope::Task,
+    }
+}
+
+fn parse_source(s: &str) -> Option<SkillSource> {
+    match s {
+        "builtin" => Some(SkillSource::Builtin),
+        "project" => Some(SkillSource::Project),
+        "runtime" => Some(SkillSource::Runtime),
+        _ => None,
+    }
 }
 
 // ── Tool builders ────────────────────────────────────────────────────
@@ -468,7 +551,8 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
         .handler(move |input: SkillRunInput| {
             let state = Arc::clone(&state);
             async move {
-                let skill = match state.skills.get(&input.skill) {
+                let registry = state.skills.read().await;
+                let skill = match registry.get(&input.skill) {
                     Some(s) => s.clone(),
                     None => {
                         return Ok(CallToolResult::error(format!(
@@ -477,6 +561,7 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                         )));
                     }
                 };
+                drop(registry);
 
                 let prompt = match skill.render(&input.arguments) {
                     Ok(p) => p,
@@ -513,7 +598,8 @@ pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
             let state = Arc::clone(&state);
             async move {
                 let steps = convert_chain_steps(input.steps);
-                match claude_pool::execute_chain(&state.pool, &state.skills, &steps).await {
+                let skills = state.skills.read().await;
+                match claude_pool::execute_chain(&state.pool, &skills, &steps).await {
                     Ok(result) => Ok(CallToolResult::json(serde_json::to_value(&result).unwrap())),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
@@ -536,7 +622,8 @@ pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
                 };
-                match state.pool.submit_chain(steps, &state.skills, options).await {
+                let skills = state.skills.read().await;
+                match state.pool.submit_chain(steps, &skills, options).await {
                     Ok(task_id) => Ok(CallToolResult::json(
                         serde_json::json!({ "task_id": task_id.0 }),
                     )),
@@ -561,11 +648,8 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
                 };
-                match state
-                    .pool
-                    .fan_out_chains(chains, &state.skills, options)
-                    .await
-                {
+                let skills = state.skills.read().await;
+                match state.pool.fan_out_chains(chains, &skills, options).await {
                     Ok(task_ids) => Ok(CallToolResult::json(serde_json::json!({
                         "task_ids": task_ids.iter().map(|id| &id.0).collect::<Vec<_>>()
                     }))),
@@ -621,12 +705,13 @@ pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -
         .handler(move |input: InvokeWorkflowInput| {
             let state = Arc::clone(&state);
             async move {
+                let skills = state.skills.read().await;
                 match state
                     .pool
                     .submit_workflow(
                         &input.workflow,
                         input.arguments,
-                        &state.skills,
+                        &skills,
                         &state.workflows,
                         input.tags.unwrap_or_default(),
                     )
@@ -707,6 +792,223 @@ pub fn pool_set_target_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) 
         .build()
 }
 
+// ── Skill management tools ──────────────────────────────────────────
+
+/// List registered skills with optional scope/source filters.
+pub fn pool_skill_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_list")
+        .title("List Skills")
+        .description("List registered skills with optional scope/source filters.")
+        .read_only()
+        .handler(move |input: SkillListInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let registry = state.skills.read().await;
+                let scope_filter = input.scope.as_deref().map(parse_scope);
+                let source_filter = input.source.as_deref().and_then(parse_source);
+
+                let mut results: Vec<_> = registry
+                    .list_registered()
+                    .into_iter()
+                    .filter(|rs| {
+                        if let Some(scope) = scope_filter
+                            && rs.skill.scope != scope
+                        {
+                            return false;
+                        }
+                        if let Some(source) = source_filter
+                            && rs.source != source
+                        {
+                            return false;
+                        }
+                        true
+                    })
+                    .map(|rs| {
+                        serde_json::json!({
+                            "name": rs.skill.name,
+                            "description": rs.skill.description,
+                            "scope": rs.skill.scope.to_string(),
+                            "source": rs.source.to_string(),
+                        })
+                    })
+                    .collect();
+                results.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                Ok(CallToolResult::json(serde_json::json!(results)))
+            }
+        })
+        .build()
+}
+
+/// Get full details of a skill by name, including prompt template.
+pub fn pool_skill_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_get")
+        .title("Get Skill Details")
+        .description("Get full details of a skill by name, including prompt template.")
+        .read_only()
+        .handler(move |input: SkillGetInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let registry = state.skills.read().await;
+                match registry.get_registered(&input.name) {
+                    Some(rs) => {
+                        let response = serde_json::json!({
+                            "name": rs.skill.name,
+                            "description": rs.skill.description,
+                            "prompt": rs.skill.prompt,
+                            "arguments": rs.skill.arguments.iter().map(|a| serde_json::json!({
+                                "name": a.name,
+                                "description": a.description,
+                                "required": a.required,
+                            })).collect::<Vec<_>>(),
+                            "scope": rs.skill.scope.to_string(),
+                            "source": rs.source.to_string(),
+                            "config": rs.skill.config,
+                        });
+                        Ok(CallToolResult::json(response))
+                    }
+                    None => Ok(CallToolResult::error(format!(
+                        "skill not found: {}",
+                        input.name
+                    ))),
+                }
+            }
+        })
+        .build()
+}
+
+/// Register a skill at runtime. Ephemeral unless saved with pool_skill_save.
+pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_add")
+        .title("Add Skill")
+        .description(
+            "Register a skill at runtime. Ephemeral (lost on restart) unless saved \
+             with pool_skill_save. Overwrites any existing skill with the same name.",
+        )
+        .handler(move |input: SkillAddInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let scope = input.scope.as_deref().map(parse_scope).unwrap_or_default();
+                let arguments = input
+                    .arguments
+                    .into_iter()
+                    .map(|a| claude_pool::SkillArgument {
+                        name: a.name,
+                        description: a.description,
+                        required: a.required,
+                    })
+                    .collect();
+                let config: Option<SlotConfig> =
+                    input.config.and_then(|v| serde_json::from_value(v).ok());
+                let skill = claude_pool::Skill {
+                    name: input.name.clone(),
+                    description: input.description,
+                    prompt: input.prompt,
+                    arguments,
+                    config,
+                    scope,
+                };
+                let mut registry = state.skills.write().await;
+                let overwritten = registry.get(&input.name).is_some();
+                registry.register(skill, SkillSource::Runtime);
+                Ok(CallToolResult::json(serde_json::json!({
+                    "name": input.name,
+                    "overwritten": overwritten,
+                    "source": "runtime",
+                })))
+            }
+        })
+        .build()
+}
+
+/// Remove a skill by name. Runtime-only, does not delete files.
+pub fn pool_skill_remove_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_remove")
+        .title("Remove Skill")
+        .description("Remove a skill by name. Runtime-only, does not delete files on disk.")
+        .handler(move |input: SkillRemoveInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let mut registry = state.skills.write().await;
+                match registry.remove(&input.name) {
+                    Some(_) => Ok(CallToolResult::json(serde_json::json!({
+                        "removed": input.name,
+                    }))),
+                    None => Ok(CallToolResult::error(format!(
+                        "skill not found: {}",
+                        input.name
+                    ))),
+                }
+            }
+        })
+        .build()
+}
+
+/// Persist a skill to the project skills directory as JSON.
+pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_save")
+        .title("Save Skill to Disk")
+        .description(
+            "Persist a skill to the project skills directory as JSON. \
+             Creates/overwrites {dir}/{name}.json.",
+        )
+        .handler(move |input: SkillSaveInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let skill = {
+                    let registry = state.skills.read().await;
+                    match registry.get(&input.name) {
+                        Some(s) => s.clone(),
+                        None => {
+                            return Ok(CallToolResult::error(format!(
+                                "skill not found: {}",
+                                input.name
+                            )));
+                        }
+                    }
+                };
+
+                let dir = input
+                    .dir
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| state.skills_dir.clone());
+
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    return Ok(CallToolResult::error(format!(
+                        "failed to create directory {}: {e}",
+                        dir.display()
+                    )));
+                }
+
+                let path = dir.join(format!("{}.json", input.name));
+                let json = match serde_json::to_string_pretty(&skill) {
+                    Ok(j) => j,
+                    Err(e) => return Ok(CallToolResult::error(format!("serialize error: {e}"))),
+                };
+
+                if let Err(e) = std::fs::write(&path, &json) {
+                    return Ok(CallToolResult::error(format!(
+                        "failed to write {}: {e}",
+                        path.display()
+                    )));
+                }
+
+                // Update source to Project since it's now persisted.
+                {
+                    let mut registry = state.skills.write().await;
+                    if let Some(existing) = registry.get(&input.name).cloned() {
+                        registry.register(existing, SkillSource::Project);
+                    }
+                }
+
+                Ok(CallToolResult::json(serde_json::json!({
+                    "saved": input.name,
+                    "path": path.display().to_string(),
+                })))
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -730,5 +1032,10 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         context_delete_tool(Arc::clone(state)),
         context_list_tool(Arc::clone(state)),
         pool_configure_slot_tool(Arc::clone(state)),
+        pool_skill_list_tool(Arc::clone(state)),
+        pool_skill_get_tool(Arc::clone(state)),
+        pool_skill_add_tool(Arc::clone(state)),
+        pool_skill_remove_tool(Arc::clone(state)),
+        pool_skill_save_tool(Arc::clone(state)),
     ]
 }
