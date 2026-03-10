@@ -32,6 +32,16 @@ git clone https://github.com/joshrotenberg/claude-wrapper
 cargo install --path crates/claude-pool-server
 ```
 
+Or run directly without installing:
+
+```bash
+cargo run -p claude-pool-server -- -n 4 --budget-usd 10.0
+```
+
+### Future options
+
+Homebrew and Docker distributions are planned but not yet available. For now, `cargo install` is the recommended approach. Docker will make more sense once HTTP transport lands ([#73](https://github.com/joshrotenberg/claude-wrapper/issues/73)).
+
 ## Quick Start
 
 ```bash
@@ -53,6 +63,20 @@ Add to `.mcp.json`:
 ```
 
 Reload your Claude Code session to enable the server.
+
+### Verify it works
+
+After reloading, run a quick smoke test from your Claude session:
+
+```
+# Check the pool is running
+@mcp pool_status
+
+# Run a simple task
+@mcp pool_run prompt: "say hello"
+```
+
+`pool_status` should show your slots in `idle` state. `pool_run` should return a response with output and spend information.
 
 ## CLI Flags
 
