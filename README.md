@@ -1,6 +1,6 @@
 # claude-wrapper
 
-A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, worker pool orchestration, and MCP server.
+A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, slot pool orchestration, and MCP server.
 
 [![Crates.io](https://img.shields.io/crates/v/claude-wrapper.svg)](https://crates.io/crates/claude-wrapper)
 [![Documentation](https://docs.rs/claude-wrapper/badge.svg)](https://docs.rs/claude-wrapper)
@@ -9,14 +9,14 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, w
 
 ## What is claude-pool?
 
-**claude-pool** is measured parallelism for Claude Code: selective, human-in-the-loop worker coordination. Run multiple Claude CLI instances simultaneously without orchestration overhead. Sit between solo Claude sessions and full automation platforms.
+**claude-pool** is measured parallelism for Claude Code: selective, human-in-the-loop slot coordination. Run multiple Claude CLI instances simultaneously without orchestration overhead. Sit between solo Claude sessions and full automation platforms.
 
 **Not** a full orchestration framework or a leave-it-running daemon. This is for applications, scripts, and interactive sessions that need occasional parallel execution under human control—submit tasks, get results, stay in the loop.
 
 ### Key Differentiators
 
-- **Session-scoped**: Workers live only as long as your application. No external state.
-- **Conversation-first**: Inject shared context across workers. Workers inherit your session state.
+- **Session-scoped**: Slots live only as long as your application. No external state.
+- **Conversation-first**: Inject shared context across slots. Slots inherit your session state.
 - **Selective**: Choose what offloads—chains, parallel tasks, or isolated execution. Human decides when to parallelize.
 - **MCP-native**: Expose the pool as an MCP server for use directly from Claude Code.
 
@@ -32,7 +32,7 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, w
       ┌──────────────────────────────────┐
       │      claude-pool (library)       │
       │  • Task submission & routing     │
-      │  • Worker pool (N workers)       │
+      │  • Slot pool (N slots)       │
       │  • Budget tracking               │
       │  • Chains, fan-out, skills       │
       │  • Worktree isolation            │
@@ -40,7 +40,7 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, w
                    │
           ┌────────┼────────┐
           ▼        ▼        ▼
-      Worker-0 Worker-1 Worker-N
+      Slot-0 Slot-1 Slot-N
       (Claude CLI instances)
           │        │        │
          Uses: claude-wrapper (CLI wrapper)
@@ -49,7 +49,7 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, w
 | Crate | Purpose | Docs |
 |-------|---------|------|
 | **[claude-wrapper](crates/claude-wrapper/)** | Type-safe CLI wrapper with builder pattern | [README](crates/claude-wrapper/README.md) ⟡ [docs.rs](https://docs.rs/claude-wrapper) |
-| **[claude-pool](crates/claude-pool/)** | Worker pool, orchestration, budget control | [README](crates/claude-pool/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool) |
+| **[claude-pool](crates/claude-pool/)** | Slot pool, orchestration, budget control | [README](crates/claude-pool/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool) |
 | **[claude-pool-server](crates/claude-pool-server/)** | MCP server exposing the pool | [README](crates/claude-pool-server/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool-server) |
 
 ## Quick Start
@@ -71,7 +71,7 @@ async fn main() -> claude_wrapper::Result<()> {
 }
 ```
 
-### 2. Use a worker pool in your app
+### 2. Use a slot pool in your app
 
 ```rust
 use claude_pool::Pool;
@@ -80,7 +80,7 @@ use claude_wrapper::Claude;
 #[tokio::main]
 async fn main() -> claude_pool::Result<()> {
     let claude = Claude::builder().build()?;
-    let pool = Pool::builder(claude).workers(4).build().await?;
+    let pool = Pool::builder(claude).slots(4).build().await?;
 
     let result = pool.run("write a haiku about rust").await?;
     println!("{}", result.output);
@@ -100,7 +100,7 @@ claude-pool-server -n 4 --budget-usd 10.0 --model sonnet
 ## Features
 
 - **claude-wrapper**: Type-safe CLI wrapper with full option coverage (28 options), MCP server management, plugin management, streaming NDJSON events
-- **claude-pool**: Multi-worker coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, budget control, shared context injection, optional worktree isolation, reusable skills registry
+- **claude-pool**: Multi-slot coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, budget control, shared context injection, optional worktree isolation, reusable skills registry
 - **claude-pool-server**: Standalone MCP server binary, configurable via CLI flags, full pool tool exposure, MCP resources for state inspection
 
 ## Installation
@@ -109,7 +109,7 @@ claude-pool-server -n 4 --budget-usd 10.0 --model sonnet
 # Library: type-safe CLI wrapper
 cargo add claude-wrapper
 
-# Library: worker pool orchestration
+# Library: slot pool orchestration
 cargo add claude-pool
 
 # Binary: MCP server for the pool
@@ -129,18 +129,18 @@ cargo install claude-pool-server
 ### Latest Releases
 
 - **claude-wrapper** v0.2.0 - Full CLI surface, streaming, all subcommands
-- **claude-pool** v0.1.0 - Worker pool, chains, skills, worktree isolation
+- **claude-pool** v0.1.0 - Slot pool, chains, skills, worktree isolation
 - **claude-pool-server** v0.1.0 - MCP server with all tools and resources
 
 ### Implemented
 
 - Full CLI wrapper (28 QueryCommand options + all subcommands)
-- Worker pool with task routing, budgets, and worker identity
+- Slot pool with task routing, budgets, and slot identity
 - MCP server binary with tools and resources
 - Sequential chains with failure policies
 - Parallel fan-out execution
-- Shared context injection across workers
-- Worktree isolation per worker
+- Shared context injection across slots
+- Worktree isolation per slot
 - Reusable skills registry
 
 ## Development & Testing

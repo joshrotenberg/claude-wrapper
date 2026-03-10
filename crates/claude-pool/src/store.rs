@@ -1,6 +1,6 @@
 //! Pluggable storage backend for pool state.
 //!
-//! The [`PoolStore`] trait abstracts where task and worker records live.
+//! The [`PoolStore`] trait abstracts where task and slot records live.
 //! [`InMemoryStore`] keeps everything in-process; a future `RedisStore`
 //! could share state across multiple pool server instances.
 
@@ -27,17 +27,17 @@ pub trait PoolStore: Send + Sync {
     /// Delete a task record.
     async fn delete_task(&self, id: &TaskId) -> Result<bool>;
 
-    /// Insert or update a worker record.
-    async fn put_worker(&self, record: WorkerRecord) -> Result<()>;
+    /// Insert or update a slot record.
+    async fn put_slot(&self, record: SlotRecord) -> Result<()>;
 
-    /// Get a worker by ID.
-    async fn get_worker(&self, id: &WorkerId) -> Result<Option<WorkerRecord>>;
+    /// Get a slot by ID.
+    async fn get_slot(&self, id: &SlotId) -> Result<Option<SlotRecord>>;
 
-    /// List all workers.
-    async fn list_workers(&self) -> Result<Vec<WorkerRecord>>;
+    /// List all slots.
+    async fn list_slots(&self) -> Result<Vec<SlotRecord>>;
 
-    /// Delete a worker record.
-    async fn delete_worker(&self, id: &WorkerId) -> Result<bool>;
+    /// Delete a slot record.
+    async fn delete_slot(&self, id: &SlotId) -> Result<bool>;
 }
 
 /// In-memory store using [`DashMap`] for concurrent access.
@@ -47,7 +47,7 @@ pub trait PoolStore: Send + Sync {
 #[derive(Debug, Default)]
 pub struct InMemoryStore {
     tasks: DashMap<String, TaskRecord>,
-    workers: DashMap<String, WorkerRecord>,
+    slots: DashMap<String, SlotRecord>,
 }
 
 impl InMemoryStore {
@@ -79,8 +79,8 @@ impl PoolStore for InMemoryStore {
                 {
                     return false;
                 }
-                if let Some(ref wid) = filter.worker_id
-                    && t.worker_id.as_ref() != Some(wid)
+                if let Some(ref wid) = filter.slot_id
+                    && t.slot_id.as_ref() != Some(wid)
                 {
                     return false;
                 }
@@ -99,21 +99,21 @@ impl PoolStore for InMemoryStore {
         Ok(self.tasks.remove(&id.0).is_some())
     }
 
-    async fn put_worker(&self, record: WorkerRecord) -> Result<()> {
-        self.workers.insert(record.id.0.clone(), record);
+    async fn put_slot(&self, record: SlotRecord) -> Result<()> {
+        self.slots.insert(record.id.0.clone(), record);
         Ok(())
     }
 
-    async fn get_worker(&self, id: &WorkerId) -> Result<Option<WorkerRecord>> {
-        Ok(self.workers.get(&id.0).map(|r| r.value().clone()))
+    async fn get_slot(&self, id: &SlotId) -> Result<Option<SlotRecord>> {
+        Ok(self.slots.get(&id.0).map(|r| r.value().clone()))
     }
 
-    async fn list_workers(&self) -> Result<Vec<WorkerRecord>> {
-        Ok(self.workers.iter().map(|r| r.value().clone()).collect())
+    async fn list_slots(&self) -> Result<Vec<SlotRecord>> {
+        Ok(self.slots.iter().map(|r| r.value().clone()).collect())
     }
 
-    async fn delete_worker(&self, id: &WorkerId) -> Result<bool> {
-        Ok(self.workers.remove(&id.0).is_some())
+    async fn delete_slot(&self, id: &SlotId) -> Result<bool> {
+        Ok(self.slots.remove(&id.0).is_some())
     }
 }
 
@@ -130,7 +130,7 @@ mod tests {
             id: id.clone(),
             prompt: "write tests".into(),
             state: TaskState::Pending,
-            worker_id: None,
+            slot_id: None,
             result: None,
             tags: vec!["testing".into()],
             config: None,
@@ -151,14 +151,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_crud() {
+    async fn slot_crud() {
         let store = InMemoryStore::new();
-        let id = WorkerId("w-0".into());
+        let id = SlotId("w-0".into());
 
-        let record = WorkerRecord {
+        let record = SlotRecord {
             id: id.clone(),
-            state: WorkerState::Idle,
-            config: WorkerConfig::default(),
+            state: SlotState::Idle,
+            config: SlotConfig::default(),
             current_task: None,
             session_id: None,
             tasks_completed: 0,
@@ -167,17 +167,17 @@ mod tests {
             worktree_path: None,
         };
 
-        store.put_worker(record).await.unwrap();
+        store.put_slot(record).await.unwrap();
 
-        let fetched = store.get_worker(&id).await.unwrap().unwrap();
-        assert_eq!(fetched.state, WorkerState::Idle);
+        let fetched = store.get_slot(&id).await.unwrap().unwrap();
+        assert_eq!(fetched.state, SlotState::Idle);
 
-        let all = store.list_workers().await.unwrap();
+        let all = store.list_slots().await.unwrap();
         assert_eq!(all.len(), 1);
 
-        let deleted = store.delete_worker(&id).await.unwrap();
+        let deleted = store.delete_slot(&id).await.unwrap();
         assert!(deleted);
-        assert!(store.get_worker(&id).await.unwrap().is_none());
+        assert!(store.get_slot(&id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -195,7 +195,7 @@ mod tests {
                     id: TaskId(format!("t-{i}")),
                     prompt: format!("task {i}"),
                     state,
-                    worker_id: None,
+                    slot_id: None,
                     result: None,
                     tags: vec![],
                     config: None,

@@ -1,6 +1,6 @@
 //! claude-pool MCP server binary.
 //!
-//! Manages a pool of Claude CLI workers, exposed as an MCP server
+//! Manages a pool of Claude CLI slots, exposed as an MCP server
 //! over stdio transport.
 
 mod prompts;
@@ -10,9 +10,7 @@ mod tools;
 use std::sync::Arc;
 
 use clap::Parser;
-use claude_pool::{
-    GlobalWorkerConfig, InMemoryStore, Pool, PoolStore, SkillRegistry, WorkflowRegistry,
-};
+use claude_pool::{InMemoryStore, Pool, PoolConfig, PoolStore, SkillRegistry, WorkflowRegistry};
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Shared state accessible by all tool/resource handlers.
@@ -22,15 +20,15 @@ pub struct State<S: PoolStore> {
     pub workflows: WorkflowRegistry,
 }
 
-/// MCP server for managing a pool of Claude CLI workers.
+/// MCP server for managing a pool of Claude CLI slots.
 #[derive(Parser)]
 #[command(name = "claude-pool-server", version)]
 struct Cli {
-    /// Number of workers to spawn.
+    /// Number of slots to spawn.
     #[arg(short = 'n', long, default_value = "2")]
-    workers: usize,
+    slots: usize,
 
-    /// Default model for all workers (e.g. "claude-haiku-4-5-20251001").
+    /// Default model for all slots (e.g. "claude-haiku-4-5-20251001").
     #[arg(short, long)]
     model: Option<String>,
 
@@ -42,15 +40,15 @@ struct Cli {
     #[arg(short, long)]
     budget_usd: Option<f64>,
 
-    /// System prompt for all workers.
+    /// System prompt for all slots.
     #[arg(short, long)]
     system_prompt: Option<String>,
 
-    /// Permission mode for workers (default, acceptEdits, bypassPermissions, plan, auto).
+    /// Permission mode for slots (default, acceptEdits, bypassPermissions, plan, auto).
     #[arg(short, long, default_value = "plan")]
     permission_mode: String,
 
-    /// Enable git worktree isolation for workers.
+    /// Enable git worktree isolation for slots.
     #[arg(short = 'w', long)]
     worktree: bool,
 
@@ -93,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    let config = GlobalWorkerConfig {
+    let config = PoolConfig {
         model: cli.model,
         effort: cli.effort.and_then(|e| parse_effort(&e)),
         budget_microdollars: cli.budget_usd.map(|b| (b * 1_000_000.0) as u64),
@@ -106,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let claude = claude_wrapper::Claude::builder().build()?;
 
     let pool = Pool::builder_with_store(claude, InMemoryStore::new())
-        .workers(cli.workers)
+        .slots(cli.slots)
         .config(config)
         .build()
         .await
@@ -137,9 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Execution modes: use inline for decisions and interactive work; pool_run for simple \
              administrative tasks; pool_submit_chain for multi-step workflows (plan/code/review/PR) \
              to keep conversations responsive; pool_fan_out for parallel tasks; Agent tool for \
-             research requiring MCP tools (GitHub, crates.io). Pool workers have CLI tools (git, \
+             research requiring MCP tools (GitHub, crates.io). Pool slots have CLI tools (git, \
              cargo, gh) but not MCP access. Default to inline when uncertain; user can say \
-             \"workerize it.\" \
+             \"slotize it.\" \
              \
              Task sizing: Single task (pool_run) = one clear action with one clear output; if using \
              \"and\" more than once, use a chain instead. Chain = workflow where steps feed into each \
@@ -150,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              \
              Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
              pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
-             with per-step progress), context_set/get/list (shared state), pool_configure_worker. \
+             with per-step progress), context_set/get/list (shared state), pool_configure_slot. \
              \
              Skills available as prompts: code_review, implement, write_tests, refactor, summarize. \
              \
@@ -167,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router = router.resource_template(template);
     }
 
-    tracing::info!(workers = cli.workers, "claude-pool-server starting");
+    tracing::info!(slots = cli.slots, "claude-pool-server starting");
 
     let mut transport = StdioTransport::new(router);
     transport.run().await?;

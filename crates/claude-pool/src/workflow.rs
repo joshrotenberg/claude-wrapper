@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::chain::{ChainStep, StepAction, StepFailurePolicy};
-use crate::types::WorkerConfig;
+use crate::types::SlotConfig;
 
 /// A workflow template — a preset chain with placeholders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub struct WorkflowStep {
     pub action: StepAction,
 
     /// Per-step config overrides (model, effort, etc.).
-    pub config: Option<WorkerConfig>,
+    pub config: Option<SlotConfig>,
 
     /// Failure policy for this step.
     #[serde(default)]

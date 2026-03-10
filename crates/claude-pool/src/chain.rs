@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::pool::Pool;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
-use crate::types::{TaskId, WorkerConfig};
+use crate::types::{SlotConfig, TaskId};
 
 /// A step in a chain pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub struct ChainStep {
     pub action: StepAction,
 
     /// Per-step config overrides (model, effort, etc.).
-    pub config: Option<WorkerConfig>,
+    pub config: Option<SlotConfig>,
 
     /// Failure policy for this step.
     #[serde(default)]

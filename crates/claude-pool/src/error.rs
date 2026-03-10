@@ -3,17 +3,17 @@
 /// Errors that can occur in claude-pool operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A worker with the given ID was not found.
-    #[error("worker not found: {0}")]
-    WorkerNotFound(String),
+    /// A slot with the given ID was not found.
+    #[error("slot not found: {0}")]
+    SlotNotFound(String),
 
     /// A task with the given ID was not found.
     #[error("task not found: {0}")]
     TaskNotFound(String),
 
-    /// No worker became available within the timeout period.
-    #[error("no worker available after waiting {timeout_secs}s")]
-    NoWorkerAvailable { timeout_secs: u64 },
+    /// No slot became available within the timeout period.
+    #[error("no slot available after waiting {timeout_secs}s")]
+    NoSlotAvailable { timeout_secs: u64 },
 
     /// The pool has been shut down and is no longer accepting work.
     #[error("pool is shut down")]

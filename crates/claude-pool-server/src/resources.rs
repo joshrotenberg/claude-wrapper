@@ -24,7 +24,7 @@ fn text_resource(uri: &str, json: String) -> ReadResourceResult {
 pub fn pool_status_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Resource {
     ResourceBuilder::new("pool://status")
         .name("Pool Status")
-        .description("Pool overview: workers, budget, tasks")
+        .description("Pool overview: slots, budget, tasks")
         .mime_type("application/json")
         .handler(move || {
             let state = Arc::clone(&state);
@@ -41,22 +41,22 @@ pub fn pool_status_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Res
         .build()
 }
 
-pub fn pool_workers_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Resource {
-    ResourceBuilder::new("pool://workers")
-        .name("Workers")
-        .description("List of all workers with state and stats")
+pub fn pool_slots_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Resource {
+    ResourceBuilder::new("pool://slots")
+        .name("Slots")
+        .description("List of all slots with state and stats")
         .mime_type("application/json")
         .handler(move || {
             let state = Arc::clone(&state);
             async move {
-                let workers = state
+                let slots = state
                     .pool
                     .store()
-                    .list_workers()
+                    .list_slots()
                     .await
                     .map_err(|e| tower_mcp::Error::internal(e.to_string()))?;
-                let json = serde_json::to_string_pretty(&workers)?;
-                Ok(text_resource("pool://workers", json))
+                let json = serde_json::to_string_pretty(&slots)?;
+                Ok(text_resource("pool://slots", json))
             }
         })
         .build()
@@ -65,7 +65,7 @@ pub fn pool_workers_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Re
 pub fn pool_budget_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Resource {
     ResourceBuilder::new("pool://budget")
         .name("Budget")
-        .description("Budget breakdown: total, spent, remaining, per-worker")
+        .description("Budget breakdown: total, spent, remaining, per-slot")
         .mime_type("application/json")
         .handler(move || {
             let state = Arc::clone(&state);
@@ -75,14 +75,14 @@ pub fn pool_budget_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Res
                     .status()
                     .await
                     .map_err(|e| tower_mcp::Error::internal(e.to_string()))?;
-                let workers = state
+                let slots = state
                     .pool
                     .store()
-                    .list_workers()
+                    .list_slots()
                     .await
                     .map_err(|e| tower_mcp::Error::internal(e.to_string()))?;
 
-                let per_worker: Vec<serde_json::Value> = workers
+                let per_slot: Vec<serde_json::Value> = slots
                     .iter()
                     .map(|w| {
                         serde_json::json!({
@@ -101,7 +101,7 @@ pub fn pool_budget_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Res
                     "total_microdollars": status.budget_microdollars,
                     "spent_microdollars": status.total_spend_microdollars,
                     "remaining_microdollars": remaining,
-                    "per_worker": per_worker,
+                    "per_slot": per_slot,
                 });
 
                 let json = serde_json::to_string_pretty(&budget)?;
@@ -131,10 +131,10 @@ pub fn pool_context_resource<S: PoolStore + 'static>(state: Arc<State<S>>) -> Re
         .build()
 }
 
-pub fn pool_worker_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> ResourceTemplate {
-    ResourceTemplateBuilder::new("pool://workers/{id}")
-        .name("Worker Detail")
-        .description("Detail for a specific worker")
+pub fn pool_slot_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> ResourceTemplate {
+    ResourceTemplateBuilder::new("pool://slots/{id}")
+        .name("Slot Detail")
+        .description("Detail for a specific slot")
         .mime_type("application/json")
         .handler(
             move |uri: String, vars: std::collections::HashMap<String, String>| {
@@ -143,17 +143,17 @@ pub fn pool_worker_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> Res
                     let id = vars
                         .get("id")
                         .ok_or_else(|| tower_mcp::Error::internal("missing id parameter"))?;
-                    let worker_id = claude_pool::WorkerId(id.clone());
-                    let worker = state
+                    let slot_id = claude_pool::SlotId(id.clone());
+                    let slot = state
                         .pool
                         .store()
-                        .get_worker(&worker_id)
+                        .get_slot(&slot_id)
                         .await
                         .map_err(|e| tower_mcp::Error::internal(e.to_string()))?
                         .ok_or_else(|| {
-                            tower_mcp::Error::internal(format!("worker not found: {id}"))
+                            tower_mcp::Error::internal(format!("slot not found: {id}"))
                         })?;
-                    let json = serde_json::to_string_pretty(&worker)?;
+                    let json = serde_json::to_string_pretty(&slot)?;
                     Ok(text_resource(&uri, json))
                 }
             },
@@ -227,7 +227,7 @@ pub fn pool_chain_template<S: PoolStore + 'static>(state: Arc<State<S>>) -> Reso
 pub fn all_resources<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Resource> {
     vec![
         pool_status_resource(Arc::clone(state)),
-        pool_workers_resource(Arc::clone(state)),
+        pool_slots_resource(Arc::clone(state)),
         pool_budget_resource(Arc::clone(state)),
         pool_context_resource(Arc::clone(state)),
     ]
@@ -236,7 +236,7 @@ pub fn all_resources<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Resou
 /// Build all pool resource templates.
 pub fn all_templates<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<ResourceTemplate> {
     vec![
-        pool_worker_template(Arc::clone(state)),
+        pool_slot_template(Arc::clone(state)),
         pool_result_template(Arc::clone(state)),
         pool_chain_template(Arc::clone(state)),
     ]

@@ -1,6 +1,6 @@
 # claude-pool-server
 
-MCP server binary for managing Claude worker pools
+MCP server binary for managing Claude slot pools
 
 [![Crates.io](https://img.shields.io/crates/v/claude-pool-server.svg)](https://crates.io/crates/claude-pool-server)
 [![Documentation](https://docs.rs/claude-pool-server/badge.svg)](https://docs.rs/claude-pool-server)
@@ -9,10 +9,10 @@ MCP server binary for managing Claude worker pools
 
 ## Overview
 
-`claude-pool-server` is a standalone binary that exposes `claude-pool` as an MCP server over stdio transport. Add it to your `.mcp.json` and interact with worker pools directly from interactive Claude sessions.
+`claude-pool-server` is a standalone binary that exposes `claude-pool` as an MCP server over stdio transport. Add it to your `.mcp.json` and interact with slot pools directly from interactive Claude sessions.
 
 Perfect for:
-- Delegating work to background Claude workers
+- Delegating work to background Claude slots
 - Scaling tasks in parallel
 - Long-running analysis jobs
 - Budget-aware task orchestration
@@ -35,7 +35,7 @@ cargo install --path crates/claude-pool-server
 ## Quick Start
 
 ```bash
-# Start server with 4 workers, $10 budget, Sonnet model
+# Start server with 4 slots, $10 budget, Sonnet model
 claude-pool-server -n 4 --budget-usd 10.0 --model sonnet
 ```
 
@@ -56,19 +56,19 @@ Reload your Claude Code session to enable the server.
 
 ## CLI Flags
 
-### Worker Configuration
+### Slot Configuration
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `-n, --workers` | `NUMBER` | 2 | Number of workers to spawn |
-| `--model` | `STRING` | - | Default model for all workers (e.g. `sonnet`, `opus`) |
+| `-n, --slots` | `NUMBER` | 2 | Number of slots to spawn |
+| `--model` | `STRING` | - | Default model for all slots (e.g. `sonnet`, `opus`) |
 
 ### Default Settings
 
 | Flag | Type | Description |
 |------|------|-------------|
 | `--effort` | `LEVEL` | Default effort: min, low, medium, high, max |
-| `--system-prompt` | `TEXT` | System prompt for all workers |
+| `--system-prompt` | `TEXT` | System prompt for all slots |
 | `--permission-mode` | `MODE` | default, acceptEdits, bypassPermissions, plan, auto (default: plan) |
 
 ### Budget Control
@@ -81,13 +81,13 @@ Reload your Claude Code session to enable the server.
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `-w, --worktree` | - | Enable Git worktree isolation per worker |
+| `-w, --worktree` | - | Enable Git worktree isolation per slot |
 | `--no-builtins` | - | Disable built-in skills (code_review, refactor, etc.) |
 
 ### Examples
 
 ```bash
-# 8 workers, $50 budget, high effort
+# 8 slots, $50 budget, high effort
 claude-pool-server -n 8 --budget-usd 50 --effort high
 
 # Lightweight setup with worktree isolation
@@ -258,7 +258,7 @@ Returns: {
 
 ### Context Management
 
-Share key-value data with all workers (injected into system prompts).
+Share key-value data with all slots (injected into system prompts).
 
 #### context_set
 
@@ -305,7 +305,7 @@ Remove a context key:
 Returns: { deleted: true }
 ```
 
-### Worker Management
+### Slot Management
 
 #### pool_status
 
@@ -315,9 +315,9 @@ Get current pool state:
 @mcp pool_status
 
 Returns: {
-  workers: [
-    { id: "worker-0", status: "idle", active_tasks: 0 },
-    { id: "worker-1", status: "busy", active_tasks: 1 }
+  slots: [
+    { id: "slot-0", status: "idle", active_tasks: 0 },
+    { id: "slot-1", status: "busy", active_tasks: 1 }
   ],
   active_tasks: 1,
   pending_tasks: 3,
@@ -366,9 +366,9 @@ Access pool state and task details via resources.
 
 | Resource | Description |
 |----------|-------------|
-| `pool://status` | Current pool state (workers, tasks, spend) |
-| `pool://workers` | List of all workers |
-| `pool://workers/{id}` | Single worker details by ID |
+| `pool://status` | Current pool state (slots, tasks, spend) |
+| `pool://slots` | List of all slots |
+| `pool://slots/{id}` | Single slot details by ID |
 | `pool://budget` | Budget info (total, spent, remaining) |
 | `pool://context` | All context key-value pairs |
 | `pool://results/{task_id}` | Task result by ID |
@@ -422,7 +422,7 @@ Get result:
 ### Example 4: Budget-Aware Work
 
 ```
-Set context for all workers:
+Set context for all slots:
 @mcp context_set key: "budget_constraint" value: "optimize for cost"
 
 Then submit work:
@@ -452,14 +452,14 @@ Use with `pool_skill_run`.
 - Install Claude CLI: https://claude.ai/download
 - Or specify path: needs investigation
 
-### Workers Not Responding
+### Slots Not Responding
 
-Check worker status:
+Check slot status:
 ```
 @mcp pool_status
 ```
 
-If workers are offline, restart the server.
+If slots are offline, restart the server.
 
 ### Budget Exceeded
 
@@ -475,17 +475,17 @@ Tasks are rejected when budget cap is reached:
 ### High Latency
 
 Consider:
-- Reducing worker count (fewer concurrent tasks)
+- Reducing slot count (fewer concurrent tasks)
 - Increasing timeout settings
 - Using async submission for non-urgent tasks
 
 ## Performance Tuning
 
-### Worker Count
+### Slot Count
 
-- **2 workers** - Light tasks, minimal resource usage
-- **4 workers** - Balanced for typical workflows
-- **8+ workers** - Heavy parallelization, requires higher budget
+- **2 slots** - Light tasks, minimal resource usage
+- **4 slots** - Balanced for typical workflows
+- **8+ slots** - Heavy parallelization, requires higher budget
 
 ### Effort Level
 
@@ -497,19 +497,19 @@ Consider:
 
 `--worktree` adds overhead but enables safe parallel file edits.
 
-## Multi-Worker Coordination
+## Multi-Slot Coordination
 
-When running parallel chains or multiple workers on the same repo, coordination prevents conflicts and ensures clean handoffs.
+When running parallel chains or multiple slots on the same repo, coordination prevents conflicts and ensures clean handoffs.
 
 ### Enable Worktree Isolation
 
-For any workflow that chains multiple steps across different workers (e.g. plan → code → review → PR), **always use worktree isolation**:
+For any workflow that chains multiple steps across different slots (e.g. plan → code → review → PR), **always use worktree isolation**:
 
 ```bash
 claude-pool-server -n 4 --worktree
 ```
 
-Each worker gets an isolated git worktree. Without this, concurrent `git checkout` and `git branch` operations interfere with each other, causing PRs to land on wrong branches and requiring manual cleanup.
+Each slot gets an isolated git worktree. Without this, concurrent `git checkout` and `git branch` operations interfere with each other, causing PRs to land on wrong branches and requiring manual cleanup.
 
 ### Branch Best Practices
 

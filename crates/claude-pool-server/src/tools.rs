@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use claude_pool::PoolStore;
-use claude_pool::types::WorkerConfig;
+use claude_pool::types::SlotConfig;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tower_mcp::ToolBuilder;
@@ -63,14 +63,14 @@ pub struct ContextKeyInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ConfigureWorkerInput {
-    /// Worker ID to configure (e.g. "worker-0").
-    pub worker_id: String,
-    /// Human-readable name for the worker.
+pub struct ConfigureSlotInput {
+    /// Slot ID to configure (e.g. "slot-0").
+    pub slot_id: String,
+    /// Human-readable name for the slot.
     pub name: Option<String>,
-    /// Role classification for the worker.
+    /// Role classification for the slot.
     pub role: Option<String>,
-    /// Description of the worker's purpose.
+    /// Description of the slot's purpose.
     pub description: Option<String>,
 }
 
@@ -87,13 +87,13 @@ pub struct InvokeWorkflowInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScalingInput {
-    /// Number of workers to add or remove.
+    /// Number of slots to add or remove.
     pub count: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetTargetWorkersInput {
-    /// Target number of workers.
+pub struct SetTargetSlotsInput {
+    /// Target number of slots.
     pub target: usize,
 }
 
@@ -109,11 +109,11 @@ fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
     }
 }
 
-fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<WorkerConfig> {
+fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<SlotConfig> {
     if model.is_none() && effort.is_none() {
         return None;
     }
-    Some(WorkerConfig {
+    Some(SlotConfig {
         model,
         effort: effort.and_then(|e| parse_effort(&e)),
         ..Default::default()
@@ -125,7 +125,7 @@ fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<Wor
 pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_status")
         .title("Pool Status")
-        .description("Get pool status: workers, tasks in flight, budget")
+        .description("Get pool status: slots, tasks in flight, budget")
         .read_only()
         .no_params_handler(move || {
             let state = Arc::clone(&state);
@@ -143,7 +143,7 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_run")
         .title("Run Task (Sync)")
         .description(
-            "Run a task synchronously on the next available worker. Blocks until completion.",
+            "Run a task synchronously on the next available slot. Blocks until completion.",
         )
         .handler(move |input: RunInput| {
             let state = Arc::clone(&state);
@@ -224,7 +224,7 @@ pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_fan_out")
         .title("Fan Out (Parallel)")
         .description(
-            "Execute multiple tasks in parallel across available workers. Returns all results.",
+            "Execute multiple tasks in parallel across available slots. Returns all results.",
         )
         .handler(move |input: FanOutInput| {
             let state = Arc::clone(&state);
@@ -245,7 +245,7 @@ pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_drain")
         .title("Drain Pool")
         .description(
-            "Gracefully shut down the pool. Waits for in-flight tasks, then stops all workers.",
+            "Gracefully shut down the pool. Waits for in-flight tasks, then stops all slots.",
         )
         .destructive()
         .no_params_handler(move || {
@@ -265,7 +265,7 @@ pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 pub fn context_set_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_set")
         .title("Set Context")
-        .description("Set a shared context value. Context is injected into worker system prompts.")
+        .description("Set a shared context value. Context is injected into slot system prompts.")
         .handler(move |input: ContextSetInput| {
             let state = Arc::clone(&state);
             async move {
@@ -329,51 +329,49 @@ pub fn context_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
-pub fn pool_configure_worker_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
-    ToolBuilder::new("pool_configure_worker")
-        .title("Configure Worker")
-        .description("Set name/role/description for a worker to give it persistent identity")
-        .handler(move |input: ConfigureWorkerInput| {
+pub fn pool_configure_slot_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_configure_slot")
+        .title("Configure Slot")
+        .description("Set name/role/description for a slot to give it persistent identity")
+        .handler(move |input: ConfigureSlotInput| {
             let state = Arc::clone(&state);
             async move {
-                let worker_id = claude_pool::WorkerId(input.worker_id.clone());
+                let slot_id = claude_pool::SlotId(input.slot_id.clone());
 
-                match state.pool.store().get_worker(&worker_id).await {
-                    Ok(Some(mut worker)) => {
+                match state.pool.store().get_slot(&slot_id).await {
+                    Ok(Some(mut slot)) => {
                         // Update identity fields
                         if let Some(name) = input.name {
-                            worker.config.name = Some(name);
+                            slot.config.name = Some(name);
                         }
                         if let Some(role) = input.role {
-                            worker.config.role = Some(role);
+                            slot.config.role = Some(role);
                         }
                         if let Some(description) = input.description {
-                            worker.config.description = Some(description);
+                            slot.config.description = Some(description);
                         }
 
-                        // Persist updated worker
-                        match state.pool.store().put_worker(worker.clone()).await {
+                        // Persist updated slot
+                        match state.pool.store().put_slot(slot.clone()).await {
                             Ok(_) => {
                                 let response = serde_json::json!({
-                                    "worker_id": worker_id.0,
-                                    "name": worker.config.name,
-                                    "role": worker.config.role,
-                                    "description": worker.config.description,
+                                    "slot_id": slot_id.0,
+                                    "name": slot.config.name,
+                                    "role": slot.config.role,
+                                    "description": slot.config.description,
                                 });
                                 Ok(CallToolResult::json(response))
                             }
-                            Err(e) => Ok(CallToolResult::error(format!(
-                                "failed to update worker: {e}"
-                            ))),
+                            Err(e) => {
+                                Ok(CallToolResult::error(format!("failed to update slot: {e}")))
+                            }
                         }
                     }
                     Ok(None) => Ok(CallToolResult::error(format!(
-                        "worker not found: {}",
-                        input.worker_id
+                        "slot not found: {}",
+                        input.slot_id
                     ))),
-                    Err(e) => Ok(CallToolResult::error(format!(
-                        "failed to fetch worker: {e}"
-                    ))),
+                    Err(e) => Ok(CallToolResult::error(format!("failed to fetch slot: {e}"))),
                 }
             }
         })
@@ -553,7 +551,7 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
     ToolBuilder::new("pool_fan_out_chains")
         .title("Fan Out Chains (Parallel Pipelines)")
         .description(
-            "Submit multiple sequential chains to run in parallel, each on its own worker. \
+            "Submit multiple sequential chains to run in parallel, each on its own slot. \
              Returns all task IDs for individual progress tracking via pool_chain_result.",
         )
         .handler(move |input: FanOutChainsInput| {
@@ -648,16 +646,16 @@ pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -
 /// Build all pool tools.
 pub fn pool_scale_up_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_scale_up")
-        .title("Scale Up Workers")
-        .description("Add N new workers to the pool. Returns the new total worker count.")
+        .title("Scale Up Slots")
+        .description("Add N new slots to the pool. Returns the new total slot count.")
         .handler(move |input: ScalingInput| {
             let state = Arc::clone(&state);
             async move {
                 match state.pool.scale_up(input.count).await {
                     Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
                         "success": true,
-                        "new_worker_count": new_count,
-                        "details": format!("Scaled up by {} workers", input.count),
+                        "new_slot_count": new_count,
+                        "details": format!("Scaled up by {} slots", input.count),
                     }))),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
@@ -668,10 +666,10 @@ pub fn pool_scale_up_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool 
 
 pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_scale_down")
-        .title("Scale Down Workers")
+        .title("Scale Down Slots")
         .description(
-            "Remove N workers from the pool. Removes idle workers first, \
-             then waits for busy workers to complete. Returns the new total worker count.",
+            "Remove N slots from the pool. Removes idle slots first, \
+             then waits for busy slots to complete. Returns the new total slot count.",
         )
         .handler(move |input: ScalingInput| {
             let state = Arc::clone(&state);
@@ -679,8 +677,8 @@ pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
                 match state.pool.scale_down(input.count).await {
                     Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
                         "success": true,
-                        "new_worker_count": new_count,
-                        "details": format!("Scaled down by {} workers", input.count),
+                        "new_slot_count": new_count,
+                        "details": format!("Scaled down by {} slots", input.count),
                     }))),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
@@ -689,17 +687,17 @@ pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
         .build()
 }
 
-pub fn pool_set_target_workers_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
-    ToolBuilder::new("pool_set_target_workers")
-        .title("Set Target Worker Count")
-        .description("Set the pool to a specific number of workers, scaling up or down as needed.")
-        .handler(move |input: SetTargetWorkersInput| {
+pub fn pool_set_target_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_set_target_slots")
+        .title("Set Target Slot Count")
+        .description("Set the pool to a specific number of slots, scaling up or down as needed.")
+        .handler(move |input: SetTargetSlotsInput| {
             let state = Arc::clone(&state);
             async move {
-                match state.pool.set_target_workers(input.target).await {
+                match state.pool.set_target_slots(input.target).await {
                     Ok(new_count) => Ok(CallToolResult::json(serde_json::json!({
                         "success": true,
-                        "new_worker_count": new_count,
+                        "new_slot_count": new_count,
                         "target": input.target,
                     }))),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
@@ -726,11 +724,11 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_invoke_workflow_tool(Arc::clone(state)),
         pool_scale_up_tool(Arc::clone(state)),
         pool_scale_down_tool(Arc::clone(state)),
-        pool_set_target_workers_tool(Arc::clone(state)),
+        pool_set_target_slots_tool(Arc::clone(state)),
         context_set_tool(Arc::clone(state)),
         context_get_tool(Arc::clone(state)),
         context_delete_tool(Arc::clone(state)),
         context_list_tool(Arc::clone(state)),
-        pool_configure_worker_tool(Arc::clone(state)),
+        pool_configure_slot_tool(Arc::clone(state)),
     ]
 }

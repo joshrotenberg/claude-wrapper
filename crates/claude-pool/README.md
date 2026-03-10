@@ -1,6 +1,6 @@
 # claude-pool
 
-Worker pool orchestration library for Claude CLI
+Slot pool orchestration library for Claude CLI
 
 [![Crates.io](https://img.shields.io/crates/v/claude-pool.svg)](https://crates.io/crates/claude-pool)
 [![Documentation](https://docs.rs/claude-pool/badge.svg)](https://docs.rs/claude-pool)
@@ -9,13 +9,13 @@ Worker pool orchestration library for Claude CLI
 
 ## Overview
 
-`claude-pool` manages N Claude CLI workers behind a unified interface. A coordinator (typically an interactive Claude session) submits work, and the pool routes tasks by availability, tracks budgets, and handles worker lifecycle and session management.
+`claude-pool` manages N Claude CLI slots behind a unified interface. A coordinator (typically an interactive Claude session) submits work, and the pool routes tasks by availability, tracks budgets, and handles slot lifecycle and session management.
 
 Perfect for:
-- Scaling Claude work across multiple workers
+- Scaling Claude work across multiple slots
 - Budget-aware task distribution
 - Parallel and sequential task orchestration
-- Worker isolation with optional Git worktrees
+- Slot isolation with optional Git worktrees
 
 ## Architecture
 
@@ -29,9 +29,9 @@ Coordinator (your app or interactive session)
         │
         ├── Pool (task queue, context, budget)
         │
-        ├── Worker-0 (Claude instance)
-        ├── Worker-1 (Claude instance)
-        └── Worker-N (Claude instance)
+        ├── Slot-0 (Claude instance)
+        ├── Slot-1 (Claude instance)
+        └── Slot-N (Claude instance)
 ```
 
 ## Installation
@@ -52,7 +52,7 @@ use claude_wrapper::Claude;
 async fn main() -> claude_pool::Result<()> {
     let claude = Claude::builder().build()?;
     let pool = Pool::builder(claude)
-        .workers(4)
+        .slots(4)
         .build()
         .await?;
 
@@ -87,9 +87,9 @@ Track and limit spending:
 
 ```rust
 let pool = Pool::builder(claude)
-    .workers(4)
+    .slots(4)
     .config(
-        GlobalWorkerConfig::default()
+        PoolConfig::default()
             .with_budget_usd(50.0)  // Pool-level cap
     )
     .build()
@@ -98,35 +98,35 @@ let pool = Pool::builder(claude)
 
 Budget is tracked atomically per task. When the pool reaches its cap, subsequent tasks are rejected.
 
-### Worker Identity
+### Slot Identity
 
-Each worker has metadata for coordination:
+Each slot has metadata for coordination:
 
 ```rust
-pool.configure_worker("worker-0", "analyzer", "Code review specialist")
+pool.configure_slot("slot-0", "analyzer", "Code review specialist")
     .await?;
-pool.configure_worker("worker-1", "writer", "Code generation specialist")
+pool.configure_slot("slot-1", "writer", "Code generation specialist")
     .await?;
 ```
 
-Access worker info:
+Access slot info:
 ```rust
 let status = pool.status().await?;
-for worker in status.workers {
-    println!("{}: {} ({} active)", worker.id, worker.role, worker.busy_tasks);
+for slot in status.slots {
+    println!("{}: {} ({} active)", slot.id, slot.role, slot.busy_tasks);
 }
 ```
 
 ### Shared Context
 
-Inject key-value pairs into all worker system prompts:
+Inject key-value pairs into all slot system prompts:
 
 ```rust
 pool.context_set("language", "rust").await?;
 pool.context_set("framework", "tokio").await?;
 pool.context_set("style", "idiomatic").await?;
 
-// All workers now see these in their system prompts
+// All slots now see these in their system prompts
 ```
 
 Access context:
@@ -139,12 +139,12 @@ let all = pool.context_list().await?;
 ## Pool Builder Configuration
 
 ```rust
-use claude_pool::{Pool, GlobalWorkerConfig, Effort, PermissionMode};
+use claude_pool::{Pool, PoolConfig, Effort, PermissionMode};
 
 let pool = Pool::builder(claude)
-    .workers(8)
+    .slots(8)
     .config(
-        GlobalWorkerConfig::default()
+        PoolConfig::default()
             .with_model("sonnet")
             .with_effort(Effort::High)
             .with_budget_usd(100.0)
@@ -157,12 +157,12 @@ let pool = Pool::builder(claude)
 ```
 
 Available config options:
-- `with_model(name)` - Default model for all workers
+- `with_model(name)` - Default model for all slots
 - `with_effort(level)` - Effort: Min, Low, Medium, High, Max
 - `with_budget_usd(amount)` - Total pool budget
 - `with_permission_mode(mode)` - Permission defaults
 - `with_system_prompt(text)` - Base system prompt
-- `with_worktree(true)` - Enable Git worktree per worker
+- `with_worktree(true)` - Enable Git worktree per slot
 
 ## Execution Patterns
 
@@ -272,20 +272,20 @@ Skills can be triggered via the MCP server or called programmatically.
 
 ## Worktree Isolation
 
-Enable optional Git worktree per worker for safe, isolated execution:
+Enable optional Git worktree per slot for safe, isolated execution:
 
 ```rust
 let pool = Pool::builder(claude)
-    .workers(4)
+    .slots(4)
     .config(
-        GlobalWorkerConfig::default()
+        PoolConfig::default()
             .with_worktree(true)
     )
     .build()
     .await?;
 ```
 
-Each worker gets an isolated worktree:
+Each slot gets an isolated worktree:
 - Independent filesystem
 - Safe for parallel edits
 - Cleanup on drain
@@ -295,15 +295,15 @@ Benefits:
 - Isolated git state
 - Safe cleanup
 
-## Worker Lifecycle
+## Slot Lifecycle
 
 ### Spawning
 
-Workers are created during `build()` and remain alive until `drain()`.
+Slots are created during `build()` and remain alive until `drain()`.
 
 ### Session Resumption
 
-Workers automatically resume sessions if available, reducing startup cost.
+Slots automatically resume sessions if available, reducing startup cost.
 
 ### Graceful Shutdown
 
@@ -322,14 +322,14 @@ Get current pool state:
 
 ```rust
 let status = pool.status().await?;
-println!("Workers: {}", status.workers.len());
+println!("Slots: {}", status.slots.len());
 println!("Active tasks: {}", status.active_tasks);
 println!("Budget: ${} / ${}", status.spend_usd, status.budget_usd);
 println!("Remaining: ${}", status.budget_usd - status.spend_usd);
 ```
 
 Status includes:
-- Worker list with ID, status, and active task count
+- Slot list with ID, status, and active task count
 - Active and pending task counts
 - Total spend and budget
 - Budget remaining
@@ -345,7 +345,7 @@ match pool.run("task").await {
     Ok(result) => println!("{}", result.output),
     Err(Error::TaskFailed(msg)) => eprintln!("Task error: {}", msg),
     Err(Error::BudgetExceeded) => eprintln!("Out of budget"),
-    Err(Error::NoWorkersAvailable) => eprintln!("All workers busy"),
+    Err(Error::NoSlotsAvailable) => eprintln!("All slots busy"),
     Err(e) => eprintln!("Other error: {}", e),
 }
 ```
@@ -353,7 +353,7 @@ match pool.run("task").await {
 Common errors:
 - `TaskFailed` - Task execution failed
 - `BudgetExceeded` - Pool exceeded spending cap
-- `NoWorkersAvailable` - All workers busy/offline
+- `NoSlotsAvailable` - All slots busy/offline
 - `TaskNotFound` - Invalid task ID
 
 ## Testing
