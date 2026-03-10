@@ -379,6 +379,94 @@ pub fn builtin_skills() -> Vec<Skill> {
             arguments: vec![],
             config: None,
         },
+        Skill {
+            name: "loop_monitor".into(),
+            description: "Monitor GitHub PRs and report only meaningful changes on each iteration."
+                .into(),
+            prompt:
+                "Monitor GitHub PRs in {repo}{filters_note} and report only changes.\n\n\
+                 ## Workflow\n\n\
+                 ### 1. Fetch Current State\n\
+                 ```bash\n\
+                 gh pr list -R {repo} {filters} --json number,title,state,statusCheckRollup,reviewDecision,labels,updatedAt --limit 100\n\
+                 ```\n\n\
+                 Parse as JSON array of PRs. Each PR needs: number, title, state (OPEN/DRAFT/MERGED/CLOSED), \
+                 statusCheckRollup (PENDING/FAILURE/SUCCESS/NEUTRAL), reviewDecision (APPROVE/REQUEST_CHANGES/REVIEW_REQUIRED/COMMENTED), \
+                 labels (array), updatedAt (timestamp).\n\n\
+                 ### 2. Retrieve Previous State\n\
+                 Use mcp context_get key: \"loop_monitor_state_{repo_slug}\".\n\n\
+                 If nothing found, store current state and report:\n\
+                 \"✓ Initial snapshot of {repo}. {count} PRs. Monitoring now.\"\n\
+                 Then exit.\n\n\
+                 ### 3. Diff: Identify Only Meaningful Changes\n\n\
+                 **New PRs** (in current, not in previous):\n\
+                 - Report: \"🆕 #{number}: {title} ({state})\"\n\n\
+                 **Status Transitions** (state changed):\n\
+                 - DRAFT → OPEN: \"🔓 #{number}: opened\"\n\
+                 - OPEN → MERGED: \"✅ #{number}: merged\"\n\
+                 - OPEN → CLOSED: \"❌ #{number}: closed\"\n\n\
+                 **Review Status Changes** (reviewDecision changed):\n\
+                 - → REQUEST_CHANGES: \"🚫 #{number}: changes requested\"\n\
+                 - → APPROVE: \"✅ #{number}: approved\"\n\n\
+                 **Status Checks Changed** (statusCheckRollup changed):\n\
+                 - → FAILURE: \"⚠️  #{number}: checks failing\"\n\
+                 - FAILURE → SUCCESS: \"✅ #{number}: checks passing\"\n\
+                 - PENDING → SUCCESS: \"✅ #{number}: checks complete\"\n\n\
+                 **Label Changes** (labels added/removed):\n\
+                 - If `pool:ready` added: \"🏷️  #{number}: marked pool:ready\"\n\
+                 - If `pool:ready` removed: \"🏷️  #{number}: unmarked pool:ready\"\n\n\
+                 Skip cosmetic changes (comment count, updatedAt alone).\n\n\
+                 ### 4. Format Output\n\n\
+                 If changes found:\n\
+                 ```\n\
+                 ## PR Monitor: {repo}\n\n\
+                 {list of changes, one per line, reverse-chronological}\n\n\
+                 Summary: {count} new, {count} status changes, {count} review updates, {count} check failures\n\
+                 Last check: {timestamp}\n\
+                 ```\n\n\
+                 If no changes:\n\
+                 ```\n\
+                 ✓ No changes to {repo}.\n\
+                 ```\n\n\
+                 ### 5. Store New State\n\
+                 Use mcp context_set key: \"loop_monitor_state_{repo_slug}\" with compact JSON:\n\
+                 ```json\n\
+                 {{\n\
+                   \"timestamp\": \"2025-03-10T14:35:00Z\",\n\
+                   \"prs\": [\n\
+                     {{ \"number\": 68, \"title\": \"docs: add task sizing\", \"state\": \"OPEN\", \"statusCheckRollup\": \"SUCCESS\", \"reviewDecision\": null, \"labels\": [\"docs\"] }}\n\
+                   ]\n\
+                 }}\n\
+                 ```\n\n\
+                 ## Error Handling\n\n\
+                 If `gh pr list` fails:\n\
+                 - Report: \"❌ Failed to fetch PRs: {error}\"\n\
+                 - Don't update context\n\n\
+                 ## Usage\n\n\
+                 `/loop 5m pool_skill_run skill: \"loop_monitor\" arguments: {{ \"repo\": \"owner/repo\", \"filters\": \"is:draft\" }}`"
+                    .into(),
+            arguments: vec![
+                SkillArgument {
+                    name: "repo".into(),
+                    description: "GitHub repo in owner/repo format (e.g., joshrotenberg/claude-wrapper)"
+                        .into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "filters".into(),
+                    description: "Optional gh pr list filters (e.g., is:draft, label:pool:ready)"
+                        .into(),
+                    required: false,
+                },
+                SkillArgument {
+                    name: "verbose".into(),
+                    description: "Report full table even if unchanged (default: false)"
+                        .into(),
+                    required: false,
+                },
+            ],
+            config: None,
+        },
     ]
 }
 
@@ -457,7 +545,7 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        assert_eq!(registry.list().len(), 12);
+        assert_eq!(registry.list().len(), 13);
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
         assert!(registry.get("write_tests").is_some());
@@ -470,5 +558,6 @@ mod tests {
         assert!(registry.get("project_implement").is_some());
         assert!(registry.get("project_pr").is_some());
         assert!(registry.get("issue_watcher").is_some());
+        assert!(registry.get("loop_monitor").is_some());
     }
 }
