@@ -409,6 +409,14 @@ pub struct SubmitChainInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct FanOutChainsInput {
+    /// List of chains, each a list of steps.
+    pub chains: Vec<Vec<ChainStepInput>>,
+    /// Tags for grouping/filtering.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChainStepInput {
     /// Step name.
     pub name: String,
@@ -534,6 +542,39 @@ pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
                     Ok(task_id) => Ok(CallToolResult::json(
                         serde_json::json!({ "task_id": task_id.0 }),
                     )),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_fan_out_chains")
+        .title("Fan Out Chains (Parallel Pipelines)")
+        .description(
+            "Submit multiple sequential chains to run in parallel, each on its own worker. \
+             Returns all task IDs for individual progress tracking via pool_chain_result.",
+        )
+        .handler(move |input: FanOutChainsInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let chains = input
+                    .chains
+                    .into_iter()
+                    .map(convert_chain_steps)
+                    .collect();
+                let options = claude_pool::ChainOptions {
+                    tags: input.tags.unwrap_or_default(),
+                };
+                match state
+                    .pool
+                    .fan_out_chains(chains, &state.skills, options)
+                    .await
+                {
+                    Ok(task_ids) => Ok(CallToolResult::json(serde_json::json!({
+                        "task_ids": task_ids.iter().map(|id| &id.0).collect::<Vec<_>>()
+                    }))),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
             }
@@ -684,6 +725,7 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_skill_run_tool(Arc::clone(state)),
         pool_chain_tool(Arc::clone(state)),
         pool_submit_chain_tool(Arc::clone(state)),
+        pool_fan_out_chains_tool(Arc::clone(state)),
         pool_chain_result_tool(Arc::clone(state)),
         pool_invoke_workflow_tool(Arc::clone(state)),
         pool_scale_up_tool(Arc::clone(state)),
