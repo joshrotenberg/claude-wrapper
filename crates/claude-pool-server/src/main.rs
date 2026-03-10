@@ -132,8 +132,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              pool_configure_worker to set worker identity. \
              Skills are available as prompts (code_review, implement, write_tests, refactor, summarize). \
              To run a worker or chain on a recurring schedule, use Claude Code's /loop command \
-             (e.g. `/loop 30m pool_submit_chain ...`). The pool server is stateless and reactive; \
-             scheduling is handled by the client.",
+             (e.g. `/loop 30m check pool status` or `/loop 1h submit a review chain for open PRs`). \
+             /loop fires prompts while the REPL is idle (session-only, not persistent across restarts). \
+             For unattended scheduling, use cron or systemd timers calling `claude -p` directly. \
+             The pool server is stateless and reactive; scheduling is handled by the client.",
         )
         .tools(tool_list)
         .resources(resource_list)
