@@ -27,7 +27,10 @@ pub mod store;
 pub mod types;
 pub mod worktree;
 
-pub use chain::{ChainResult, ChainStep, StepAction, StepResult, execute_chain};
+pub use chain::{
+    ChainOptions, ChainProgress, ChainResult, ChainStatus, ChainStep, StepAction,
+    StepFailurePolicy, StepResult, execute_chain,
+};
 pub use error::{Error, Result};
 pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
 pub use skill::{Skill, SkillArgument, SkillRegistry};
