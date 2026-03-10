@@ -7,12 +7,11 @@
 //!
 //! ```no_run
 //! # async fn example() -> claude_pool::Result<()> {
-//! use claude_pool::{Pool, InMemoryStore, GlobalWorkerConfig};
+//! use claude_pool::{Pool, GlobalWorkerConfig};
 //!
 //! let claude = claude_wrapper::Claude::builder().build()?;
 //! let pool = Pool::builder(claude)
 //!     .workers(4)
-//!     .store(InMemoryStore::new())
 //!     .build()
 //!     .await?;
 //!
