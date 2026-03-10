@@ -1,0 +1,10 @@
+{
+  "name": "project_review",
+  "description": "Review code/PR against claude-wrapper project standards.",
+  "prompt": "Review the following code/changes against claude-wrapper standards:\n\nSTANDARDS (from CLAUDE.md):\n- Rust 2024 edition\n- MSRV 1.90\n- thiserror for library errors, anyhow for app errors\n- ALL public APIs have doc comments (required)\n- cargo fmt applied\n- Conventional commits: feat/fix/docs/refactor/test/chore\n- Branch naming: fix/, feat/, docs/, refactor/, test/\n- No backward-compat hacks or unused code\n- Builder pattern for CLIs and command APIs\n- Typed outputs over stringly-typed\n\nWORKSPACE CONTEXT:\n- claude-pool: core skill/slot system\n- claude-pool-server: MCP server exposing pool\n- claude-wrapper: CLI wrapper library\n- Dependencies: pool -> pool-server, both used by wrapper\n\nReview thoroughly for:\n- Missing doc comments on public items\n- Unconventional error handling\n- Style/formatting issues\n- Breaking changes without ! marker\n- Architecture misalignment\n\n{target}",
+  "arguments": [
+    { "name": "target", "description": "Code diff, file path, or PR # to review.", "required": true }
+  ],
+  "config": null,
+  "scope": "task"
+}
