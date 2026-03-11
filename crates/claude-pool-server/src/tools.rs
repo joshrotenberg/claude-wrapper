@@ -706,6 +706,32 @@ pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
         .build()
 }
 
+/// Cancel a running chain, skipping remaining steps.
+pub fn pool_cancel_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_cancel_chain")
+        .title("Cancel Chain")
+        .description(
+            "Cancel a running chain submitted with pool_submit_chain or pool_fan_out_chains. \
+             The current step finishes before cancellation takes effect. Remaining steps are \
+             skipped (marked skipped=true). Use pool_chain_result to confirm, then pool_result \
+             to retrieve partial output.",
+        )
+        .handler(move |input: TaskIdInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let task_id = claude_pool::TaskId(input.task_id.clone());
+                match state.pool.cancel_chain(&task_id).await {
+                    Ok(()) => Ok(CallToolResult::json(serde_json::json!({
+                        "status": "cancellation_requested",
+                        "task_id": input.task_id,
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_invoke_workflow")
         .title("Invoke Workflow")
@@ -1034,6 +1060,7 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_submit_chain_tool(Arc::clone(state)),
         pool_fan_out_chains_tool(Arc::clone(state)),
         pool_chain_result_tool(Arc::clone(state)),
+        pool_cancel_chain_tool(Arc::clone(state)),
         pool_invoke_workflow_tool(Arc::clone(state)),
         pool_scale_up_tool(Arc::clone(state)),
         pool_scale_down_tool(Arc::clone(state)),
