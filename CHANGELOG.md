@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+## [0.3.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.3.0...v0.3.1) - 2026-03-11
+
+### Added
+
+- add structured failure details to TaskResult ([#155](https://github.com/joshrotenberg/claude-wrapper/pull/155)) ([#159](https://github.com/joshrotenberg/claude-wrapper/pull/159))
+
+### Fixed
+
+- add --verbose when using stream-json output format ([#142](https://github.com/joshrotenberg/claude-wrapper/pull/142))
+- strip CLAUDECODE at startup and surface stderr in pool errors ([#138](https://github.com/joshrotenberg/claude-wrapper/pull/138))
+
 ## [0.3.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.2.1...v0.3.0) - 2026-03-11
 
 ### Added
