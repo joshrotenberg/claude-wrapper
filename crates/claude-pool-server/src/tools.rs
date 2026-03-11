@@ -538,6 +538,10 @@ pub struct ChainStepInput {
     pub retries: Option<u32>,
     /// Recovery prompt template on exhausted retries. {error} and {previous_output} are substituted.
     pub recovery_prompt: Option<String>,
+    /// Extract named values from this step's JSON output for use in later steps.
+    /// Key = variable name, Value = dot-path (e.g. "files_changed", "result.summary", ".").
+    /// Reference in later prompts as: {steps.STEP_NAME.VAR_NAME}
+    pub output_vars: Option<std::collections::HashMap<String, String>>,
 }
 
 fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep> {
@@ -561,6 +565,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
                 action,
                 config,
                 failure_policy,
+                output_vars: s.output_vars.unwrap_or_default(),
             }
         })
         .collect()

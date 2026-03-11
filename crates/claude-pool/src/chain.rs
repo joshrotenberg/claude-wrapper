@@ -32,6 +32,18 @@ pub struct ChainStep {
     /// Failure policy for this step.
     #[serde(default)]
     pub failure_policy: StepFailurePolicy,
+
+    /// Extract named values from this step's JSON output for use in later steps.
+    ///
+    /// Key = variable name, Value = dot-path into the JSON output.
+    /// Use `"."` or `""` for the whole output. Use `"key"` for a top-level field.
+    /// Use `"a.b.c"` for nested access. String values are returned as-is; other
+    /// JSON types are serialized to their JSON representation.
+    ///
+    /// Extracted values are available in subsequent step prompts as
+    /// `{steps.STEP_NAME.VAR_NAME}`.
+    #[serde(default)]
+    pub output_vars: HashMap<String, String>,
 }
 
 /// What a chain step does.
@@ -165,6 +177,28 @@ pub enum ChainStatus {
 /// Callback for receiving partial output chunks during streaming execution.
 pub type OnOutputChunk = Arc<dyn Fn(&str) + Send + Sync>;
 
+fn extract_json_path(json_str: &str, path: &str) -> Option<String> {
+    if path == "." || path.is_empty() {
+        return Some(json_str.to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let mut current = &value;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(match current {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+fn expand_step_refs(mut text: String, step_context: &HashMap<String, String>) -> String {
+    for (key, value) in step_context {
+        text = text.replace(&format!("{{steps.{key}}}"), value);
+    }
+    text
+}
+
 fn unix_secs_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -198,6 +232,7 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     let mut step_results = Vec::with_capacity(steps.len());
     let mut previous_output = String::new();
     let mut total_cost = 0u64;
+    let mut step_context: HashMap<String, String> = HashMap::new();
 
     for (step_idx, step) in steps.iter().enumerate() {
         // Check for cancellation before starting each step.
@@ -245,7 +280,7 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
             pool.set_chain_progress(task_id, progress).await;
         }
 
-        let prompt = render_step_prompt(step, &previous_output, skills)?;
+        let prompt = render_step_prompt(step, &previous_output, skills, &step_context)?;
 
         // Build an output callback that updates chain progress when we have a task ID.
         let on_output: Option<OnOutputChunk> = chain_task_id.map(|tid| {
@@ -264,6 +299,7 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
             skills,
             on_output.clone(),
             working_dir,
+            &step_context,
         )
         .await;
 
@@ -272,6 +308,26 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
         match step_result {
             Ok(result) => {
                 previous_output = result.output.clone();
+
+                if result.success {
+                    for (var_name, path) in &step.output_vars {
+                        match extract_json_path(&result.output, path) {
+                            Some(extracted) => {
+                                step_context
+                                    .insert(format!("{}.{}", step.name, var_name), extracted);
+                            }
+                            None => {
+                                tracing::warn!(
+                                    step = %step.name,
+                                    var = %var_name,
+                                    path = %path,
+                                    "output_var extraction failed (output not JSON or path not found)"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 step_results.push(result);
 
                 if !step_results.last().unwrap().success {
@@ -335,14 +391,18 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     })
 }
 
-/// Render the prompt for a step, substituting `{previous_output}`.
+/// Render the prompt for a step, substituting `{previous_output}` and step refs.
 fn render_step_prompt(
     step: &ChainStep,
     previous_output: &str,
     skills: &SkillRegistry,
+    step_context: &HashMap<String, String>,
 ) -> crate::Result<String> {
     match &step.action {
-        StepAction::Prompt { prompt } => Ok(prompt.replace("{previous_output}", previous_output)),
+        StepAction::Prompt { prompt } => {
+            let rendered = prompt.replace("{previous_output}", previous_output);
+            Ok(expand_step_refs(rendered, step_context))
+        }
         StepAction::Skill { skill, arguments } => {
             let skill_def = skills
                 .get(skill)
@@ -352,7 +412,8 @@ fn render_step_prompt(
                 args.entry("_previous_output".into())
                     .or_insert(previous_output.to_string());
             }
-            skill_def.render(&args)
+            let rendered = skill_def.render(&args)?;
+            Ok(expand_step_refs(rendered, step_context))
         }
     }
 }
@@ -361,6 +422,7 @@ fn render_step_prompt(
 ///
 /// Returns `Ok(StepResult)` on success (or successful recovery), or
 /// `Err(error_message)` if all retries and recovery are exhausted.
+#[allow(clippy::too_many_arguments)]
 async fn execute_step_with_retries<S: PoolStore + 'static>(
     pool: &Pool<S>,
     step: &ChainStep,
@@ -369,6 +431,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
     skills: &SkillRegistry,
     on_output: Option<OnOutputChunk>,
     working_dir: Option<&std::path::Path>,
+    step_context: &HashMap<String, String>,
 ) -> (std::result::Result<StepResult, String>, u64) {
     let max_attempts = 1 + step.failure_policy.retries;
     let mut total_cost = 0u64;
@@ -379,7 +442,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
             initial_prompt.to_string()
         } else {
             // Re-render the prompt for retries (same prompt, fresh attempt).
-            match render_step_prompt(step, previous_output, skills) {
+            match render_step_prompt(step, previous_output, skills, step_context) {
                 Ok(p) => p,
                 Err(e) => return (Err(e.to_string()), total_cost),
             }
@@ -428,9 +491,12 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
 
     // All retries exhausted. Try recovery prompt if configured.
     if let Some(ref recovery_template) = step.failure_policy.recovery_prompt {
-        let recovery_prompt = recovery_template
-            .replace("{error}", &last_error)
-            .replace("{previous_output}", previous_output);
+        let recovery_prompt = expand_step_refs(
+            recovery_template
+                .replace("{error}", &last_error)
+                .replace("{previous_output}", previous_output),
+            step_context,
+        );
 
         tracing::info!(step = %step.name, "attempting recovery prompt");
 
@@ -502,6 +568,7 @@ mod tests {
             },
             config: None,
             failure_policy: StepFailurePolicy::default(),
+            output_vars: Default::default(),
         };
 
         if let StepAction::Prompt { prompt } = &step.action {
@@ -681,5 +748,87 @@ mod tests {
             r#"{"name":"s","output":"o","success":true,"cost_microdollars":0,"retries_used":0}"#;
         let result: StepResult = serde_json::from_str(json).unwrap();
         assert!(!result.skipped);
+    }
+
+    #[test]
+    fn extract_json_path_whole_output() {
+        let json = r#"{"a": 1}"#;
+        assert_eq!(extract_json_path(json, "."), Some(json.to_string()));
+        assert_eq!(extract_json_path(json, ""), Some(json.to_string()));
+    }
+
+    #[test]
+    fn extract_json_path_top_level_key() {
+        let json = r#"{"summary": "all good"}"#;
+        assert_eq!(
+            extract_json_path(json, "summary"),
+            Some("all good".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_json_path_nested() {
+        let json = r#"{"result": {"count": 42}}"#;
+        assert_eq!(
+            extract_json_path(json, "result.count"),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_json_path_not_json() {
+        assert_eq!(extract_json_path("not json", "key"), None);
+    }
+
+    #[test]
+    fn extract_json_path_missing_key() {
+        let json = r#"{"a": 1}"#;
+        assert_eq!(extract_json_path(json, "b"), None);
+    }
+
+    #[test]
+    fn expand_step_refs_substitutes() {
+        let mut ctx = HashMap::new();
+        ctx.insert("plan.summary".into(), "do stuff".into());
+        let text = "Based on {steps.plan.summary}, implement it.".to_string();
+        assert_eq!(
+            expand_step_refs(text, &ctx),
+            "Based on do stuff, implement it."
+        );
+    }
+
+    #[test]
+    fn expand_step_refs_unknown_left_as_is() {
+        let ctx = HashMap::new();
+        let text = "Use {steps.missing.var} here.".to_string();
+        assert_eq!(expand_step_refs(text.clone(), &ctx), text);
+    }
+
+    #[test]
+    fn chain_step_output_vars_defaults_empty() {
+        let json = r#"{"name":"s","action":{"type":"prompt","prompt":"hi"}}"#;
+        let step: ChainStep = serde_json::from_str(json).unwrap();
+        assert!(step.output_vars.is_empty());
+    }
+
+    #[test]
+    fn chain_step_serializes_output_vars() {
+        let mut vars = HashMap::new();
+        vars.insert("summary".into(), "result.summary".into());
+        let step = ChainStep {
+            name: "s".into(),
+            action: StepAction::Prompt {
+                prompt: "hi".into(),
+            },
+            config: None,
+            failure_policy: StepFailurePolicy::default(),
+            output_vars: vars,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("output_vars"));
+        assert!(json.contains("result.summary"));
+
+        let parsed: ChainStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.output_vars.get("summary").unwrap(), "result.summary");
     }
 }
