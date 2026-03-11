@@ -27,3 +27,11 @@ tokio = { workspace = true }
 tower-mcp = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dependencies.axum]
+version = "0.8"
+optional = true
+
+[features]
+default = []
+http = ["tower-mcp/http", "dep:axum"]
