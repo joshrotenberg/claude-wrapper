@@ -81,7 +81,7 @@ use std::sync::Arc;
 
 use claude_pool::PoolStore;
 use claude_pool::skill::{SkillScope, SkillSource};
-use claude_pool::types::SlotConfig;
+use claude_pool::types::TaskOverrides;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tower_mcp::ToolBuilder;
@@ -362,11 +362,11 @@ fn task_config_from(
     model: Option<String>,
     effort: Option<String>,
     mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
-) -> Option<SlotConfig> {
+) -> Option<TaskOverrides> {
     if model.is_none() && effort.is_none() && mcp_servers.is_none() {
         return None;
     }
-    Some(SlotConfig {
+    Some(TaskOverrides {
         model,
         effort: effort.and_then(|e| parse_effort(&e)),
         mcp_servers,
@@ -1688,7 +1688,7 @@ pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                         required: a.required,
                     })
                     .collect();
-                let config: Option<SlotConfig> =
+                let config: Option<TaskOverrides> =
                     input.config.and_then(|v| serde_json::from_value(v).ok());
                 let skill = claude_pool::Skill {
                     name: input.name.clone(),

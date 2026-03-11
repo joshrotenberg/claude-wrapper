@@ -224,7 +224,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn run_with_config(
         &self,
         prompt: &str,
-        task_config: Option<SlotConfig>,
+        task_config: Option<TaskOverrides>,
     ) -> Result<TaskResult> {
         self.run_with_config_and_dir(prompt, task_config, None)
             .await
@@ -234,7 +234,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn run_with_config_and_dir(
         &self,
         prompt: &str,
-        task_config: Option<SlotConfig>,
+        task_config: Option<TaskOverrides>,
         working_dir: Option<std::path::PathBuf>,
     ) -> Result<TaskResult> {
         self.check_shutdown()?;
@@ -294,7 +294,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub(crate) async fn run_with_config_streaming(
         &self,
         prompt: &str,
-        task_config: Option<SlotConfig>,
+        task_config: Option<TaskOverrides>,
         on_output: Option<crate::chain::OnOutputChunk>,
         working_dir: Option<std::path::PathBuf>,
     ) -> Result<TaskResult> {
@@ -357,7 +357,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn submit_with_config(
         &self,
         prompt: &str,
-        task_config: Option<SlotConfig>,
+        task_config: Option<TaskOverrides>,
         tags: Vec<String>,
     ) -> Result<TaskId> {
         self.check_shutdown()?;
@@ -456,7 +456,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn submit_with_review(
         &self,
         prompt: &str,
-        task_config: Option<SlotConfig>,
+        task_config: Option<TaskOverrides>,
         tags: Vec<String>,
         max_rejections: Option<u32>,
     ) -> Result<TaskId> {

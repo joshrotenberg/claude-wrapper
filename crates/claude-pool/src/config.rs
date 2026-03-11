@@ -3,13 +3,13 @@
 //! Configuration cascades in three layers:
 //! 1. [`PoolConfig`] — pool-wide defaults
 //! 2. [`SlotConfig`] — per-slot overrides
-//! 3. [`SlotConfig`] on a task record — per-task overrides
+//! 3. [`TaskOverrides`] on a task record — per-task overrides
 
 use std::collections::HashMap;
 
 use claude_wrapper::types::{Effort, PermissionMode};
 
-use crate::types::{PoolConfig, SlotConfig};
+use crate::types::{PoolConfig, SlotConfig, TaskOverrides};
 
 /// Resolved configuration for a single task execution.
 ///
@@ -35,7 +35,7 @@ impl ResolvedConfig {
     /// Later layers override earlier layers for scalar fields.
     /// Map/list fields (allowed_tools, mcp_servers) are merged additively,
     /// with later layers overriding same-named entries.
-    pub fn resolve(global: &PoolConfig, slot: &SlotConfig, task: Option<&SlotConfig>) -> Self {
+    pub fn resolve(global: &PoolConfig, slot: &SlotConfig, task: Option<&TaskOverrides>) -> Self {
         let model = task
             .and_then(|t| t.model.clone())
             .or_else(|| slot.model.clone())
@@ -146,7 +146,7 @@ mod tests {
             effort: Some(Effort::Medium),
             ..Default::default()
         };
-        let task = SlotConfig {
+        let task = TaskOverrides {
             effort: Some(Effort::Max),
             ..Default::default()
         };
@@ -166,7 +166,7 @@ mod tests {
             allowed_tools: Some(vec!["Write".into()]),
             ..Default::default()
         };
-        let task = SlotConfig {
+        let task = TaskOverrides {
             allowed_tools: Some(vec!["Edit".into()]),
             ..Default::default()
         };
@@ -221,7 +221,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let task = SlotConfig {
+        let task = TaskOverrides {
             mcp_servers: Some(
                 [(
                     "hub".to_string(),

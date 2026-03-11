@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::pool::Pool;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
-use crate::types::{SlotConfig, TaskId, TaskState};
+use crate::types::{TaskId, TaskOverrides, TaskState};
 
 /// A step in a chain pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub struct ChainStep {
     pub action: StepAction,
 
     /// Per-step config overrides (model, effort, etc.).
-    pub config: Option<SlotConfig>,
+    pub config: Option<TaskOverrides>,
 
     /// Failure policy for this step.
     #[serde(default)]
