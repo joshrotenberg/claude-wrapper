@@ -315,6 +315,39 @@ impl WorktreeManager {
             )));
         }
 
+        // Preserve the GitHub remote URL from the source repo so that
+        // tools like `gh pr create` work inside the clone (#152).
+        let remote_output = tokio::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&self.repo_dir)
+            .output()
+            .await
+            .map_err(|e| Error::Store(format!("failed to get origin URL: {e}")))?;
+
+        if remote_output.status.success() {
+            let url = String::from_utf8_lossy(&remote_output.stdout)
+                .trim()
+                .to_string();
+            // Only override if the source has a non-local remote (i.e. GitHub URL).
+            if !url.is_empty() && !url.starts_with('/') {
+                let set_output = tokio::process::Command::new("git")
+                    .args(["remote", "set-url", "origin", &url])
+                    .current_dir(&clone_path)
+                    .output()
+                    .await
+                    .map_err(|e| Error::Store(format!("failed to set origin URL in clone: {e}")))?;
+
+                if !set_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&set_output.stderr);
+                    tracing::warn!(
+                        task_id = %task_id.0,
+                        error = %stderr,
+                        "failed to set origin URL in clone"
+                    );
+                }
+            }
+        }
+
         tracing::info!(
             task_id = %task_id.0,
             path = %clone_path.display(),
@@ -387,6 +420,44 @@ mod tests {
         let mgr = WorktreeManager::new("/repo", None);
         let expected = std::env::temp_dir().join("claude-pool").join("worktrees");
         assert_eq!(mgr.base_dir(), expected);
+    }
+
+    #[tokio::test]
+    async fn clone_preserves_non_local_remote() {
+        // Set up a source repo with a non-local origin.
+        let src = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(src.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:user/repo.git"])
+            .current_dir(src.path())
+            .output()
+            .unwrap();
+        // Need at least one commit for clone to work.
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(src.path())
+            .output()
+            .unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mgr = WorktreeManager::new(src.path(), Some(base.path().to_path_buf()));
+        let task_id = TaskId("chain-test-remote".into());
+        let clone_path = mgr.create_clone_for_chain(&task_id).await.unwrap();
+
+        // Verify the clone's origin points to GitHub, not the local path.
+        let output = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(url, "git@github.com:user/repo.git");
+
+        mgr.remove_clone(&task_id).await.unwrap();
     }
 
     #[test]
