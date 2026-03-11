@@ -17,7 +17,9 @@ use crate::types::SlotConfig;
 pub enum SkillSource {
     /// Ships with the pool binary.
     Builtin,
-    /// Loaded from a `.claude-pool/skills/` JSON file.
+    /// Loaded from `~/.claude-pool/skills/` (user global).
+    Global,
+    /// Loaded from `.claude-pool/skills/` (project).
     Project,
     /// Added at runtime via `pool_skill_add`.
     Runtime,
@@ -27,6 +29,7 @@ impl std::fmt::Display for SkillSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Builtin => write!(f, "builtin"),
+            Self::Global => write!(f, "global"),
             Self::Project => write!(f, "project"),
             Self::Runtime => write!(f, "runtime"),
         }
@@ -106,6 +109,76 @@ pub struct SkillArgument {
 
     /// Whether this argument is required.
     pub required: bool,
+}
+
+/// YAML frontmatter from a SKILL.md file.
+///
+/// Follows the [Agent Skills standard](https://agentskills.io/specification):
+/// name, description, and pool-specific extensions under `metadata`.
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    metadata: SkillMetadata,
+}
+
+/// Pool-specific metadata extensions in SKILL.md frontmatter.
+#[derive(Debug, Default, Deserialize)]
+struct SkillMetadata {
+    #[serde(default)]
+    scope: Option<SkillScope>,
+    #[serde(default)]
+    arguments: Vec<SkillArgument>,
+    #[serde(default)]
+    config: Option<SlotConfig>,
+}
+
+/// Parse a SKILL.md file into a [`Skill`].
+///
+/// The file format is YAML frontmatter between `---` delimiters, followed
+/// by a markdown body that becomes the prompt template.
+fn parse_skill_md(content: &str) -> crate::Result<Skill> {
+    let content = content.trim();
+    if !content.starts_with("---") {
+        return Err(crate::Error::Store(
+            "SKILL.md must start with YAML frontmatter (---)".into(),
+        ));
+    }
+
+    let after_first = &content[3..];
+    let end = after_first.find("---").ok_or_else(|| {
+        crate::Error::Store("SKILL.md missing closing frontmatter delimiter (---)".into())
+    })?;
+
+    let yaml = &after_first[..end];
+    let body = after_first[end + 3..].trim();
+
+    let fm: SkillFrontmatter = serde_yaml::from_str(yaml)
+        .map_err(|e| crate::Error::Store(format!("SKILL.md YAML parse error: {e}")))?;
+
+    // Infer scope from name prefix if not set explicitly.
+    let scope = fm.metadata.scope.unwrap_or_else(|| infer_scope(&fm.name));
+
+    Ok(Skill {
+        name: fm.name,
+        description: fm.description,
+        prompt: body.to_string(),
+        arguments: fm.metadata.arguments,
+        config: fm.metadata.config,
+        scope,
+    })
+}
+
+/// Infer skill scope from name prefix convention.
+fn infer_scope(name: &str) -> SkillScope {
+    if name.starts_with("cps-coordinator") {
+        SkillScope::Coordinator
+    } else if name.starts_with("cps-chain") {
+        SkillScope::Chain
+    } else {
+        SkillScope::Task
+    }
 }
 
 impl Skill {
@@ -200,32 +273,59 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Load skill definitions from JSON files in a directory.
+    /// Load skill definitions from a directory.
     ///
-    /// Each `.json` file in the directory is deserialized as a [`Skill`] and
-    /// registered with [`SkillSource::Project`]. Skills loaded this way
-    /// override any existing skill with the same name. Files are loaded in
-    /// sorted order for deterministic behavior.
+    /// Discovers skills in two formats, in sorted order:
+    /// - **SKILL.md folders**: `skill-name/SKILL.md` (Agent Skills standard)
+    /// - **JSON files**: `skill_name.json` (legacy, with deprecation warning)
     ///
-    /// Returns the number of skills loaded. If the directory does not exist,
-    /// returns `Ok(0)` without error.
+    /// Skills are registered with the given `source`. Skills loaded this way
+    /// override any existing skill with the same name. Returns the number of
+    /// skills loaded. If the directory does not exist, returns `Ok(0)`.
     pub fn load_from_dir(&mut self, dir: &Path) -> crate::Result<usize> {
+        self.load_from_dir_with_source(dir, SkillSource::Project)
+    }
+
+    /// Load skill definitions from a directory with the specified source.
+    pub fn load_from_dir_with_source(
+        &mut self,
+        dir: &Path,
+        source: SkillSource,
+    ) -> crate::Result<usize> {
         if !dir.is_dir() {
             return Ok(0);
         }
 
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .collect();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
 
         let mut count = 0;
         for entry in entries {
-            let contents = std::fs::read_to_string(entry.path())?;
-            let skill: Skill = serde_json::from_str(&contents)?;
-            self.register(skill, SkillSource::Project);
-            count += 1;
+            let path = entry.path();
+
+            // SKILL.md folder format (preferred).
+            if path.is_dir() {
+                let skill_md = path.join("SKILL.md");
+                if skill_md.is_file() {
+                    let contents = std::fs::read_to_string(&skill_md)?;
+                    let skill = parse_skill_md(&contents)?;
+                    self.register(skill, source);
+                    count += 1;
+                }
+                continue;
+            }
+
+            // Legacy JSON format (deprecated).
+            if path.extension().is_some_and(|ext| ext == "json") {
+                tracing::warn!(
+                    path = %path.display(),
+                    "loading skill from JSON format (deprecated — migrate to SKILL.md folder)"
+                );
+                let contents = std::fs::read_to_string(&path)?;
+                let skill: Skill = serde_json::from_str(&contents)?;
+                self.register(skill, source);
+                count += 1;
+            }
         }
 
         Ok(count)
@@ -780,7 +880,234 @@ mod tests {
     #[test]
     fn source_display() {
         assert_eq!(SkillSource::Builtin.to_string(), "builtin");
+        assert_eq!(SkillSource::Global.to_string(), "global");
         assert_eq!(SkillSource::Project.to_string(), "project");
         assert_eq!(SkillSource::Runtime.to_string(), "runtime");
+    }
+
+    #[test]
+    fn source_global_serde_roundtrip() {
+        let json = serde_json::json!("global");
+        let source: SkillSource = serde_json::from_value(json).unwrap();
+        assert_eq!(source, SkillSource::Global);
+
+        let serialized = serde_json::to_value(source).unwrap();
+        assert_eq!(serialized, "global");
+    }
+
+    #[test]
+    fn parse_skill_md_basic() {
+        let content = "\
+---
+name: test-skill
+description: A test skill for parsing.
+metadata:
+  arguments:
+    - name: target
+      description: What to test
+      required: true
+---
+
+Run tests on {target}.
+
+Report results.
+";
+
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.name, "test-skill");
+        assert_eq!(skill.description, "A test skill for parsing.");
+        assert_eq!(skill.prompt, "Run tests on {target}.\n\nReport results.");
+        assert_eq!(skill.arguments.len(), 1);
+        assert_eq!(skill.arguments[0].name, "target");
+        assert!(skill.arguments[0].required);
+        assert_eq!(skill.scope, SkillScope::Task);
+    }
+
+    #[test]
+    fn parse_skill_md_with_scope() {
+        let content = "\
+---
+name: cps-coordinator-watcher
+description: Watches things.
+metadata:
+  scope: coordinator
+---
+
+Watch stuff.
+";
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.scope, SkillScope::Coordinator);
+    }
+
+    #[test]
+    fn parse_skill_md_infers_scope_from_prefix() {
+        let content = "\
+---
+name: cps-chain-deploy
+description: Deploy chain.
+---
+
+Deploy stuff.
+";
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.scope, SkillScope::Chain);
+    }
+
+    #[test]
+    fn parse_skill_md_no_metadata() {
+        let content = "\
+---
+name: simple
+description: Simple skill.
+---
+
+Just do it.
+";
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.name, "simple");
+        assert!(skill.arguments.is_empty());
+        assert_eq!(skill.scope, SkillScope::Task);
+    }
+
+    #[test]
+    fn parse_skill_md_missing_frontmatter() {
+        let result = parse_skill_md("no frontmatter here");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_skill_md_missing_closing_delimiter() {
+        let result = parse_skill_md("---\nname: broken\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_from_dir_with_skill_md_folders() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a SKILL.md folder.
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "\
+---
+name: my-skill
+description: A folder-based skill.
+metadata:
+  arguments:
+    - name: input
+      description: The input
+      required: true
+---
+
+Process {input}.
+",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 1);
+
+        let skill = registry.get("my-skill").unwrap();
+        assert_eq!(skill.description, "A folder-based skill.");
+        assert_eq!(skill.prompt, "Process {input}.");
+        assert_eq!(skill.arguments.len(), 1);
+    }
+
+    #[test]
+    fn load_from_dir_mixed_formats() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // SKILL.md folder.
+        let skill_dir = dir.path().join("new-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: new-skill\ndescription: New format.\n---\n\nNew prompt.\n",
+        )
+        .unwrap();
+
+        // Legacy JSON.
+        let skill_json = serde_json::json!({
+            "name": "old_skill",
+            "description": "Legacy format",
+            "prompt": "Old prompt",
+            "arguments": []
+        });
+        std::fs::write(
+            dir.path().join("old_skill.json"),
+            serde_json::to_string_pretty(&skill_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 2);
+        assert!(registry.get("new-skill").is_some());
+        assert!(registry.get("old_skill").is_some());
+    }
+
+    #[test]
+    fn load_from_dir_with_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("global-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: global-skill\ndescription: Global.\n---\n\nDo global things.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        let count = registry
+            .load_from_dir_with_source(dir.path(), SkillSource::Global)
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let rs = registry.get_registered("global-skill").unwrap();
+        assert_eq!(rs.source, SkillSource::Global);
+    }
+
+    #[test]
+    fn skill_md_folder_overrides_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill_dir = dir.path().join("code_review");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "\
+---
+name: code_review
+description: Custom review via SKILL.md.
+metadata:
+  arguments:
+    - name: target
+      description: What to review
+      required: true
+---
+
+Custom review: {target}
+",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::with_builtins();
+        assert_eq!(
+            registry.get("code_review").unwrap().description,
+            "Review code for bugs, style issues, and improvements."
+        );
+
+        registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(
+            registry.get("code_review").unwrap().description,
+            "Custom review via SKILL.md."
+        );
+        assert_eq!(
+            registry.get_registered("code_review").unwrap().source,
+            SkillSource::Project
+        );
     }
 }

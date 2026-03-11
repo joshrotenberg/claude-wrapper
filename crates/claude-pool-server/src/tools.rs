@@ -169,6 +169,15 @@ pub struct SkillSaveInput {
     pub dir: Option<String>,
 }
 
+/// Input for ejecting a builtin skill to disk for customization.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SkillEjectInput {
+    /// Skill name to eject (must be a builtin skill).
+    pub name: String,
+    /// Directory to eject to. Defaults to the configured skills_dir.
+    pub dir: Option<String>,
+}
+
 // ── Messaging input schemas ────────────────────────────────────────────
 
 /// Input for sending a message between slots.
@@ -946,6 +955,12 @@ pub fn pool_skill_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                 let registry = state.skills.read().await;
                 match registry.get_registered(&input.name) {
                     Some(rs) => {
+                        // A skill is "customized" if it's a builtin name but
+                        // loaded from project/global/runtime source.
+                        let customized = rs.source != SkillSource::Builtin
+                            && claude_pool::skill::builtin_skills()
+                                .iter()
+                                .any(|b| b.name == rs.skill.name);
                         let response = serde_json::json!({
                             "name": rs.skill.name,
                             "description": rs.skill.description,
@@ -957,6 +972,7 @@ pub fn pool_skill_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                             })).collect::<Vec<_>>(),
                             "scope": rs.skill.scope.to_string(),
                             "source": rs.source.to_string(),
+                            "customized": customized,
                             "config": rs.skill.config,
                         });
                         Ok(CallToolResult::json(response))
@@ -1038,13 +1054,13 @@ pub fn pool_skill_remove_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
         .build()
 }
 
-/// Persist a skill to the project skills directory as JSON.
+/// Persist a skill to the project skills directory as a SKILL.md folder.
 pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_save")
         .title("Save Skill to Disk")
         .description(
-            "Persist a skill to the project skills directory as JSON. \
-             Creates/overwrites {dir}/{name}.json.",
+            "Persist a skill to the project skills directory as a SKILL.md folder \
+             (Agent Skills standard). Creates/overwrites {dir}/{name}/SKILL.md.",
         )
         .handler(move |input: SkillSaveInput| {
             let state = Arc::clone(&state);
@@ -1062,25 +1078,23 @@ pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
                     }
                 };
 
-                let dir = input
+                let base_dir = input
                     .dir
                     .map(PathBuf::from)
                     .unwrap_or_else(|| state.skills_dir.clone());
 
-                if let Err(e) = std::fs::create_dir_all(&dir) {
+                let skill_dir = base_dir.join(&skill.name);
+                if let Err(e) = std::fs::create_dir_all(&skill_dir) {
                     return Ok(CallToolResult::error(format!(
                         "failed to create directory {}: {e}",
-                        dir.display()
+                        skill_dir.display()
                     )));
                 }
 
-                let path = dir.join(format!("{}.json", input.name));
-                let json = match serde_json::to_string_pretty(&skill) {
-                    Ok(j) => j,
-                    Err(e) => return Ok(CallToolResult::error(format!("serialize error: {e}"))),
-                };
+                let skill_md = skill_to_skill_md(&skill);
+                let path = skill_dir.join("SKILL.md");
 
-                if let Err(e) = std::fs::write(&path, &json) {
+                if let Err(e) = std::fs::write(&path, &skill_md) {
                     return Ok(CallToolResult::error(format!(
                         "failed to write {}: {e}",
                         path.display()
@@ -1098,6 +1112,116 @@ pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
                 Ok(CallToolResult::json(serde_json::json!({
                     "saved": input.name,
                     "path": path.display().to_string(),
+                    "format": "SKILL.md",
+                })))
+            }
+        })
+        .build()
+}
+
+/// Convert a Skill to SKILL.md format (YAML frontmatter + markdown body).
+fn skill_to_skill_md(skill: &claude_pool::Skill) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    writeln!(out, "name: {}", skill.name).unwrap();
+    writeln!(
+        out,
+        "description: \"{}\"",
+        skill.description.replace('"', "\\\"")
+    )
+    .unwrap();
+
+    let has_metadata = skill.scope != claude_pool::SkillScope::Task
+        || !skill.arguments.is_empty()
+        || skill.config.is_some();
+
+    if has_metadata {
+        out.push_str("metadata:\n");
+        if skill.scope != claude_pool::SkillScope::Task {
+            writeln!(out, "  scope: {}", skill.scope).unwrap();
+        }
+        if !skill.arguments.is_empty() {
+            out.push_str("  arguments:\n");
+            for arg in &skill.arguments {
+                writeln!(out, "    - name: {}", arg.name).unwrap();
+                writeln!(
+                    out,
+                    "      description: \"{}\"",
+                    arg.description.replace('"', "\\\"")
+                )
+                .unwrap();
+                writeln!(out, "      required: {}", arg.required).unwrap();
+            }
+        }
+    }
+
+    out.push_str("---\n\n");
+    out.push_str(&skill.prompt);
+    out.push('\n');
+    out
+}
+
+/// Eject a builtin skill to disk for customization.
+pub fn pool_skill_eject_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_skill_eject")
+        .title("Eject Builtin Skill")
+        .description(
+            "Write a builtin skill to disk as a SKILL.md folder for customization. \
+             The disk version shadows the builtin. Delete the folder to restore the default.",
+        )
+        .handler(move |input: SkillEjectInput| {
+            let state = Arc::clone(&state);
+            async move {
+                // Find the builtin version of the skill.
+                let builtin = claude_pool::skill::builtin_skills()
+                    .into_iter()
+                    .find(|s| s.name == input.name);
+
+                let skill = match builtin {
+                    Some(s) => s,
+                    None => {
+                        return Ok(CallToolResult::error(format!(
+                            "not a builtin skill: {} (only builtins can be ejected)",
+                            input.name
+                        )));
+                    }
+                };
+
+                let base_dir = input
+                    .dir
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| state.skills_dir.clone());
+
+                let skill_dir = base_dir.join(&skill.name);
+                if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+                    return Ok(CallToolResult::error(format!(
+                        "failed to create directory {}: {e}",
+                        skill_dir.display()
+                    )));
+                }
+
+                let skill_md = skill_to_skill_md(&skill);
+                let path = skill_dir.join("SKILL.md");
+
+                if let Err(e) = std::fs::write(&path, &skill_md) {
+                    return Ok(CallToolResult::error(format!(
+                        "failed to write {}: {e}",
+                        path.display()
+                    )));
+                }
+
+                // Re-register as Project source so it shows as customized.
+                {
+                    let mut registry = state.skills.write().await;
+                    registry.register(skill, SkillSource::Project);
+                }
+
+                Ok(CallToolResult::json(serde_json::json!({
+                    "ejected": input.name,
+                    "path": path.display().to_string(),
+                    "hint": "edit the SKILL.md to customize, delete the folder to restore builtin",
                 })))
             }
         })
@@ -1189,5 +1313,6 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_skill_add_tool(Arc::clone(state)),
         pool_skill_remove_tool(Arc::clone(state)),
         pool_skill_save_tool(Arc::clone(state)),
+        pool_skill_eject_tool(Arc::clone(state)),
     ]
 }

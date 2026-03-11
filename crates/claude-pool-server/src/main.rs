@@ -65,6 +65,10 @@ struct Cli {
     #[arg(long)]
     no_project_skills: bool,
 
+    /// Skip loading global user skills from ~/.claude-pool/skills/.
+    #[arg(long)]
+    no_global_skills: bool,
+
     /// Disable specific skills by name (comma-separated).
     #[arg(long, value_delimiter = ',')]
     disable_skill: Vec<String>,
@@ -227,6 +231,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SkillRegistry::with_builtins()
     };
 
+    // Load global user skills (~/.claude-pool/skills/) — lower priority than project.
+    if !cli.no_global_skills
+        && let Some(home) = dirs::home_dir()
+    {
+        let global_dir = home.join(".claude-pool").join("skills");
+        let count =
+            skills.load_from_dir_with_source(&global_dir, claude_pool::SkillSource::Global)?;
+        if count > 0 {
+            tracing::info!(count, dir = %global_dir.display(), "loaded global skills");
+        }
+    }
+
+    // Load project skills — highest priority, overrides global and builtin.
     if !cli.no_project_skills {
         let count = skills.load_from_dir(&cli.skills_dir)?;
         if count > 0 {
