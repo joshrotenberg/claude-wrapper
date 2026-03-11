@@ -250,9 +250,103 @@ for step in progress.steps {
 }
 ```
 
-## Skills Registry
+## Skills System
 
-Register reusable task patterns with argument validation:
+Skills are reusable prompt templates that define how to approach a task. The pool discovers and references them by name in chains or direct calls.
+
+### SKILL.md Format
+
+Skills follow the [Agent Skills](https://agentskills.io) standard. Each skill lives in its own directory with a `SKILL.md` file:
+
+```
+.claude-pool/skills/
+  code_review/
+    SKILL.md          # Required: frontmatter + prompt
+    scripts/          # Optional: bundled scripts
+      lint.sh
+    templates/        # Optional: templates
+      report.md
+    examples/         # Optional: examples
+      input.py
+```
+
+The `SKILL.md` file contains YAML frontmatter followed by the prompt body:
+
+```yaml
+---
+name: code_review
+description: Review code for bugs and style issues
+argument-hint: "<path> [criteria]"
+allowed-tools: Read, Grep, Glob, Bash
+metadata:
+  arguments:
+    - name: path
+      description: File path to review
+      required: true
+    - name: criteria
+      description: What to focus on (bugs, style, performance)
+      required: false
+---
+
+Review the code at {path} for the following criteria: {criteria}
+
+Report issues found with severity and suggestions.
+```
+
+Standard fields (`argument-hint`, `allowed-tools`) live at the top level.
+Pool-specific extensions (`scope`, `arguments`, `config`) live under `metadata`.
+Arguments are available as `{arg_name}` or `$ARGUMENTS` / `$0` / `$1` in the prompt.
+
+### Skill Resolution
+
+Skills are discovered in priority order (first match wins):
+
+1. **Runtime skills** - Added via code (ephemeral, lost on restart)
+2. **Project skills** - Loaded from `.claude-pool/skills/` (checked into repo)
+3. **Global skills** - Loaded from `~/.claude-pool/skills/` (user-wide)
+4. **Builtin skills** - Shipped with the pool binary
+
+### CLAUDE_SKILL_DIR Substitution
+
+Skills can reference supporting files using the `${CLAUDE_SKILL_DIR}` variable:
+
+```
+Run linting:
+bash ${CLAUDE_SKILL_DIR}/scripts/lint.sh .
+
+Generate report from template:
+python -c "..." < ${CLAUDE_SKILL_DIR}/templates/report.md
+```
+
+The variable resolves to the skill's directory path at render time. Available for project and global skills only (not builtins or runtime skills).
+
+### Using Skills in Chains
+
+Reference skills in chain steps:
+
+```rust
+use claude_pool::{ChainStep, StepAction};
+
+let steps = vec![
+    ChainStep {
+        name: "review".into(),
+        action: StepAction::Skill {
+            skill: "code_review".into(),
+            arguments: [
+                ("path", "src/main.rs"),
+                ("criteria", "performance"),
+            ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        },
+        config: None,
+        failure_policy: Default::default(),
+        output_vars: Default::default(),
+    },
+];
+```
+
+### Programmatic Registration
+
+Register skills at runtime:
 
 ```rust
 use claude_pool::{Skill, SkillArgument, SkillRegistry, SkillSource};
@@ -269,20 +363,15 @@ registry.register(
                 description: "File to review".to_string(),
                 required: true,
             },
-            SkillArgument {
-                name: "criteria".to_string(),
-                description: "What to focus on (bugs, style, performance)".to_string(),
-                required: false,
-            },
         ],
         config: None,
         scope: Default::default(),
+        argument_hint: Some("<path> [criteria]".to_string()),
+        skill_dir: None,
     },
     SkillSource::Runtime,
 );
 ```
-
-Skills can be triggered via the MCP server or called programmatically.
 
 ## Worktree Isolation
 
@@ -308,6 +397,55 @@ Benefits:
 - Parallel file edits without conflicts
 - Isolated git state
 - Safe cleanup
+
+## Quality Gates
+
+The pool supports a human-in-the-loop review workflow. Tasks submitted with
+`submit_with_review` transition to `PendingReview` on completion instead of
+`Completed`, allowing a coordinator to inspect results before accepting them.
+
+```rust
+// Submit a task that requires approval before it's considered done.
+let task_id = pool.submit_with_review(
+    "refactor the auth module",
+    None,           // optional SlotConfig override
+    vec![],         // tags
+    Some(3),        // max_rejections (default: 3)
+).await?;
+
+// ... task runs, completes, enters PendingReview ...
+
+// Inspect the result.
+let result = pool.result(&task_id).await?;
+
+// Approve: transitions PendingReview -> Completed.
+pool.approve_result(&task_id).await?;
+
+// Or reject with feedback: re-queues the task with feedback appended
+// to the original prompt. Fails after max_rejections.
+pool.reject_result(&task_id, "missing error handling for timeout case").await?;
+```
+
+### Via MCP tools
+
+The same workflow is available through the MCP server:
+
+- `pool_submit_with_review` -- submit a task requiring approval
+- `pool_approve_result` -- accept the result
+- `pool_reject_result` -- reject with feedback, task re-runs
+
+### Task states
+
+```
+Pending -> Running -> PendingReview -> Completed  (approved)
+                          |
+                          +-> Running  (rejected, re-queued with feedback)
+                          |
+                          +-> Failed   (max rejections reached)
+```
+
+Rejection appends feedback to the original prompt so the slot sees what went
+wrong and can address it on the next attempt.
 
 ## Slot Lifecycle
 
@@ -369,6 +507,18 @@ Common errors:
 - `BudgetExceeded` - Pool exceeded spending cap
 - `NoSlotsAvailable` - All slots busy/offline
 - `TaskNotFound` - Invalid task ID
+
+## Feature Flags
+
+Currently no optional features. The crate includes full functionality by default.
+
+Future features may include:
+- `redis-store` - Redis backend for distributed pool state
+- `prometheus` - Metrics export for monitoring
+
+## API Documentation
+
+For detailed API documentation, see [docs.rs/claude-pool](https://docs.rs/claude-pool).
 
 ## Testing
 
