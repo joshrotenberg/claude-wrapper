@@ -96,6 +96,13 @@ pub struct Skill {
     /// Where this skill is intended to run (advisory).
     #[serde(default)]
     pub scope: SkillScope,
+
+    /// Hint shown in skill listings to indicate expected arguments.
+    ///
+    /// Follows the Agent Skills standard `argument-hint` field.
+    /// Example: `"[issue-number]"`, `"<file> [--verbose]"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
 }
 
 /// An argument accepted by a skill.
@@ -114,11 +121,19 @@ pub struct SkillArgument {
 /// YAML frontmatter from a SKILL.md file.
 ///
 /// Follows the [Agent Skills standard](https://agentskills.io/specification):
-/// name, description, and pool-specific extensions under `metadata`.
+/// name, description, standard fields (`allowed-tools`, `argument-hint`),
+/// and pool-specific extensions under `metadata`.
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
     name: String,
     description: String,
+    /// Standard `allowed-tools` field (comma-separated tool names).
+    /// Takes precedence over `metadata.config.allowed_tools`.
+    #[serde(default, rename = "allowed-tools")]
+    allowed_tools: Option<String>,
+    /// Standard `argument-hint` field showing expected arguments.
+    #[serde(default, rename = "argument-hint")]
+    argument_hint: Option<String>,
     #[serde(default)]
     metadata: SkillMetadata,
 }
@@ -160,13 +175,28 @@ fn parse_skill_md(content: &str) -> crate::Result<Skill> {
     // Infer scope from name prefix if not set explicitly.
     let scope = fm.metadata.scope.unwrap_or_else(|| infer_scope(&fm.name));
 
+    // Standard `allowed-tools` field takes precedence over metadata.config.allowed_tools.
+    let config = if let Some(ref tools_str) = fm.allowed_tools {
+        let tools: Vec<String> = tools_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut config = fm.metadata.config.unwrap_or_default();
+        config.allowed_tools = Some(tools);
+        Some(config)
+    } else {
+        fm.metadata.config
+    };
+
     Ok(Skill {
         name: fm.name,
         description: fm.description,
         prompt: body.to_string(),
         arguments: fm.metadata.arguments,
-        config: fm.metadata.config,
+        config,
         scope,
+        argument_hint: fm.argument_hint,
     })
 }
 
@@ -234,8 +264,52 @@ impl Skill {
             rendered.push_str(&format!("\n\nARGUMENTS: {all_args}"));
         }
 
+        // Dynamic command injection: !`command` is replaced with stdout.
+        rendered = execute_command_injections(&rendered);
+
         Ok(rendered)
     }
+}
+
+/// Execute `` !`command` `` injections in a rendered prompt.
+///
+/// Each occurrence of `` !`...` `` is replaced with the command's stdout
+/// (or an error message if the command fails). This runs shell commands
+/// synchronously via `sh -c`.
+fn execute_command_injections(input: &str) -> String {
+    use std::process::Command;
+
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+
+    while let Some(start) = remaining.find("!`") {
+        result.push_str(&remaining[..start]);
+        let after_marker = &remaining[start + 2..];
+        if let Some(end) = after_marker.find('`') {
+            let cmd = &after_marker[..end];
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .output()
+                .map(|o| {
+                    if o.status.success() {
+                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                    } else {
+                        let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        format!("[command failed: {stderr}]")
+                    }
+                })
+                .unwrap_or_else(|e| format!("[command error: {e}]"));
+            result.push_str(&output);
+            remaining = &after_marker[end + 1..];
+        } else {
+            // No closing backtick — emit literally.
+            result.push_str("!`");
+            remaining = after_marker;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 /// Registry of available skills.
@@ -416,6 +490,7 @@ mod tests {
             ],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -439,6 +514,7 @@ mod tests {
             }],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let result = skill.render(&HashMap::new());
@@ -458,6 +534,7 @@ mod tests {
             }],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -491,6 +568,7 @@ mod tests {
             ],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -521,6 +599,7 @@ mod tests {
             ],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -543,6 +622,7 @@ mod tests {
             }],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -564,6 +644,7 @@ mod tests {
             }],
             config: None,
             scope: SkillScope::Task,
+            argument_hint: None,
         };
 
         let mut args = HashMap::new();
@@ -586,6 +667,7 @@ mod tests {
                 arguments: vec![],
                 config: None,
                 scope: SkillScope::Task,
+                argument_hint: None,
             },
             SkillSource::Runtime,
         );
@@ -747,6 +829,7 @@ mod tests {
                 arguments: vec![],
                 config: None,
                 scope: SkillScope::Task,
+                argument_hint: None,
             },
             SkillSource::Builtin,
         );
@@ -758,6 +841,7 @@ mod tests {
                 arguments: vec![],
                 config: None,
                 scope: SkillScope::Task,
+                argument_hint: None,
             },
             SkillSource::Runtime,
         );
@@ -1038,5 +1122,116 @@ Custom review: {target}
             registry.get_registered("code_review").unwrap().source,
             SkillSource::Project
         );
+    }
+
+    #[test]
+    fn parse_skill_md_allowed_tools() {
+        let content = "\
+---
+name: safe-reader
+description: Read-only exploration.
+allowed-tools: Read, Grep, Glob
+---
+
+Explore the codebase.
+";
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.name, "safe-reader");
+        let tools = skill.config.unwrap().allowed_tools.unwrap();
+        assert_eq!(tools, vec!["Read", "Grep", "Glob"]);
+    }
+
+    #[test]
+    fn parse_skill_md_allowed_tools_overrides_metadata() {
+        let content = "\
+---
+name: reader
+description: Read stuff.
+allowed-tools: Read, Grep
+metadata:
+  config:
+    allowed_tools:
+      - Bash
+      - Write
+---
+
+Read things.
+";
+        let skill = parse_skill_md(content).unwrap();
+        // Standard field takes precedence over metadata.
+        let tools = skill.config.unwrap().allowed_tools.unwrap();
+        assert_eq!(tools, vec!["Read", "Grep"]);
+    }
+
+    #[test]
+    fn parse_skill_md_argument_hint() {
+        let content = "\
+---
+name: fix-issue
+description: Fix a GitHub issue.
+argument-hint: \"[issue-number]\"
+metadata:
+  arguments:
+    - name: issue
+      description: Issue number
+      required: true
+---
+
+Fix issue $ARGUMENTS.
+";
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.argument_hint.as_deref(), Some("[issue-number]"));
+    }
+
+    #[test]
+    fn command_injection_basic() {
+        let result = execute_command_injections("before !`echo hello` after");
+        assert_eq!(result, "before hello after");
+    }
+
+    #[test]
+    fn command_injection_no_markers() {
+        let input = "no commands here";
+        assert_eq!(execute_command_injections(input), input);
+    }
+
+    #[test]
+    fn command_injection_failed_command() {
+        let result = execute_command_injections("result: !`false`");
+        assert!(result.starts_with("result: [command failed"));
+    }
+
+    #[test]
+    fn command_injection_multiple() {
+        let result = execute_command_injections("!`echo a` and !`echo b`");
+        assert_eq!(result, "a and b");
+    }
+
+    #[test]
+    fn command_injection_unclosed_backtick() {
+        let result = execute_command_injections("before !`unclosed");
+        assert_eq!(result, "before !`unclosed");
+    }
+
+    #[test]
+    fn render_with_command_injection() {
+        let skill = Skill {
+            name: "test".into(),
+            description: "Test".into(),
+            prompt: "Context: !`echo injected`\n\nDo {task}.".into(),
+            arguments: vec![SkillArgument {
+                name: "task".into(),
+                description: "Task".into(),
+                required: true,
+            }],
+            config: None,
+            scope: SkillScope::Task,
+            argument_hint: None,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("task".into(), "the thing".into());
+        let rendered = skill.render(&args).unwrap();
+        assert_eq!(rendered, "Context: injected\n\nDo the thing.");
     }
 }

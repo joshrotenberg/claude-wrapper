@@ -3,6 +3,7 @@ name: chain_watcher
 description: >-
   Watch one or more active chains and report step progress changes.
   Designed for /loop usage to babysit long-running chains.
+argument-hint: "[chain-id,chain-id,...]"
 metadata:
   scope: coordinator
   arguments:

@@ -1,6 +1,7 @@
 ---
 name: create_pr
 description: Create a pull request for the current branch.
+argument-hint: "<title> <body> [issue]"
 metadata:
   arguments:
     - name: title

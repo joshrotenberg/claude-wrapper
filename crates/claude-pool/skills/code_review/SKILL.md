@@ -1,6 +1,7 @@
 ---
 name: code_review
 description: Review code for bugs, style issues, and improvements.
+argument-hint: "<code|diff|file|PR>"
 metadata:
   arguments:
     - name: target

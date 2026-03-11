@@ -1,6 +1,7 @@
 ---
 name: implement
 description: Implement a feature based on a description or issue.
+argument-hint: "<description|issue-url>"
 metadata:
   arguments:
     - name: description

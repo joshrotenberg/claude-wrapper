@@ -1,6 +1,7 @@
 ---
 name: refactor
 description: Refactor code toward a specific goal.
+argument-hint: "<target> <goal>"
 metadata:
   arguments:
     - name: target

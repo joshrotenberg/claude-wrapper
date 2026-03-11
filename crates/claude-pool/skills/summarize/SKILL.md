@@ -1,6 +1,7 @@
 ---
 name: summarize
 description: Summarize a codebase, file, or document.
+argument-hint: "<path|file|content>"
 metadata:
   arguments:
     - name: target

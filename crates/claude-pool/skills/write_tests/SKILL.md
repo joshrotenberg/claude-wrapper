@@ -1,6 +1,7 @@
 ---
 name: write_tests
 description: Generate tests for existing code.
+argument-hint: "<file|module|code>"
 metadata:
   arguments:
     - name: target

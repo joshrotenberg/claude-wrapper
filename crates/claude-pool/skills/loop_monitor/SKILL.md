@@ -1,6 +1,7 @@
 ---
 name: loop_monitor
 description: Monitor GitHub PRs and report only meaningful changes on each iteration.
+argument-hint: "<owner/repo> [filters] [--verbose]"
 metadata:
   scope: coordinator
   arguments:

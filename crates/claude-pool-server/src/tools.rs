@@ -960,12 +960,16 @@ pub fn pool_skill_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
                         true
                     })
                     .map(|rs| {
-                        serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "name": rs.skill.name,
                             "description": rs.skill.description,
                             "scope": rs.skill.scope.to_string(),
                             "source": rs.source.to_string(),
-                        })
+                        });
+                        if let Some(ref hint) = rs.skill.argument_hint {
+                            entry["argument_hint"] = serde_json::json!(hint);
+                        }
+                        entry
                     })
                     .collect();
                 results.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -1049,6 +1053,7 @@ pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                     arguments,
                     config,
                     scope,
+                    argument_hint: None,
                 };
                 let mut registry = state.skills.write().await;
                 let overwritten = registry.get(&input.name).is_some();

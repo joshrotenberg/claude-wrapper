@@ -4,6 +4,7 @@ description: >-
   Two-phase workflow: plan in read-only mode, then execute after review.
   Use for complex or risky tasks where you want to approve the approach
   before implementation begins.
+argument-hint: "<task-description>"
 metadata:
   scope: chain
   arguments:
