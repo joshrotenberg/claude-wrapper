@@ -153,7 +153,7 @@ let output = QueryCommand::new("implement the feature in TASK.md")
     .await?;
 ```
 
-Session management:
+Session management (low-level):
 
 ```rust
 // Start new session
@@ -167,6 +167,26 @@ let output = QueryCommand::new("what did we find?")
     .resume("my-session")
     .execute(&claude)
     .await?;
+```
+
+Session management (type-safe):
+
+```rust
+use claude_wrapper::Session;
+
+// Create from a previous query result
+let mut session = Session::from_result(&claude, &result);
+
+// Auto-resumes the session
+let next = session.query("what did we find?").execute().await?;
+
+// Fork to branch the conversation
+let mut forked = session.fork();
+let alt = forked.query("try a different approach").execute().await?;
+
+// Track cumulative cost and turns
+println!("Total cost: ${}", session.cumulative_cost_usd());
+println!("Total turns: {}", session.cumulative_turns());
 ```
 
 ## Streaming NDJSON Events
@@ -309,8 +329,10 @@ use claude_wrapper::Error;
 
 match QueryCommand::new("test").execute(&claude).await {
     Ok(output) => println!("{}", output.stdout),
-    Err(Error::ProcessError(e)) => eprintln!("Process failed: {}", e),
-    Err(Error::InvalidUtf8) => eprintln!("Output not valid UTF-8"),
+    Err(Error::CommandFailed { stderr, exit_code, .. }) => {
+        eprintln!("Command failed (exit {}): {}", exit_code, stderr);
+    }
+    Err(Error::Timeout { .. }) => eprintln!("Command timed out"),
     Err(e) => eprintln!("Other error: {}", e),
 }
 ```

@@ -38,9 +38,12 @@ Or run directly without installing:
 cargo run -p claude-pool-server -- -n 4 --budget-usd 10.0
 ```
 
-### Future options
+### Homebrew
 
-Homebrew and Docker distributions are planned but not yet available. For now, `cargo install` is the recommended approach. Docker will make more sense once HTTP transport lands ([#73](https://github.com/joshrotenberg/claude-wrapper/issues/73)).
+```bash
+brew tap joshrotenberg/brew
+brew install claude-pool-server
+```
 
 ## Quick Start
 
