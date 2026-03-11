@@ -79,6 +79,22 @@ impl MessageBus {
             .unwrap_or_default()
     }
 
+    /// Broadcast a message from one slot to all other slots.
+    ///
+    /// Sends a copy of the message to every slot in `recipients` except the sender.
+    /// Returns the list of message IDs created.
+    pub fn broadcast(&self, from: SlotId, recipients: &[SlotId], content: String) -> Vec<String> {
+        let mut ids = Vec::new();
+        for to in recipients {
+            if *to == from {
+                continue;
+            }
+            let id = self.send(from.clone(), to.clone(), content.clone());
+            ids.push(id);
+        }
+        ids
+    }
+
     /// Get the count of messages in a slot's inbox.
     pub fn count(&self, slot_id: &SlotId) -> usize {
         self.inboxes
@@ -164,6 +180,31 @@ mod tests {
 
         let messages = bus.peek(&slot1);
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_broadcast() {
+        let bus = MessageBus::new();
+        let slot0 = SlotId("slot-0".to_string());
+        let slot1 = SlotId("slot-1".to_string());
+        let slot2 = SlotId("slot-2".to_string());
+        let slot3 = SlotId("slot-3".to_string());
+
+        let recipients = vec![slot0.clone(), slot1.clone(), slot2.clone(), slot3.clone()];
+        let ids = bus.broadcast(slot0.clone(), &recipients, "hello all".to_string());
+
+        // Should send to 3 recipients (not self)
+        assert_eq!(ids.len(), 3);
+
+        // Each recipient should have exactly one message
+        assert_eq!(bus.count(&slot1), 1);
+        assert_eq!(bus.count(&slot2), 1);
+        assert_eq!(bus.count(&slot3), 1);
+        assert_eq!(bus.count(&slot0), 0); // sender excluded
+
+        let msg = bus.read(&slot1);
+        assert_eq!(msg[0].content, "hello all");
+        assert_eq!(msg[0].from, slot0);
     }
 
     #[test]

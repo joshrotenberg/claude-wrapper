@@ -832,6 +832,48 @@ impl<S: PoolStore + 'static> Pool<S> {
         self.inner.message_bus.send(from, to, content)
     }
 
+    /// Broadcast a message from one slot to all other active slots.
+    ///
+    /// Returns the list of message IDs created (one per recipient).
+    pub async fn broadcast_message(&self, from: SlotId, content: String) -> Result<Vec<String>> {
+        let slots = self.inner.store.list_slots().await?;
+        let recipients: Vec<SlotId> = slots.into_iter().map(|s| s.id).collect();
+        Ok(self.inner.message_bus.broadcast(from, &recipients, content))
+    }
+
+    /// Find slots matching optional name, role, and/or state filters.
+    ///
+    /// All filters are optional; omitted filters match everything.
+    pub async fn find_slots(
+        &self,
+        name: Option<&str>,
+        role: Option<&str>,
+        state: Option<SlotState>,
+    ) -> Result<Vec<SlotRecord>> {
+        let slots = self.inner.store.list_slots().await?;
+        Ok(slots
+            .into_iter()
+            .filter(|s| {
+                if let Some(n) = name
+                    && s.config.name.as_deref() != Some(n)
+                {
+                    return false;
+                }
+                if let Some(r) = role
+                    && s.config.role.as_deref() != Some(r)
+                {
+                    return false;
+                }
+                if let Some(st) = state
+                    && s.state != st
+                {
+                    return false;
+                }
+                true
+            })
+            .collect())
+    }
+
     /// Read and drain all messages for a slot.
     ///
     /// Returns messages in order, removing them from the inbox.
@@ -1935,6 +1977,78 @@ mod tests {
             slot.config.description.as_deref(),
             Some("Reviews PRs for correctness and style")
         );
+    }
+
+    #[tokio::test]
+    async fn find_slots_filters_by_name_role_state() {
+        let pool = Pool::builder(mock_claude())
+            .slots(1)
+            .slot_config(SlotConfig {
+                name: Some("reviewer".into()),
+                role: Some("code_review".into()),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Scale up with a different config for the second slot.
+        pool.scale_up(1).await.unwrap();
+        let mut slots = pool.store().list_slots().await.unwrap();
+        if let Some(s) = slots.iter_mut().find(|s| s.id.0 == "slot-1") {
+            s.config.name = Some("writer".into());
+            s.config.role = Some("implementation".into());
+            pool.store().put_slot(s.clone()).await.unwrap();
+        }
+
+        // Find by name.
+        let found = pool.find_slots(Some("reviewer"), None, None).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.0, "slot-0");
+
+        // Find by role.
+        let found = pool
+            .find_slots(None, Some("implementation"), None)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.0, "slot-1");
+
+        // Find by state (all idle).
+        let found = pool
+            .find_slots(None, None, Some(SlotState::Idle))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 2);
+
+        // Find with no filters (returns all).
+        let found = pool.find_slots(None, None, None).await.unwrap();
+        assert_eq!(found.len(), 2);
+
+        // Find with non-matching filter.
+        let found = pool
+            .find_slots(Some("nonexistent"), None, None)
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn broadcast_sends_to_all_except_sender() {
+        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
+
+        let from = SlotId("slot-0".into());
+        let ids = pool
+            .broadcast_message(from.clone(), "hello everyone".into())
+            .await
+            .unwrap();
+
+        assert_eq!(ids.len(), 2); // 3 slots minus sender
+
+        // Verify recipients got messages.
+        assert_eq!(pool.message_count(&SlotId("slot-1".into())), 1);
+        assert_eq!(pool.message_count(&SlotId("slot-2".into())), 1);
+        assert_eq!(pool.message_count(&from), 0); // sender excluded
     }
 
     #[tokio::test]
