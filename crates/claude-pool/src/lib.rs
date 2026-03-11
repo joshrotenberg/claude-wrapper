@@ -30,7 +30,7 @@ pub mod workflow;
 pub mod worktree;
 
 pub use chain::{
-    ChainOptions, ChainProgress, ChainResult, ChainStatus, ChainStep, StepAction,
+    ChainIsolation, ChainOptions, ChainProgress, ChainResult, ChainStatus, ChainStep, StepAction,
     StepFailurePolicy, StepResult, execute_chain,
 };
 pub use error::{Error, Result};

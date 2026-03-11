@@ -68,12 +68,26 @@ pub struct StepFailurePolicy {
     pub recovery_prompt: Option<String>,
 }
 
+/// Isolation mode for a chain execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainIsolation {
+    /// Use the slot's working directory (default behavior).
+    #[default]
+    None,
+    /// Create a temporary git worktree shared by all steps in the chain.
+    Worktree,
+}
+
 /// Options for chain execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChainOptions {
     /// Tags for the chain task (used when submitted async).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Isolation mode for this chain.
+    #[serde(default)]
+    pub isolation: ChainIsolation,
 }
 
 /// Result of a single chain step.
@@ -164,7 +178,7 @@ pub async fn execute_chain<S: PoolStore + 'static>(
     skills: &SkillRegistry,
     steps: &[ChainStep],
 ) -> crate::Result<ChainResult> {
-    execute_chain_with_progress(pool, skills, steps, None).await
+    execute_chain_with_progress(pool, skills, steps, None, None).await
 }
 
 /// Execute a chain with optional progress tracking.
@@ -172,12 +186,14 @@ pub async fn execute_chain<S: PoolStore + 'static>(
 /// If `chain_task_id` is provided, intermediate progress is stored so callers
 /// can poll for status. When a chain task ID is present, steps execute with
 /// streaming output so partial results are visible via
-/// [`Pool::chain_progress`](crate::Pool::chain_progress).
+/// [`Pool::chain_progress`](crate::Pool::chain_progress). If `working_dir`
+/// is provided, all steps use that directory instead of the slot's default.
 pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     pool: &Pool<S>,
     skills: &SkillRegistry,
     steps: &[ChainStep],
     chain_task_id: Option<&TaskId>,
+    working_dir: Option<&std::path::Path>,
 ) -> crate::Result<ChainResult> {
     let mut step_results = Vec::with_capacity(steps.len());
     let mut previous_output = String::new();
@@ -240,9 +256,16 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
             }) as OnOutputChunk
         });
 
-        let (step_result, step_cost) =
-            execute_step_with_retries(pool, step, &prompt, &previous_output, skills, on_output)
-                .await;
+        let (step_result, step_cost) = execute_step_with_retries(
+            pool,
+            step,
+            &prompt,
+            &previous_output,
+            skills,
+            on_output.clone(),
+            working_dir,
+        )
+        .await;
 
         total_cost += step_cost;
 
@@ -345,6 +368,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
     previous_output: &str,
     skills: &SkillRegistry,
     on_output: Option<OnOutputChunk>,
+    working_dir: Option<&std::path::Path>,
 ) -> (std::result::Result<StepResult, String>, u64) {
     let max_attempts = 1 + step.failure_policy.retries;
     let mut total_cost = 0u64;
@@ -362,7 +386,12 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
         };
 
         let result = pool
-            .run_with_config_streaming(&prompt, step.config.clone(), on_output.clone())
+            .run_with_config_streaming(
+                &prompt,
+                step.config.clone(),
+                on_output.clone(),
+                working_dir.map(|p| p.to_path_buf()),
+            )
             .await;
 
         match result {
@@ -406,7 +435,12 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
         tracing::info!(step = %step.name, "attempting recovery prompt");
 
         let result = pool
-            .run_with_config_streaming(&recovery_prompt, step.config.clone(), on_output)
+            .run_with_config_streaming(
+                &recovery_prompt,
+                step.config.clone(),
+                on_output,
+                working_dir.map(|p| p.to_path_buf()),
+            )
             .await;
 
         match result {
@@ -507,6 +541,36 @@ mod tests {
     fn chain_options_defaults() {
         let opts = ChainOptions::default();
         assert!(opts.tags.is_empty());
+        assert_eq!(opts.isolation, ChainIsolation::None);
+    }
+
+    #[test]
+    fn chain_isolation_serde_roundtrip() {
+        let worktree = ChainIsolation::Worktree;
+        let json = serde_json::to_string(&worktree).unwrap();
+        assert_eq!(json, r#""worktree""#);
+
+        let none = ChainIsolation::None;
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(json, r#""none""#);
+
+        let parsed: ChainIsolation = serde_json::from_str(r#""worktree""#).unwrap();
+        assert_eq!(parsed, ChainIsolation::Worktree);
+
+        let parsed: ChainIsolation = serde_json::from_str(r#""none""#).unwrap();
+        assert_eq!(parsed, ChainIsolation::None);
+    }
+
+    #[test]
+    fn chain_options_with_isolation_serializes() {
+        let opts = ChainOptions {
+            tags: vec!["test".into()],
+            isolation: ChainIsolation::Worktree,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: ChainOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.isolation, ChainIsolation::Worktree);
+        assert_eq!(parsed.tags, vec!["test"]);
     }
 
     #[test]

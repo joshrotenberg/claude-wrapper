@@ -105,17 +105,14 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
 
     /// Build and initialize the pool, registering slots in the store.
     pub async fn build(self) -> Result<Pool<S>> {
-        // Set up worktree manager if isolation is enabled.
-        let worktree_manager = if self.config.worktree_isolation {
-            let repo_dir = self
-                .claude
-                .working_dir()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            Some(crate::worktree::WorktreeManager::new(repo_dir, None))
-        } else {
-            None
-        };
+        // Always create the worktree manager so it's available for
+        // per-chain worktrees even when global worktree_isolation is off.
+        let repo_dir = self
+            .claude
+            .working_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let worktree_manager = Some(crate::worktree::WorktreeManager::new(repo_dir, None));
 
         let inner = Arc::new(PoolInner {
             claude: self.claude,
@@ -135,10 +132,14 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
 
             let slot_id = SlotId(format!("slot-{i}"));
 
-            // Create worktree if isolation is enabled.
-            let worktree_path = if let Some(ref mgr) = inner.worktree_manager {
-                let path = mgr.create(&slot_id).await?;
-                Some(path.to_string_lossy().into_owned())
+            // Create worktree if per-slot isolation is enabled.
+            let worktree_path = if inner.config.worktree_isolation {
+                if let Some(ref mgr) = inner.worktree_manager {
+                    let path = mgr.create(&slot_id).await?;
+                    Some(path.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -201,54 +202,16 @@ impl<S: PoolStore + 'static> Pool<S> {
         prompt: &str,
         task_config: Option<SlotConfig>,
     ) -> Result<TaskResult> {
-        self.check_shutdown()?;
-        self.check_budget()?;
-
-        let task_id = TaskId(format!("task-{}", new_id()));
-
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: prompt.to_string(),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags: vec![],
-            config: task_config,
-        };
-        self.inner.store.put_task(record).await?;
-
-        let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
-        let result = self
-            .execute_task(&task_id, prompt, &slot_id, &slot_config)
-            .await;
-
-        self.release_slot(&slot_id, &task_id, &result).await?;
-
-        let task_result = result?;
-        // Update task record with result.
-        let mut task = self
-            .inner
-            .store
-            .get_task(&task_id)
-            .await?
-            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
-        task.state = TaskState::Completed;
-        task.result = Some(task_result.clone());
-        self.inner.store.put_task(task).await?;
-
-        Ok(task_result)
+        self.run_with_config_and_dir(prompt, task_config, None)
+            .await
     }
 
-    /// Run a task with per-task config overrides and optional streaming output.
-    ///
-    /// When `on_output` is `Some`, the task uses streaming execution and calls
-    /// the callback with each text chunk as it arrives. When `None`, behaves
-    /// identically to [`run_with_config`](Self::run_with_config).
-    pub(crate) async fn run_with_config_streaming(
+    /// Run a task with per-task config overrides and an optional working directory override.
+    pub async fn run_with_config_and_dir(
         &self,
         prompt: &str,
         task_config: Option<SlotConfig>,
-        on_output: Option<crate::chain::OnOutputChunk>,
+        working_dir: Option<std::path::PathBuf>,
     ) -> Result<TaskResult> {
         self.check_shutdown()?;
         self.check_budget()?;
@@ -268,7 +231,71 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
         let result = self
-            .execute_task_streaming(&task_id, prompt, &slot_id, &slot_config, on_output)
+            .execute_task(
+                &task_id,
+                prompt,
+                &slot_id,
+                &slot_config,
+                working_dir.as_deref(),
+            )
+            .await;
+
+        self.release_slot(&slot_id, &task_id, &result).await?;
+
+        let task_result = result?;
+        // Update task record with result.
+        let mut task = self
+            .inner
+            .store
+            .get_task(&task_id)
+            .await?
+            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
+        task.state = TaskState::Completed;
+        task.result = Some(task_result.clone());
+        self.inner.store.put_task(task).await?;
+
+        Ok(task_result)
+    }
+
+    /// Run a task with per-task config overrides, optional streaming output,
+    /// and an optional working directory override.
+    ///
+    /// When `on_output` is `Some`, the task uses streaming execution and calls
+    /// the callback with each text chunk as it arrives. When `None`, behaves
+    /// identically to [`run_with_config_and_dir`](Self::run_with_config_and_dir).
+    pub(crate) async fn run_with_config_streaming(
+        &self,
+        prompt: &str,
+        task_config: Option<SlotConfig>,
+        on_output: Option<crate::chain::OnOutputChunk>,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> Result<TaskResult> {
+        self.check_shutdown()?;
+        self.check_budget()?;
+
+        let task_id = TaskId(format!("task-{}", new_id()));
+
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: prompt.to_string(),
+            state: TaskState::Pending,
+            slot_id: None,
+            result: None,
+            tags: vec![],
+            config: task_config,
+        };
+        self.inner.store.put_task(record).await?;
+
+        let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
+        let result = self
+            .execute_task_streaming(
+                &task_id,
+                prompt,
+                &slot_id,
+                &slot_config,
+                on_output,
+                working_dir.as_deref(),
+            )
             .await;
 
         self.release_slot(&slot_id, &task_id, &result).await?;
@@ -330,7 +357,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             match pool.assign_slot(&tid).await {
                 Ok((slot_id, slot_config)) => {
                     let result = pool
-                        .execute_task(&tid, &prompt, &slot_id, &slot_config)
+                        .execute_task(&tid, &prompt, &slot_id, &slot_config, None)
                         .await;
 
                     let _ = pool.release_slot(&slot_id, &tid, &result).await;
@@ -485,6 +512,8 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let task_id = TaskId(format!("chain-{}", new_id()));
 
+        let isolation = options.isolation;
+
         let record = TaskRecord {
             id: task_id.clone(),
             prompt: format!("chain: {} steps", steps.len()),
@@ -516,12 +545,51 @@ impl<S: PoolStore + 'static> Pool<S> {
             self.inner.store.put_task(task).await?;
         }
 
+        // Create chain worktree if isolation is requested.
+        let chain_working_dir = if isolation == crate::chain::ChainIsolation::Worktree {
+            if let Some(ref mgr) = self.inner.worktree_manager {
+                match mgr.create_for_chain(&task_id).await {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_id.0,
+                            error = %e,
+                            "failed to create chain worktree, falling back to slot dir"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let pool = self.clone();
         let tid = task_id.clone();
         let skills = skills.clone();
         tokio::spawn(async move {
-            let result =
-                crate::chain::execute_chain_with_progress(&pool, &skills, &steps, Some(&tid)).await;
+            let result = crate::chain::execute_chain_with_progress(
+                &pool,
+                &skills,
+                &steps,
+                Some(&tid),
+                chain_working_dir.as_deref(),
+            )
+            .await;
+
+            // Clean up chain worktree if we created one.
+            if chain_working_dir.is_some()
+                && let Some(ref mgr) = pool.inner.worktree_manager
+                && let Err(e) = mgr.remove_chain(&tid).await
+            {
+                tracing::warn!(
+                    task_id = %tid.0,
+                    error = %e,
+                    "failed to clean up chain worktree"
+                );
+            }
 
             // Store the chain result as the task result.
             if let Some(mut task) = pool.inner.store.get_task(&tid).await.ok().flatten() {
@@ -620,7 +688,10 @@ impl<S: PoolStore + 'static> Pool<S> {
         let steps = workflow.instantiate(&arguments)?;
 
         // Submit the instantiated chain with tags
-        let options = crate::chain::ChainOptions { tags };
+        let options = crate::chain::ChainOptions {
+            tags,
+            ..Default::default()
+        };
         self.submit_chain(steps, skills, options).await
     }
 
@@ -844,10 +915,14 @@ impl<S: PoolStore + 'static> Pool<S> {
             let slot_id = SlotId(format!("slot-{next_id}"));
             next_id += 1;
 
-            // Create worktree if isolation is enabled.
-            let worktree_path = if let Some(ref mgr) = self.inner.worktree_manager {
-                let path = mgr.create(&slot_id).await?;
-                Some(path.to_string_lossy().into_owned())
+            // Create worktree if per-slot isolation is enabled.
+            let worktree_path = if self.inner.config.worktree_isolation {
+                if let Some(ref mgr) = self.inner.worktree_manager {
+                    let path = mgr.create(&slot_id).await?;
+                    Some(path.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -1102,6 +1177,7 @@ impl<S: PoolStore + 'static> Pool<S> {
         prompt: &str,
         slot_id: &SlotId,
         slot_config: &SlotConfig,
+        override_working_dir: Option<&std::path::Path>,
     ) -> Result<TaskResult> {
         let task_record = self.inner.store.get_task(_task_id).await?;
         let task_cfg = task_record.as_ref().and_then(|t| t.config.as_ref());
@@ -1149,14 +1225,16 @@ impl<S: PoolStore + 'static> Pool<S> {
             }
         }
 
-        // Use worktree working dir if the slot has one, otherwise use default.
+        // Use override working dir, slot worktree, or default.
         let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
             // Resume session if the slot has one.
             if let Some(ref session_id) = slot.session_id {
                 cmd = cmd.resume(session_id);
             }
 
-            if let Some(ref wt_path) = slot.worktree_path {
+            if let Some(dir) = override_working_dir {
+                self.inner.claude.with_working_dir(dir)
+            } else if let Some(ref wt_path) = slot.worktree_path {
                 self.inner.claude.with_working_dir(wt_path)
             } else {
                 self.inner.claude.clone()
@@ -1210,13 +1288,14 @@ impl<S: PoolStore + 'static> Pool<S> {
         slot_id: &SlotId,
         slot_config: &SlotConfig,
         on_output: Option<crate::chain::OnOutputChunk>,
+        override_working_dir: Option<&std::path::Path>,
     ) -> Result<TaskResult> {
         // If no streaming callback, use the standard non-streaming path.
         let on_output = match on_output {
             Some(cb) => cb,
             None => {
                 return self
-                    .execute_task(task_id, prompt, slot_id, slot_config)
+                    .execute_task(task_id, prompt, slot_id, slot_config, override_working_dir)
                     .await;
             }
         };
@@ -1261,11 +1340,14 @@ impl<S: PoolStore + 'static> Pool<S> {
             }
         }
 
+        // Use override working dir (chain worktree) > slot worktree > default.
         let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
             if let Some(ref session_id) = slot.session_id {
                 cmd = cmd.resume(session_id);
             }
-            if let Some(ref wt_path) = slot.worktree_path {
+            if let Some(dir) = override_working_dir {
+                self.inner.claude.with_working_dir(dir)
+            } else if let Some(ref wt_path) = slot.worktree_path {
                 self.inner.claude.with_working_dir(wt_path)
             } else {
                 self.inner.claude.clone()
@@ -1827,7 +1909,10 @@ mod tests {
         let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
         let skills = crate::skill::SkillRegistry::new();
-        let options = crate::chain::ChainOptions { tags: vec![] };
+        let options = crate::chain::ChainOptions {
+            tags: vec![],
+            ..Default::default()
+        };
 
         // Create two chains, each with one prompt step.
         let chain1 = vec![crate::chain::ChainStep {
