@@ -235,6 +235,41 @@ pub struct ClaimInput {
     pub slot_id: String,
 }
 
+/// Input for submitting a task that requires review before completion.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitWithReviewInput {
+    /// The prompt/task to execute.
+    pub prompt: String,
+    /// Model override for this task.
+    pub model: Option<String>,
+    /// Effort override for this task (min, low, medium, high, max).
+    pub effort: Option<String>,
+    /// Tags for grouping/filtering.
+    pub tags: Option<Vec<String>>,
+    /// Maximum number of rejections before failing (default: 3).
+    pub max_rejections: Option<u32>,
+    /// Additional MCP servers for this task (merged with global/slot servers).
+    /// Keys are server names, values are server config objects.
+    pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// Input for approving a task result.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ApproveResultInput {
+    /// The task ID to approve.
+    pub task_id: String,
+}
+
+/// Input for rejecting a task result with feedback.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RejectResultInput {
+    /// The task ID to reject.
+    pub task_id: String,
+    /// Feedback explaining why the result was rejected. This is appended to the
+    /// original prompt when the task is re-queued.
+    pub feedback: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -365,15 +400,43 @@ pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_result")
         .title("Check on a Task")
         .description(
-            "Check on a fired task. Returns the result if complete, null if still running.",
+            "Check on a fired task. Returns the result if complete or pending_review, \
+             null if still running. Tasks with review_required=true will have \
+             state='pending_review' when done -- use pool_approve_result or \
+             pool_reject_result to finalize.",
         )
         .read_only()
         .handler(move |input: TaskIdInput| {
             let state = Arc::clone(&state);
             async move {
-                let task_id = claude_pool::TaskId(input.task_id);
+                let task_id = claude_pool::TaskId(input.task_id.clone());
+                // Fetch full task record for state info.
+                let task = state.pool.store().get_task(&task_id).await.ok().flatten();
+
                 match state.pool.result(&task_id).await {
-                    Ok(Some(r)) => Ok(CallToolResult::json(serde_json::to_value(&r).unwrap())),
+                    Ok(Some(r)) => {
+                        let mut val = serde_json::to_value(&r).unwrap();
+                        if let Some(ref t) = task
+                            && let Some(obj) = val.as_object_mut()
+                        {
+                            obj.insert("state".to_string(), serde_json::to_value(t.state).unwrap());
+                            if t.review_required {
+                                obj.insert(
+                                    "review_required".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
+                                obj.insert(
+                                    "rejection_count".to_string(),
+                                    serde_json::json!(t.rejection_count),
+                                );
+                                obj.insert(
+                                    "max_rejections".to_string(),
+                                    serde_json::json!(t.max_rejections),
+                                );
+                            }
+                        }
+                        Ok(CallToolResult::json(val))
+                    }
                     Ok(None) => Ok(CallToolResult::json(
                         serde_json::json!({ "status": "running" }),
                     )),
@@ -1423,6 +1486,75 @@ pub fn pool_claim_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_submit_with_review")
+        .title("Fire a Task with Review Gate")
+        .description(
+            "Fire off a task that requires coordinator approval before completion. \
+             When the task finishes, it enters 'pending_review' state instead of 'completed'. \
+             Use pool_approve_result to accept or pool_reject_result to reject with feedback.",
+        )
+        .handler(move |input: SubmitWithReviewInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let config = task_config_from(input.model, input.effort, input.mcp_servers);
+                let tags = input.tags.unwrap_or_default();
+                match state
+                    .pool
+                    .submit_with_review(&input.prompt, config, tags, input.max_rejections)
+                    .await
+                {
+                    Ok(task_id) => Ok(CallToolResult::json(
+                        serde_json::json!({ "task_id": task_id.0, "review_required": true }),
+                    )),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_approve_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_approve_result")
+        .title("Approve Task Result")
+        .description(
+            "Approve a task that is pending review. Transitions the task from \
+             'pending_review' to 'completed'.",
+        )
+        .handler(move |input: ApproveResultInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let task_id = claude_pool::TaskId(input.task_id);
+                match state.pool.approve_result(&task_id).await {
+                    Ok(()) => Ok(CallToolResult::text("approved")),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_reject_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_reject_result")
+        .title("Reject Task Result")
+        .description(
+            "Reject a task that is pending review. The task is re-queued with the \
+             original prompt plus rejection feedback appended. If the task has been \
+             rejected max_rejections times, it is marked as failed.",
+        )
+        .handler(move |input: RejectResultInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let task_id = claude_pool::TaskId(input.task_id);
+                match state.pool.reject_result(&task_id, &input.feedback).await {
+                    Ok(()) => Ok(CallToolResult::text("rejected and re-queued")),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -1459,5 +1591,8 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_skill_save_tool(Arc::clone(state)),
         pool_skill_eject_tool(Arc::clone(state)),
         pool_claim_tool(Arc::clone(state)),
+        pool_submit_with_review_tool(Arc::clone(state)),
+        pool_approve_result_tool(Arc::clone(state)),
+        pool_reject_result_tool(Arc::clone(state)),
     ]
 }

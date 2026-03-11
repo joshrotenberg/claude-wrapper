@@ -295,6 +295,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              \"claim\" = pool_claim (worker self-service: idle slot grabs next pending task), \
              \"cancel\" = pool_cancel / pool_cancel_chain, \
              \"check\" = pool_result / pool_chain_result, \
+             \"fire with review\" = pool_submit_with_review (async task requiring approval), \
+             \"approve\" = pool_approve_result (accept a pending-review result), \
+             \"reject\" = pool_reject_result (reject with feedback, re-queues), \
              \"inline\" = do the work yourself without the pool. \
              \
              When to use what: Default to inline when uncertain; user can say \"slotize it.\" \

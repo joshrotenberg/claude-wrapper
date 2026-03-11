@@ -134,6 +134,10 @@ mod tests {
             result: None,
             tags: vec!["testing".into()],
             config: None,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
 
         store.put_task(record).await.unwrap();
@@ -200,6 +204,10 @@ mod tests {
                     result: None,
                     tags: vec![],
                     config: None,
+                    review_required: false,
+                    max_rejections: 3,
+                    rejection_count: 0,
+                    original_prompt: None,
                 })
                 .await
                 .unwrap();

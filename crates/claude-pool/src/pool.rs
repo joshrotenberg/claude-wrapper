@@ -250,6 +250,10 @@ impl<S: PoolStore + 'static> Pool<S> {
             result: None,
             tags: vec![],
             config: task_config,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         self.inner.store.put_task(record).await?;
 
@@ -307,6 +311,10 @@ impl<S: PoolStore + 'static> Pool<S> {
             result: None,
             tags: vec![],
             config: task_config,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         self.inner.store.put_task(record).await?;
 
@@ -366,6 +374,10 @@ impl<S: PoolStore + 'static> Pool<S> {
             result: None,
             tags,
             config: task_config,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         self.inner.store.put_task(record).await?;
 
@@ -430,6 +442,245 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(task_id)
     }
 
+    /// Submit a task that requires coordinator review before completion.
+    ///
+    /// When the task finishes execution, it transitions to `PendingReview` instead
+    /// of `Completed`. Use [`Pool::approve_result`] to accept or [`Pool::reject_result`]
+    /// to reject with feedback and re-queue.
+    pub async fn submit_with_review(
+        &self,
+        prompt: &str,
+        task_config: Option<SlotConfig>,
+        tags: Vec<String>,
+        max_rejections: Option<u32>,
+    ) -> Result<TaskId> {
+        self.check_shutdown()?;
+        self.check_budget()?;
+
+        let task_id = TaskId(format!("task-{}", new_id()));
+        let prompt = prompt.to_string();
+        let max_rej = max_rejections.unwrap_or(3);
+
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: prompt.clone(),
+            state: TaskState::Pending,
+            slot_id: None,
+            result: None,
+            tags,
+            config: task_config,
+            review_required: true,
+            max_rejections: max_rej,
+            rejection_count: 0,
+            original_prompt: Some(prompt.clone()),
+        };
+        self.inner.store.put_task(record).await?;
+
+        // Spawn the task execution in the background.
+        let pool = self.clone();
+        let tid = task_id.clone();
+        tokio::spawn(async move {
+            let task = match pool.inner.store.get_task(&tid).await {
+                Ok(Some(t)) => t,
+                _ => return,
+            };
+
+            match pool.assign_slot(&tid).await {
+                Ok((slot_id, slot_config)) => {
+                    let result = pool
+                        .execute_task(&tid, &task.prompt, &slot_id, &slot_config, None)
+                        .await;
+
+                    let _ = pool.release_slot(&slot_id, &tid, &result).await;
+
+                    let mut updated = task;
+                    match result {
+                        Ok(task_result) => {
+                            // review_required: go to PendingReview instead of Completed
+                            if updated.review_required {
+                                updated.state = TaskState::PendingReview;
+                            } else {
+                                updated.state = TaskState::Completed;
+                            }
+                            updated.result = Some(task_result);
+                        }
+                        Err(e) => {
+                            let details = extract_failure_details(&e);
+                            updated.state = TaskState::Failed;
+                            updated.result = Some(TaskResult {
+                                output: e.to_string(),
+                                success: false,
+                                cost_microdollars: 0,
+                                turns_used: 0,
+                                session_id: None,
+                                failed_command: details.failed_command,
+                                exit_code: details.exit_code,
+                                stderr: details.stderr,
+                            });
+                        }
+                    }
+                    let _ = pool.inner.store.put_task(updated).await;
+                }
+                Err(e) => {
+                    let mut updated = task;
+                    updated.state = TaskState::Failed;
+                    updated.result = Some(TaskResult {
+                        output: e.to_string(),
+                        success: false,
+                        cost_microdollars: 0,
+                        turns_used: 0,
+                        session_id: None,
+                        failed_command: None,
+                        exit_code: None,
+                        stderr: None,
+                    });
+                    let _ = pool.inner.store.put_task(updated).await;
+                }
+            }
+        });
+
+        Ok(task_id)
+    }
+
+    /// Approve a task that is pending review, transitioning it to `Completed`.
+    pub async fn approve_result(&self, task_id: &TaskId) -> Result<()> {
+        let mut task = self
+            .inner
+            .store
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
+
+        if task.state != TaskState::PendingReview {
+            return Err(Error::Store(format!(
+                "task {} is not pending review (state: {:?})",
+                task_id.0, task.state
+            )));
+        }
+
+        task.state = TaskState::Completed;
+        self.inner.store.put_task(task).await
+    }
+
+    /// Reject a task that is pending review, re-queuing it with feedback appended.
+    ///
+    /// The original prompt is preserved and the feedback is appended. If the
+    /// rejection count reaches `max_rejections`, the task is marked as `Failed`.
+    pub async fn reject_result(&self, task_id: &TaskId, feedback: &str) -> Result<()> {
+        let mut task = self
+            .inner
+            .store
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
+
+        if task.state != TaskState::PendingReview {
+            return Err(Error::Store(format!(
+                "task {} is not pending review (state: {:?})",
+                task_id.0, task.state
+            )));
+        }
+
+        task.rejection_count += 1;
+
+        if task.rejection_count >= task.max_rejections {
+            task.state = TaskState::Failed;
+            task.result = Some(TaskResult {
+                output: format!(
+                    "task rejected {} times (max: {}). Last feedback: {}",
+                    task.rejection_count, task.max_rejections, feedback
+                ),
+                success: false,
+                cost_microdollars: 0,
+                turns_used: 0,
+                session_id: None,
+                failed_command: None,
+                exit_code: None,
+                stderr: None,
+            });
+            self.inner.store.put_task(task).await?;
+            return Ok(());
+        }
+
+        // Rebuild prompt: original + rejection feedback
+        let original = task
+            .original_prompt
+            .clone()
+            .unwrap_or_else(|| task.prompt.clone());
+        task.prompt = format!(
+            "{}\n\n--- Rejection feedback (attempt {}/{}) ---\n{}",
+            original, task.rejection_count, task.max_rejections, feedback
+        );
+        task.state = TaskState::Pending;
+        task.slot_id = None;
+        task.result = None;
+        self.inner.store.put_task(task.clone()).await?;
+
+        // Re-execute in background (same pattern as submit).
+        let pool = self.clone();
+        let tid = task_id.clone();
+        tokio::spawn(async move {
+            let task = match pool.inner.store.get_task(&tid).await {
+                Ok(Some(t)) => t,
+                _ => return,
+            };
+
+            match pool.assign_slot(&tid).await {
+                Ok((slot_id, slot_config)) => {
+                    let result = pool
+                        .execute_task(&tid, &task.prompt, &slot_id, &slot_config, None)
+                        .await;
+
+                    let _ = pool.release_slot(&slot_id, &tid, &result).await;
+
+                    let mut updated = task;
+                    match result {
+                        Ok(task_result) => {
+                            if updated.review_required {
+                                updated.state = TaskState::PendingReview;
+                            } else {
+                                updated.state = TaskState::Completed;
+                            }
+                            updated.result = Some(task_result);
+                        }
+                        Err(e) => {
+                            let details = extract_failure_details(&e);
+                            updated.state = TaskState::Failed;
+                            updated.result = Some(TaskResult {
+                                output: e.to_string(),
+                                success: false,
+                                cost_microdollars: 0,
+                                turns_used: 0,
+                                session_id: None,
+                                failed_command: details.failed_command,
+                                exit_code: details.exit_code,
+                                stderr: details.stderr,
+                            });
+                        }
+                    }
+                    let _ = pool.inner.store.put_task(updated).await;
+                }
+                Err(e) => {
+                    let mut updated = task;
+                    updated.state = TaskState::Failed;
+                    updated.result = Some(TaskResult {
+                        output: e.to_string(),
+                        success: false,
+                        cost_microdollars: 0,
+                        turns_used: 0,
+                        session_id: None,
+                        failed_command: None,
+                        exit_code: None,
+                        stderr: None,
+                    });
+                    let _ = pool.inner.store.put_task(updated).await;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
     /// Get the result of a submitted task.
     ///
     /// Returns `None` if the task is still pending/running.
@@ -442,7 +693,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
 
         match task.state {
-            TaskState::Completed | TaskState::Failed => Ok(task.result),
+            TaskState::Completed | TaskState::Failed | TaskState::PendingReview => Ok(task.result),
             _ => Ok(None),
         }
     }
@@ -457,7 +708,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
 
         match task.state {
-            TaskState::Pending => {
+            TaskState::Pending | TaskState::PendingReview => {
                 task.state = TaskState::Cancelled;
                 self.inner.store.put_task(task).await?;
                 Ok(())
@@ -643,6 +894,10 @@ impl<S: PoolStore + 'static> Pool<S> {
             result: None,
             tags: options.tags,
             config: None,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         self.inner.store.put_task(record).await?;
 
@@ -1096,12 +1351,23 @@ impl<S: PoolStore + 'static> Pool<S> {
             .await?
             .len();
 
+        let pending_review_tasks = self
+            .inner
+            .store
+            .list_tasks(&TaskFilter {
+                state: Some(TaskState::PendingReview),
+                ..Default::default()
+            })
+            .await?
+            .len();
+
         Ok(PoolStatus {
             total_slots: slots.len(),
             idle_slots: idle,
             busy_slots: busy,
             running_tasks,
             pending_tasks,
+            pending_review_tasks,
             total_spend_microdollars: self.inner.total_spend.load(Ordering::Relaxed),
             budget_microdollars: self.inner.config.budget_microdollars,
             shutdown: self.inner.shutdown.load(Ordering::Relaxed),
@@ -1799,6 +2065,8 @@ pub struct PoolStatus {
     pub running_tasks: usize,
     /// Number of pending (queued) tasks.
     pub pending_tasks: usize,
+    /// Number of tasks awaiting coordinator review.
+    pub pending_review_tasks: usize,
     /// Total spend in microdollars.
     pub total_spend_microdollars: u64,
     /// Budget cap in microdollars, if set.
@@ -2497,6 +2765,10 @@ mod tests {
             result: None,
             tags: vec![],
             config: None,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         pool.store().put_task(record).await.unwrap();
 
@@ -2549,6 +2821,10 @@ mod tests {
             }),
             tags: vec![],
             config: None,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
         };
         pool.store().put_task(record).await.unwrap();
 
