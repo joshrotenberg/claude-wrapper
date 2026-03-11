@@ -289,9 +289,10 @@ pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_run")
-        .title("Run Task (Sync)")
+        .title("Run a Task")
         .description(
-            "Run a task synchronously on the next available slot. Blocks until completion.",
+            "Run a task on the next available slot. Blocks until completion. \
+             Use this for single, clear actions with one clear output.",
         )
         .handler(move |input: RunInput| {
             let state = Arc::clone(&state);
@@ -308,8 +309,8 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit")
-        .title("Submit Task (Async)")
-        .description("Submit a task for async execution. Returns a task_id immediately.")
+        .title("Fire a Task")
+        .description("Fire off a task for async execution. Returns a task_id immediately. Check on it later with pool_result.")
         .handler(move |input: SubmitInput| {
             let state = Arc::clone(&state);
             async move {
@@ -332,8 +333,10 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_result")
-        .title("Get Task Result")
-        .description("Check/collect result for a submitted task. Returns null if still running.")
+        .title("Check on a Task")
+        .description(
+            "Check on a fired task. Returns the result if complete, null if still running.",
+        )
         .read_only()
         .handler(move |input: TaskIdInput| {
             let state = Arc::clone(&state);
@@ -353,7 +356,7 @@ pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_cancel")
-        .title("Cancel Task")
+        .title("Cancel a Task")
         .description("Cancel a pending or running task.")
         .handler(move |input: TaskIdInput| {
             let state = Arc::clone(&state);
@@ -370,9 +373,9 @@ pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_fan_out")
-        .title("Fan Out (Parallel)")
+        .title("Fan Out Tasks")
         .description(
-            "Execute multiple tasks in parallel across available slots. Returns all results.",
+            "Fan out multiple independent tasks in parallel across available slots. Returns all results.",
         )
         .handler(move |input: FanOutInput| {
             let state = Arc::clone(&state);
@@ -391,7 +394,7 @@ pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_drain")
-        .title("Drain Pool")
+        .title("Drain the Pool")
         .description(
             "Gracefully shut down the pool. Waits for in-flight tasks, then stops all slots.",
         )
@@ -620,7 +623,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
 
 pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_run")
-        .title("Run Skill")
+        .title("Run a Skill")
         .description("Run a registered skill by name with arguments. Blocks until completion.")
         .handler(move |input: SkillRunInput| {
             let state = Arc::clone(&state);
@@ -662,11 +665,11 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 
 pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain")
-        .title("Run Chain (Sync)")
+        .title("Chain Steps")
         .description(
-            "Execute a sequential pipeline of steps synchronously. Each step's output feeds \
-             the next. Steps can be inline prompts or skill references. Blocks until all \
-             steps complete. For long chains, use pool_submit_chain instead.",
+            "Chain a sequential pipeline of steps. Each step's output feeds the next. \
+             Steps can be inline prompts or skill references. Blocks until all steps \
+             complete. For long chains, fire a chain with pool_submit_chain instead.",
         )
         .handler(move |input: ChainInput| {
             let state = Arc::clone(&state);
@@ -684,10 +687,10 @@ pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
 
 pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit_chain")
-        .title("Submit Chain (Async)")
+        .title("Fire a Chain")
         .description(
-            "Submit a sequential pipeline for async execution. Returns a task_id immediately. \
-             Poll with pool_chain_result for per-step progress, or pool_result for final output.",
+            "Fire off a chain for async execution. Returns a task_id immediately. \
+             Check on it with pool_chain_result for per-step progress.",
         )
         .handler(move |input: SubmitChainInput| {
             let state = Arc::clone(&state);
@@ -712,10 +715,10 @@ pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
 
 pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_fan_out_chains")
-        .title("Fan Out Chains (Parallel Pipelines)")
+        .title("Fan Out Chains")
         .description(
-            "Submit multiple sequential chains to run in parallel, each on its own slot. \
-             Returns all task IDs for individual progress tracking via pool_chain_result.",
+            "Fan out multiple chains in parallel, each on its own slot. \
+             Returns all task IDs. Check on each with pool_chain_result.",
         )
         .handler(move |input: FanOutChainsInput| {
             let state = Arc::clone(&state);
@@ -740,9 +743,9 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
 
 pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain_result")
-        .title("Get Chain Progress")
+        .title("Check on a Chain")
         .description(
-            "Get per-step progress of an async chain. Shows which step is running, \
+            "Check on a fired chain. Shows per-step progress: which step is running, \
              completed steps, and overall status.",
         )
         .read_only()
@@ -776,12 +779,11 @@ pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
 /// Cancel a running chain, skipping remaining steps.
 pub fn pool_cancel_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_cancel_chain")
-        .title("Cancel Chain")
+        .title("Cancel a Chain")
         .description(
-            "Cancel a running chain submitted with pool_submit_chain or pool_fan_out_chains. \
+            "Cancel a running chain that was fired with pool_submit_chain or pool_fan_out_chains. \
              The current step finishes before cancellation takes effect. Remaining steps are \
-             skipped (marked skipped=true). Use pool_chain_result to confirm, then pool_result \
-             to retrieve partial output.",
+             skipped. Check on the chain with pool_chain_result to confirm.",
         )
         .handler(move |input: TaskIdInput| {
             let state = Arc::clone(&state);
@@ -835,7 +837,7 @@ pub fn pool_invoke_workflow_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -
 /// Build all pool tools.
 pub fn pool_scale_up_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_scale_up")
-        .title("Scale Up Slots")
+        .title("Scale Up the Pool")
         .description("Add N new slots to the pool. Returns the new total slot count.")
         .handler(move |input: ScalingInput| {
             let state = Arc::clone(&state);
@@ -855,7 +857,7 @@ pub fn pool_scale_up_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool 
 
 pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_scale_down")
-        .title("Scale Down Slots")
+        .title("Scale Down the Pool")
         .description(
             "Remove N slots from the pool. Removes idle slots first, \
              then waits for busy slots to complete. Returns the new total slot count.",
@@ -878,7 +880,7 @@ pub fn pool_scale_down_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
 
 pub fn pool_set_target_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_set_target_slots")
-        .title("Set Target Slot Count")
+        .title("Set Pool Size")
         .description("Set the pool to a specific number of slots, scaling up or down as needed.")
         .handler(move |input: SetTargetSlotsInput| {
             let state = Arc::clone(&state);
@@ -902,7 +904,7 @@ pub fn pool_set_target_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) 
 pub fn pool_skill_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_list")
         .title("List Skills")
-        .description("List registered skills with optional scope/source filters.")
+        .description("List skills available in the pool, with optional scope/source filters. Skills come from builtins, global (~/.claude-pool/skills/), or project (.claude-pool/skills/).")
         .read_only()
         .handler(move |input: SkillListInput| {
             let state = Arc::clone(&state);
@@ -990,7 +992,7 @@ pub fn pool_skill_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 /// Register a skill at runtime. Ephemeral unless saved with pool_skill_save.
 pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_add")
-        .title("Add Skill")
+        .title("Add a Skill")
         .description(
             "Register a skill at runtime. Ephemeral (lost on restart) unless saved \
              with pool_skill_save. Overwrites any existing skill with the same name.",
@@ -1034,7 +1036,7 @@ pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
 /// Remove a skill by name. Runtime-only, does not delete files.
 pub fn pool_skill_remove_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_remove")
-        .title("Remove Skill")
+        .title("Remove a Skill")
         .description("Remove a skill by name. Runtime-only, does not delete files on disk.")
         .handler(move |input: SkillRemoveInput| {
             let state = Arc::clone(&state);
