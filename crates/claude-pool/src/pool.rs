@@ -366,6 +366,33 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
     }
 
+    /// Cancel a running chain, skipping remaining steps.
+    ///
+    /// Sets the chain's task state to `Cancelled`. The currently-executing step
+    /// (if any) runs to completion; remaining steps are then skipped. Partial
+    /// results are available via [`Pool::result`] once the chain finishes.
+    pub async fn cancel_chain(&self, task_id: &TaskId) -> Result<()> {
+        let mut task = self
+            .inner
+            .store
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
+
+        match task.state {
+            TaskState::Running | TaskState::Pending => {
+                task.state = TaskState::Cancelled;
+                self.inner.store.put_task(task).await?;
+                // Optimistically update in-flight progress status.
+                if let Some(mut progress) = self.inner.chain_progress.get_mut(&task_id.0) {
+                    progress.status = crate::chain::ChainStatus::Cancelled;
+                }
+                Ok(())
+            }
+            _ => Ok(()), // already terminal or already cancelled
+        }
+    }
+
     /// Execute tasks in parallel across available slots, collecting all results.
     ///
     /// Queues excess prompts until a slot becomes idle. Returns once all
@@ -1708,5 +1735,84 @@ mod tests {
             extract_tool_name("Claude wants to use Bash, proceed?"),
             "Bash"
         );
+    }
+
+    // ── Chain cancellation tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn cancel_chain_marks_task_cancelled() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+
+        // Manually insert a running chain task.
+        let task_id = TaskId("chain-test-1".into());
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: "chain: 3 steps".into(),
+            state: TaskState::Running,
+            slot_id: None,
+            result: None,
+            tags: vec![],
+            config: None,
+        };
+        pool.store().put_task(record).await.unwrap();
+
+        // Also set up chain progress.
+        pool.set_chain_progress(
+            &task_id,
+            crate::chain::ChainProgress {
+                total_steps: 3,
+                current_step: Some(1),
+                current_step_name: Some("implement".into()),
+                completed_steps: vec![],
+                status: crate::chain::ChainStatus::Running,
+            },
+        )
+        .await;
+
+        // Cancel it.
+        pool.cancel_chain(&task_id).await.unwrap();
+
+        // Task should be cancelled.
+        let task = pool.store().get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+
+        // Progress should show cancelled.
+        let progress = pool.chain_progress(&task_id).unwrap();
+        assert_eq!(progress.status, crate::chain::ChainStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_chain_noop_for_completed() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+
+        let task_id = TaskId("chain-done".into());
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: "chain: 1 steps".into(),
+            state: TaskState::Completed,
+            slot_id: None,
+            result: Some(TaskResult {
+                output: "done".into(),
+                success: true,
+                cost_microdollars: 100,
+                turns_used: 0,
+                session_id: None,
+            }),
+            tags: vec![],
+            config: None,
+        };
+        pool.store().put_task(record).await.unwrap();
+
+        // Should be a no-op.
+        pool.cancel_chain(&task_id).await.unwrap();
+        let task = pool.store().get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn cancel_chain_not_found() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let result = pool.cancel_chain(&TaskId("nonexistent".into())).await;
+        assert!(matches!(result, Err(Error::TaskNotFound(_))));
     }
 }

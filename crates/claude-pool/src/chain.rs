@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::pool::Pool;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
-use crate::types::{SlotConfig, TaskId};
+use crate::types::{SlotConfig, TaskId, TaskState};
 
 /// A step in a chain pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +88,9 @@ pub struct StepResult {
     /// Number of retries used.
     #[serde(default)]
     pub retries_used: u32,
+    /// Whether this step was skipped due to chain cancellation.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Result of a full chain execution.
@@ -128,6 +131,8 @@ pub enum ChainStatus {
     Completed,
     /// A step failed and the chain stopped.
     Failed,
+    /// Chain was cancelled; remaining steps were skipped.
+    Cancelled,
 }
 
 /// Execute a chain of steps against the pool.
@@ -154,6 +159,37 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     let mut total_cost = 0u64;
 
     for (step_idx, step) in steps.iter().enumerate() {
+        // Check for cancellation before starting each step.
+        if let Some(task_id) = chain_task_id
+            && let Ok(Some(task)) = pool.store().get_task(task_id).await
+            && task.state == TaskState::Cancelled
+        {
+            for s in &steps[step_idx..] {
+                step_results.push(StepResult {
+                    name: s.name.clone(),
+                    output: String::new(),
+                    success: false,
+                    cost_microdollars: 0,
+                    retries_used: 0,
+                    skipped: true,
+                });
+            }
+            update_chain_progress_final(
+                pool,
+                Some(task_id),
+                steps.len(),
+                &step_results,
+                ChainStatus::Cancelled,
+            )
+            .await;
+            return Ok(ChainResult {
+                final_output: previous_output,
+                steps: step_results,
+                total_cost_microdollars: total_cost,
+                success: false,
+            });
+        }
+
         // Update progress in the store if we have a task ID.
         if let Some(task_id) = chain_task_id {
             let progress = ChainProgress {
@@ -202,6 +238,7 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
                     success: false,
                     cost_microdollars: 0,
                     retries_used: step.failure_policy.retries,
+                    skipped: false,
                 });
                 update_chain_progress_final(
                     pool,
@@ -297,6 +334,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
                             success: true,
                             cost_microdollars: total_cost,
                             retries_used: attempt,
+                            skipped: false,
                         }),
                         total_cost,
                     );
@@ -338,6 +376,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
                         success: task_result.success,
                         cost_microdollars: total_cost,
                         retries_used: max_attempts,
+                        skipped: false,
                     }),
                     total_cost,
                 );
@@ -401,6 +440,7 @@ mod tests {
                 success: true,
                 cost_microdollars: 1000,
                 retries_used: 0,
+                skipped: false,
             }],
             final_output: "done".into(),
             total_cost_microdollars: 1000,
@@ -436,6 +476,7 @@ mod tests {
                 success: true,
                 cost_microdollars: 500,
                 retries_used: 0,
+                skipped: false,
             }],
             status: ChainStatus::Running,
         };
@@ -443,5 +484,53 @@ mod tests {
         let json = serde_json::to_string(&progress).unwrap();
         assert!(json.contains("implement"));
         assert!(json.contains("running"));
+    }
+
+    #[test]
+    fn cancelled_status_serializes() {
+        let progress = ChainProgress {
+            total_steps: 3,
+            current_step: None,
+            current_step_name: None,
+            completed_steps: vec![
+                StepResult {
+                    name: "plan".into(),
+                    output: "planned".into(),
+                    success: true,
+                    cost_microdollars: 500,
+                    retries_used: 0,
+                    skipped: false,
+                },
+                StepResult {
+                    name: "implement".into(),
+                    output: String::new(),
+                    success: false,
+                    cost_microdollars: 0,
+                    retries_used: 0,
+                    skipped: true,
+                },
+                StepResult {
+                    name: "review".into(),
+                    output: String::new(),
+                    success: false,
+                    cost_microdollars: 0,
+                    retries_used: 0,
+                    skipped: true,
+                },
+            ],
+            status: ChainStatus::Cancelled,
+        };
+
+        let json = serde_json::to_string(&progress).unwrap();
+        assert!(json.contains("cancelled"));
+        assert!(json.contains("\"skipped\":true"));
+    }
+
+    #[test]
+    fn skipped_defaults_to_false_on_deserialize() {
+        let json =
+            r#"{"name":"s","output":"o","success":true,"cost_microdollars":0,"retries_used":0}"#;
+        let result: StepResult = serde_json::from_str(json).unwrap();
+        assert!(!result.skipped);
     }
 }
