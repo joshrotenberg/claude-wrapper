@@ -228,6 +228,13 @@ pub struct FindSlotsInput {
     pub state: Option<String>,
 }
 
+/// Input for claiming the next pending task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClaimInput {
+    /// Slot ID that wants to claim a task (e.g., "slot-0").
+    pub slot_id: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -1381,6 +1388,35 @@ pub fn pool_find_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
         .build()
 }
 
+pub fn pool_claim_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_claim")
+        .title("Claim Next Pending Task")
+        .description(
+            "Self-service task claiming: an idle slot grabs the next pending task from the queue. \
+             Returns the claimed task ID, or null if no tasks are waiting. The task executes \
+             in the background on the claiming slot.",
+        )
+        .handler(move |input: ClaimInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_id = claude_pool::types::SlotId(input.slot_id);
+                match state.pool.claim(&slot_id).await {
+                    Ok(Some(task_id)) => Ok(CallToolResult::json(serde_json::json!({
+                        "claimed": true,
+                        "task_id": task_id.0,
+                    }))),
+                    Ok(None) => Ok(CallToolResult::json(serde_json::json!({
+                        "claimed": false,
+                        "task_id": null,
+                        "reason": "no pending tasks or slot not idle",
+                    }))),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -1416,5 +1452,6 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_skill_remove_tool(Arc::clone(state)),
         pool_skill_save_tool(Arc::clone(state)),
         pool_skill_eject_tool(Arc::clone(state)),
+        pool_claim_tool(Arc::clone(state)),
     ]
 }
