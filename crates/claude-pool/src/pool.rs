@@ -1104,7 +1104,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             output: query_result.result,
             success: !query_result.is_error,
             cost_microdollars,
-            turns_used: 0, // TODO: extract from query result when available
+            turns_used: query_result.num_turns.unwrap_or(0),
             session_id: Some(query_result.session_id),
         })
     }
