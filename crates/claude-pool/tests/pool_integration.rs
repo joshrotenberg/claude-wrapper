@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for claude-pool using the fake-claude binary.
 //!
 //! All tests are marked `#[ignore]` because they require the fake-claude.sh

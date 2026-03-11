@@ -1,5 +1,9 @@
 //! Test helpers for claude-pool integration tests.
+//!
+//! These helpers use shell scripts and Unix permissions, so they are
+//! only available on Unix platforms.
 
+#![cfg(unix)]
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
