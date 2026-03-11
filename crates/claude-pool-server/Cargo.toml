@@ -12,6 +12,10 @@ readme = "README.md"
 keywords = ["claude", "mcp", "pool", "server"]
 categories = ["development-tools"]
 
+[lib]
+name = "claude_pool_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "claude-pool-server"
 path = "src/main.rs"
@@ -31,6 +35,12 @@ tracing-subscriber = { workspace = true }
 [dependencies.axum]
 version = "0.8"
 optional = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tower-mcp = { workspace = true, features = ["testing"] }
 
 [features]
 default = []

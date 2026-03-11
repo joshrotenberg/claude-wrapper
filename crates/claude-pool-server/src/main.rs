@@ -3,30 +3,14 @@
 //! Manages a pool of Claude CLI slots, exposed as an MCP server
 //! over stdio or HTTP transport.
 
-mod auth;
-mod prompts;
-mod resources;
-mod tools;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use claude_pool::{InMemoryStore, Pool, PoolConfig, PoolStore, SkillRegistry, WorkflowRegistry};
+use claude_pool::{InMemoryStore, Pool, PoolConfig, SkillRegistry, WorkflowRegistry};
+use claude_pool_server::{State, prompts, resources, tools};
 use tokio::sync::RwLock;
 use tower_mcp::{McpRouter, StdioTransport};
-
-/// Shared state accessible by all tool/resource handlers.
-pub struct State<S: PoolStore> {
-    /// The pool instance.
-    pub pool: Pool<S>,
-    /// Thread-safe skill registry (mutated by skill management tools).
-    pub skills: Arc<RwLock<SkillRegistry>>,
-    /// Workflow registry.
-    pub workflows: WorkflowRegistry,
-    /// Directory for persisting project-local skills.
-    pub skills_dir: PathBuf,
-}
 
 /// MCP server for managing a pool of Claude CLI slots.
 #[derive(Parser)]
@@ -290,7 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let addr = format!("{}:{}", cli.bind, cli.port);
 
-            let tokens = auth::BearerTokens::new(cli.http_token);
+            let tokens = claude_pool_server::auth::BearerTokens::new(cli.http_token);
             if tokens.is_empty() {
                 tracing::warn!(
                     "HTTP transport started without authentication -- use --http-token for production"
@@ -314,7 +298,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Build an axum application with optional bearer token authentication.
 #[cfg(feature = "http")]
-fn build_http_app(router: McpRouter, tokens: auth::BearerTokens) -> axum::Router {
+fn build_http_app(
+    router: McpRouter,
+    tokens: claude_pool_server::auth::BearerTokens,
+) -> axum::Router {
     use tower_mcp::HttpTransport;
 
     let transport = HttpTransport::new(router).disable_origin_validation();
@@ -334,7 +321,7 @@ fn build_http_app(router: McpRouter, tokens: auth::BearerTokens) -> axum::Router
 async fn bearer_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
-    tokens: auth::BearerTokens,
+    tokens: claude_pool_server::auth::BearerTokens,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
