@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-server-v0.2.0...claude-pool-server-v0.3.0) - 2026-03-11
+
+### Added
+
+- add quality gate hooks for task lifecycle ([#183](https://github.com/joshrotenberg/claude-wrapper/pull/183))
+- add ${CLAUDE_SKILL_DIR} substitution and skill directory docs ([#181](https://github.com/joshrotenberg/claude-wrapper/pull/181))
+- align skills with Agent Skills standard ([#162](https://github.com/joshrotenberg/claude-wrapper/pull/162)) ([#179](https://github.com/joshrotenberg/claude-wrapper/pull/179))
+- add auto-delivery messaging and self-claiming task queue (#169, #170) ([#175](https://github.com/joshrotenberg/claude-wrapper/pull/175))
+- add broadcast messaging and slot discovery (#165, #166) ([#172](https://github.com/joshrotenberg/claude-wrapper/pull/172))
+- adopt SKILL.md format and add global skills directory ([#157](https://github.com/joshrotenberg/claude-wrapper/pull/157))
+- implement inter-slot messaging for claude-pool ([#153](https://github.com/joshrotenberg/claude-wrapper/pull/153))
+- add server metadata to pool_status and clone isolation mode ([#151](https://github.com/joshrotenberg/claude-wrapper/pull/151))
+
+### Fixed
+
+- strip CLAUDECODE at startup and surface stderr in pool errors ([#138](https://github.com/joshrotenberg/claude-wrapper/pull/138))
+
+### Other
+
+- establish consistent user-facing vocabulary for pool operations ([#158](https://github.com/joshrotenberg/claude-wrapper/pull/158))
+
 ## [0.2.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-server-v0.1.0...claude-pool-server-v0.2.0) - 2026-03-11
 
 ### Added

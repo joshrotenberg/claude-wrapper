@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-v0.2.0...claude-pool-v0.3.0) - 2026-03-11
+
+### Added
+
+- add quality gate hooks for task lifecycle ([#183](https://github.com/joshrotenberg/claude-wrapper/pull/183))
+- add chain workflow and triage skills for claude-pool ([#182](https://github.com/joshrotenberg/claude-wrapper/pull/182))
+- add ${CLAUDE_SKILL_DIR} substitution and skill directory docs ([#181](https://github.com/joshrotenberg/claude-wrapper/pull/181))
+- align skills with Agent Skills standard ([#162](https://github.com/joshrotenberg/claude-wrapper/pull/162)) ([#179](https://github.com/joshrotenberg/claude-wrapper/pull/179))
+- add auto-delivery messaging and self-claiming task queue (#169, #170) ([#175](https://github.com/joshrotenberg/claude-wrapper/pull/175))
+- add pool_dashboard and chain_watcher loop monitoring skills ([#174](https://github.com/joshrotenberg/claude-wrapper/pull/174))
+- session fix, plan-then-execute skill, $ARGUMENTS substitution (#161, #167, #162) ([#173](https://github.com/joshrotenberg/claude-wrapper/pull/173))
+- add broadcast messaging and slot discovery (#165, #166) ([#172](https://github.com/joshrotenberg/claude-wrapper/pull/172))
+- add structured failure details to TaskResult ([#155](https://github.com/joshrotenberg/claude-wrapper/pull/155)) ([#159](https://github.com/joshrotenberg/claude-wrapper/pull/159))
+- adopt SKILL.md format and add global skills directory ([#157](https://github.com/joshrotenberg/claude-wrapper/pull/157))
+- implement inter-slot messaging for claude-pool ([#153](https://github.com/joshrotenberg/claude-wrapper/pull/153))
+- add server metadata to pool_status and clone isolation mode ([#151](https://github.com/joshrotenberg/claude-wrapper/pull/151))
+
+### Fixed
+
+- rewrite coordinator skill prompts for haiku compatibility ([#188](https://github.com/joshrotenberg/claude-wrapper/pull/188))
+- preserve GitHub remote URL in clone isolation ([#154](https://github.com/joshrotenberg/claude-wrapper/pull/154))
+
+### Other
+
+- fix quality gates and skills examples in claude-pool README ([#186](https://github.com/joshrotenberg/claude-wrapper/pull/186))
+- move builtin skills to SKILL.md files ([#178](https://github.com/joshrotenberg/claude-wrapper/pull/178)) ([#180](https://github.com/joshrotenberg/claude-wrapper/pull/180))
+
 ## [0.2.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-v0.1.0...claude-pool-v0.2.0) - 2026-03-11
 
 ### Added
