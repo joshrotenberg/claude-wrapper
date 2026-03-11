@@ -280,6 +280,71 @@ impl WorktreeManager {
     pub fn chain_worktree_path(&self, task_id: &TaskId) -> PathBuf {
         self.base_dir.join("chains").join(&task_id.0)
     }
+
+    /// Create a full clone for a chain execution using `git clone --local --shared`.
+    ///
+    /// Creates a clone at `{base_dir}/clones/{task_id}` with no shared .git directory.
+    pub async fn create_clone_for_chain(&self, task_id: &TaskId) -> Result<PathBuf> {
+        let clone_path = self.clone_path(task_id);
+
+        let clones_dir = self.base_dir.join("clones");
+        tokio::fs::create_dir_all(&clones_dir)
+            .await
+            .map_err(|e| Error::Store(format!("failed to create clones dir: {e}")))?;
+
+        if clone_path.exists() {
+            self.remove_clone(task_id).await?;
+        }
+
+        let output = tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--local",
+                "--shared",
+                self.repo_dir.to_str().unwrap_or_default(),
+                clone_path.to_str().unwrap_or_default(),
+            ])
+            .output()
+            .await
+            .map_err(|e| Error::Store(format!("failed to create chain clone: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Store(format!(
+                "git clone failed for chain: {stderr}"
+            )));
+        }
+
+        tracing::info!(
+            task_id = %task_id.0,
+            path = %clone_path.display(),
+            "created chain clone"
+        );
+
+        Ok(clone_path)
+    }
+
+    /// Remove a chain's clone directory.
+    pub async fn remove_clone(&self, task_id: &TaskId) -> Result<()> {
+        let clone_path = self.clone_path(task_id);
+
+        if clone_path.exists() {
+            tokio::fs::remove_dir_all(&clone_path).await.map_err(|e| {
+                Error::Store(format!(
+                    "failed to remove chain clone at {}: {e}",
+                    clone_path.display()
+                ))
+            })?;
+        }
+
+        tracing::debug!(task_id = %task_id.0, "removed chain clone");
+        Ok(())
+    }
+
+    /// Get the clone path for a chain (may not exist yet).
+    pub fn clone_path(&self, task_id: &TaskId) -> PathBuf {
+        self.base_dir.join("clones").join(&task_id.0)
+    }
 }
 
 #[cfg(test)]

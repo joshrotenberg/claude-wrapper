@@ -89,6 +89,8 @@ pub enum ChainIsolation {
     /// Create a temporary git worktree shared by all steps in the chain (default).
     #[default]
     Worktree,
+    /// Create a full clone with `git clone --local --shared` for complete isolation.
+    Clone,
 }
 
 /// Options for chain execution.

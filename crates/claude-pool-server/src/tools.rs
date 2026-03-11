@@ -208,6 +208,7 @@ fn parse_scope(s: &str) -> SkillScope {
 fn parse_isolation(s: Option<&str>) -> claude_pool::chain::ChainIsolation {
     match s {
         Some("none") => claude_pool::chain::ChainIsolation::None,
+        Some("clone") => claude_pool::chain::ChainIsolation::Clone,
         _ => claude_pool::chain::ChainIsolation::Worktree,
     }
 }
@@ -226,13 +227,23 @@ fn parse_source(s: &str) -> Option<SkillSource> {
 pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_status")
         .title("Pool Status")
-        .description("Get pool status: slots, tasks in flight, budget")
+        .description("Get pool status: slots, tasks in flight, budget, server metadata")
         .read_only()
         .no_params_handler(move || {
             let state = Arc::clone(&state);
             async move {
                 match state.pool.status().await {
-                    Ok(status) => Ok(CallToolResult::json(serde_json::to_value(&status).unwrap())),
+                    Ok(status) => {
+                        let mut response = serde_json::to_value(&status).unwrap();
+                        let response_obj = response.as_object_mut().unwrap();
+                        let server_obj = serde_json::to_value(&state.server_info).unwrap();
+                        if let Some(server_map) = server_obj.as_object() {
+                            for (key, value) in server_map.iter() {
+                                response_obj.insert(format!("server_{key}"), value.clone());
+                            }
+                        }
+                        Ok(CallToolResult::json(response))
+                    }
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
             }

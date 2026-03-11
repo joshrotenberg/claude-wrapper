@@ -10,7 +10,7 @@ use std::sync::Arc;
 use claude_pool::{
     InMemoryStore, Pool, PoolConfig, ScalingConfig, SkillRegistry, WorkflowRegistry,
 };
-use claude_pool_server::{State, tools};
+use claude_pool_server::{ServerInfo, State, tools};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tower_mcp::McpRouter;
@@ -47,6 +47,7 @@ async fn test_state(slots: usize) -> Arc<State<InMemoryStore>> {
         skills: Arc::new(RwLock::new(SkillRegistry::with_builtins())),
         workflows: WorkflowRegistry::with_builtins(),
         skills_dir: PathBuf::from(".claude-pool/skills"),
+        server_info: ServerInfo::new(None, "plan".to_string(), slots),
     })
 }
 
