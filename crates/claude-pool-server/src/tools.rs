@@ -223,16 +223,33 @@ fn parse_source(s: &str) -> Option<SkillSource> {
 
 // ── Tool builders ────────────────────────────────────────────────────
 
+/// Get pool status with server metadata.
+///
+/// Returns a combined response including pool status, server version, commit hash,
+/// model, permission mode, and slot information.
 pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_status")
         .title("Pool Status")
-        .description("Get pool status: slots, tasks in flight, budget")
+        .description("Get pool status: slots, tasks in flight, budget, server metadata")
         .read_only()
         .no_params_handler(move || {
             let state = Arc::clone(&state);
             async move {
                 match state.pool.status().await {
-                    Ok(status) => Ok(CallToolResult::json(serde_json::to_value(&status).unwrap())),
+                    Ok(status) => {
+                        // Merge pool status with server info into a single JSON response
+                        let mut response = serde_json::to_value(&status).unwrap();
+                        let response_obj = response.as_object_mut().unwrap();
+
+                        let server_obj = serde_json::to_value(&state.server_info).unwrap();
+                        if let Some(server_map) = server_obj.as_object() {
+                            for (key, value) in server_map.iter() {
+                                response_obj.insert(format!("server_{key}"), value.clone());
+                            }
+                        }
+
+                        Ok(CallToolResult::json(response))
+                    }
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
             }

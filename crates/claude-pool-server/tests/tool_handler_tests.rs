@@ -10,7 +10,7 @@ use std::sync::Arc;
 use claude_pool::{
     InMemoryStore, Pool, PoolConfig, ScalingConfig, SkillRegistry, WorkflowRegistry,
 };
-use claude_pool_server::{State, tools};
+use claude_pool_server::{ServerInfo, State, tools};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tower_mcp::McpRouter;
@@ -47,6 +47,7 @@ async fn test_state(slots: usize) -> Arc<State<InMemoryStore>> {
         skills: Arc::new(RwLock::new(SkillRegistry::with_builtins())),
         workflows: WorkflowRegistry::with_builtins(),
         skills_dir: PathBuf::from(".claude-pool/skills"),
+        server_info: ServerInfo::new(None, "plan".to_string(), slots),
     })
 }
 
@@ -83,6 +84,25 @@ async fn tool_pool_status_returns_slot_info() {
     assert!(
         status["total_spend_microdollars"].is_number(),
         "total_spend_microdollars should be present"
+    );
+    // Check server metadata is included
+    assert!(
+        status["server_version"].is_string(),
+        "server_version should be present"
+    );
+    assert!(
+        status["server_commit"].is_string(),
+        "server_commit should be present"
+    );
+    assert_eq!(
+        status["server_slots"].as_u64(),
+        Some(2),
+        "server_slots should be 2"
+    );
+    assert_eq!(
+        status["server_permission_mode"].as_str(),
+        Some("plan"),
+        "server_permission_mode should be 'plan'"
     );
 }
 
