@@ -205,6 +205,29 @@ pub struct PeekMessagesInput {
     pub slot_id: String,
 }
 
+/// Input for broadcasting a message to all slots.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BroadcastInput {
+    /// Sender slot ID (e.g., "slot-0").
+    pub from: String,
+    /// Message content to broadcast.
+    pub content: String,
+}
+
+/// Input for finding slots by name, role, or state.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindSlotsInput {
+    /// Filter by slot name (exact match).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Filter by slot role (exact match).
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Filter by slot state (idle, busy, stopped, errored).
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -1283,6 +1306,81 @@ pub fn pool_peek_messages_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> 
         .build()
 }
 
+pub fn pool_broadcast_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_broadcast")
+        .title("Broadcast Message to All Slots")
+        .description(
+            "Send a message from one slot to all other active slots. Returns the list of message IDs.",
+        )
+        .handler(move |input: BroadcastInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let from = claude_pool::types::SlotId(input.from);
+                match state.pool.broadcast_message(from, input.content).await {
+                    Ok(ids) => {
+                        let count = ids.len();
+                        Ok(CallToolResult::json(serde_json::json!({
+                            "message_ids": ids,
+                            "recipients": count,
+                        })))
+                    }
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
+pub fn pool_find_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_find_slots")
+        .title("Find Slots by Name, Role, or State")
+        .description(
+            "Query slots by name, role, and/or state. All filters are optional; omitted filters match everything.",
+        )
+        .read_only()
+        .handler(move |input: FindSlotsInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_state = input.state.as_deref().and_then(|s| match s {
+                    "idle" => Some(claude_pool::types::SlotState::Idle),
+                    "busy" => Some(claude_pool::types::SlotState::Busy),
+                    "stopped" => Some(claude_pool::types::SlotState::Stopped),
+                    "errored" => Some(claude_pool::types::SlotState::Errored),
+                    _ => None,
+                });
+                match state
+                    .pool
+                    .find_slots(input.name.as_deref(), input.role.as_deref(), slot_state)
+                    .await
+                {
+                    Ok(slots) => {
+                        let results: Vec<_> = slots
+                            .iter()
+                            .map(|s| {
+                                serde_json::json!({
+                                    "id": s.id.0,
+                                    "state": s.state,
+                                    "name": s.config.name,
+                                    "role": s.config.role,
+                                    "description": s.config.description,
+                                    "current_task": s.current_task.as_ref().map(|t| &t.0),
+                                    "tasks_completed": s.tasks_completed,
+                                    "cost_microdollars": s.cost_microdollars,
+                                })
+                            })
+                            .collect();
+                        Ok(CallToolResult::json(serde_json::json!({
+                            "slots": results,
+                            "count": results.len(),
+                        })))
+                    }
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -1309,6 +1407,8 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_send_message_tool(Arc::clone(state)),
         pool_read_messages_tool(Arc::clone(state)),
         pool_peek_messages_tool(Arc::clone(state)),
+        pool_broadcast_tool(Arc::clone(state)),
+        pool_find_slots_tool(Arc::clone(state)),
         pool_configure_slot_tool(Arc::clone(state)),
         pool_skill_list_tool(Arc::clone(state)),
         pool_skill_get_tool(Arc::clone(state)),

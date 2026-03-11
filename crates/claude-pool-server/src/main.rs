@@ -307,7 +307,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              Tools: pool_run (run), pool_submit/pool_result (fire/check), pool_fan_out (fan out), \
              pool_chain (chain), pool_submit_chain/pool_chain_result (fire a chain/check), \
              context_set/get/list (shared state), pool_configure_slot, pool_send_message/ \
-             pool_read_messages/pool_peek_messages (inter-slot messaging). \
+             pool_read_messages/pool_peek_messages/pool_broadcast (inter-slot messaging), \
+             pool_find_slots (discover slots by name/role/state). \
              Both effort and model can be overridden per-task and per-chain-step. \
              \
              Model guidance: default to the pool's configured model; override per-task/step with \
