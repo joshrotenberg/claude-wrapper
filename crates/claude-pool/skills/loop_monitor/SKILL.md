@@ -16,25 +16,28 @@ metadata:
       required: false
 ---
 
-Monitor GitHub PRs in {repo}{filters_note} and report only changes.
+Execute the following monitoring steps and report the results. Do NOT create files, scripts, or skills. Do NOT modify any code. Only query data and report.
 
-## Workflow
+## Immediate Action: Fetch Current PR State
 
-### 1. Fetch Current State
+Start by running this command:
 ```bash
 gh pr list -R {repo} {filters} --json number,title,state,statusCheckRollup,reviewDecision,labels,updatedAt --limit 100
 ```
 
-Parse as JSON array of PRs. Each PR needs: number, title, state (OPEN/DRAFT/MERGED/CLOSED), statusCheckRollup (PENDING/FAILURE/SUCCESS/NEUTRAL), reviewDecision (APPROVE/REQUEST_CHANGES/REVIEW_REQUIRED/COMMENTED), labels (array), updatedAt (timestamp).
+Parse as JSON array. Each PR needs: number, title, state (OPEN/DRAFT/MERGED/CLOSED), statusCheckRollup (PENDING/FAILURE/SUCCESS/NEUTRAL), reviewDecision (APPROVE/REQUEST_CHANGES/REVIEW_REQUIRED/COMMENTED), labels (array), updatedAt (timestamp).
 
-### 2. Retrieve Previous State
+## Step 1: Retrieve Previous State
+
 Use mcp context_get key: "loop_monitor_state_{repo_slug}".
 
-If nothing found, store current state and report:
+If nothing found, store the current state and report:
 "Initial snapshot of {repo}. {count} PRs. Monitoring now."
 Then exit.
 
-### 3. Diff: Identify Only Meaningful Changes
+## Step 2: Diff and Identify Only Meaningful Changes
+
+Compare current state vs previous:
 
 **New PRs** (in current, not in previous):
 - Report: "NEW #{number}: {title} ({state})"
@@ -59,7 +62,7 @@ Then exit.
 
 Skip cosmetic changes (comment count, updatedAt alone).
 
-### 4. Format Output
+## Step 3: Format and Report Output
 
 If changes found:
 ```
@@ -76,7 +79,8 @@ If no changes:
 No changes to {repo}.
 ```
 
-### 5. Store New State
+## Step 4: Store New State
+
 Use mcp context_set key: "loop_monitor_state_{repo_slug}" with compact JSON:
 ```json
 {
@@ -93,6 +97,6 @@ If `gh pr list` fails:
 - Report: "Failed to fetch PRs: {error}"
 - Don't update context
 
-## Usage
+## Usage Examples
 
 `/loop 5m pool_skill_run skill: "loop_monitor" arguments: { "repo": "owner/repo", "filters": "is:draft" }`

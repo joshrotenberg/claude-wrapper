@@ -12,33 +12,37 @@ metadata:
       required: false
 ---
 
-Monitor active chains and report progress changes.
+Execute the following monitoring steps and report the results. Do NOT create files, scripts, or skills. Do NOT modify any code. Only query data and report.
 
-## Step 1: Gather State
+## Immediate Action: Gather Current State
 
-1. Get previous state: `context_get` key: `chain_watcher_state`
-2. Get the list of chain task IDs to watch from the previous state, or from the arguments if this is the first run.
-3. For each chain ID, call `pool_chain_result` to get current progress.
+Start by getting the previous state: call `context_get` key: `chain_watcher_state`.
+
+Use the list of chain task IDs from the previous state, or from the arguments if this is the first run. For each chain ID, call `pool_chain_result` to get current progress.
+
+## Step 1: Retrieve and Prepare Chain Data
+
+Load the chain IDs to watch (from context state on repeat runs, or from arguments on the first run). Query each chain's current progress.
 
 ## Step 2: Detect Changes
 
-For each chain, compare current vs previous:
+For each chain, compare current vs previous state:
 - **Step transitions**: step N completed, step N+1 started
 - **Completions**: chain finished (success or failure)
 - **Cost accumulation**: new spend since last check
 - **Retries**: if a step used retries, note it
 - **Failures**: step failed, chain stopped
 
-## Step 3: Format Output
+## Step 3: Format and Report Output
 
-Compact per-chain status line:
+Generate a compact per-chain status line for each:
 ```
 chain-abc: [3/5] running "test" ($0.08)
 chain-def: [5/5] completed ($0.15)
 chain-ghi: [2/4] FAILED at "build" ($0.04)
 ```
 
-If changes since last check, add details:
+If changes since last check, add a details section:
 ```
 Changes:
 - chain-abc: step "lint" completed (0 retries), started "test"
@@ -47,9 +51,9 @@ Changes:
 
 If no changes: show status lines with "(no changes)".
 
-## Step 4: Store State
+## Step 4: Store Updated State
 
-Call `context_set` key: `chain_watcher_state` with JSON:
+Call `context_set` key: `chain_watcher_state` with this JSON structure:
 ```json
 {
   "chain_ids": ["chain-abc", "chain-def"],
@@ -60,8 +64,10 @@ Call `context_set` key: `chain_watcher_state` with JSON:
 }
 ```
 
-## Usage
+Completed/failed chains are kept in the report until removed.
+
+## Usage Examples
 
 `/loop 1m pool_skill_run skill: "chain_watcher" arguments: { "chain_ids": "chain-abc,chain-def" }`
 
-On subsequent iterations, chain IDs are loaded from context state. Completed/failed chains are kept in the report until removed.
+On subsequent iterations, chain IDs are loaded from context state automatically.
