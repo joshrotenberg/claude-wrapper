@@ -1366,8 +1366,12 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         // Use override working dir, slot worktree, or default.
         let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
-            // Resume session if the slot has one.
-            if let Some(ref session_id) = slot.session_id {
+            // Resume session if the slot has one, but NOT when using an
+            // override working dir (clone isolation) — the session belongs
+            // to the original working directory and won't exist in the clone.
+            if override_working_dir.is_none()
+                && let Some(ref session_id) = slot.session_id
+            {
                 cmd = cmd.resume(session_id);
             }
 
@@ -1484,7 +1488,11 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         // Use override working dir (chain worktree) > slot worktree > default.
         let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
-            if let Some(ref session_id) = slot.session_id {
+            // Skip session resumption in clone isolation — the session
+            // belongs to the original directory and won't exist in the clone.
+            if override_working_dir.is_none()
+                && let Some(ref session_id) = slot.session_id
+            {
                 cmd = cmd.resume(session_id);
             }
             if let Some(dir) = override_working_dir {

@@ -198,9 +198,42 @@ impl Skill {
         }
 
         let mut rendered = self.prompt.clone();
+
+        // Legacy {key} substitution (our original format).
         for (key, value) in args {
             rendered = rendered.replace(&format!("{{{key}}}"), value);
         }
+
+        // Standard $ARGUMENTS substitution (Agent Skills / Claude Code format).
+        // Build positional args list from argument definitions order.
+        let positional: Vec<&str> = self
+            .arguments
+            .iter()
+            .filter_map(|a| args.get(&a.name).map(|v| v.as_str()))
+            .collect();
+
+        let all_args = positional.join(" ");
+        let has_arguments_var = rendered.contains("$ARGUMENTS") || rendered.contains("$0");
+
+        // $ARGUMENTS[N] and $N positional substitution.
+        for (i, val) in positional.iter().enumerate() {
+            rendered = rendered.replace(&format!("$ARGUMENTS[{i}]"), val);
+            rendered = rendered.replace(&format!("${i}"), val);
+        }
+
+        // $ARGUMENTS (all args as a single string).
+        rendered = rendered.replace("$ARGUMENTS", &all_args);
+
+        // If neither $ARGUMENTS/$N nor {key} placeholders were used and there
+        // are args, append them (matches Claude Code behavior).
+        let had_legacy_placeholders = self
+            .arguments
+            .iter()
+            .any(|a| self.prompt.contains(&format!("{{{}}}", a.name)));
+        if !has_arguments_var && !had_legacy_placeholders && !all_args.is_empty() {
+            rendered.push_str(&format!("\n\nARGUMENTS: {all_args}"));
+        }
+
         Ok(rendered)
     }
 }
@@ -590,6 +623,44 @@ pub fn builtin_skills() -> Vec<Skill> {
             config: None,
             scope: SkillScope::Coordinator,
         },
+        Skill {
+            name: "plan_then_execute".into(),
+            description: "Two-phase workflow: plan in read-only mode, then execute after review. \
+                          Use for complex or risky tasks where you want to approve the approach \
+                          before implementation begins."
+                .into(),
+            prompt: "Execute a two-phase plan-then-execute workflow for the given task.\n\n\
+                     ## Phase 1: Plan (Read-Only)\n\n\
+                     Analyze the task and produce a detailed implementation plan. During this \
+                     phase you MUST NOT modify any files. Only read, search, and explore.\n\n\
+                     Task: {task}\n\n\
+                     Your plan should include:\n\
+                     1. **Summary**: One-sentence description of what will change\n\
+                     2. **Files to modify**: List each file and what changes are needed\n\
+                     3. **Files to create**: Any new files needed (justify why)\n\
+                     4. **Testing strategy**: How you will verify the changes work\n\
+                     5. **Risks**: Anything that could go wrong or needs careful handling\n\n\
+                     Output the plan as structured markdown. Do NOT implement anything yet.\n\n\
+                     ## Phase 2: Execute\n\n\
+                     After the plan is reviewed and this phase begins, implement the plan \
+                     exactly as described. Run all relevant checks (fmt, clippy, test) and \
+                     fix any issues.\n\n\
+                     If the task includes creating a PR, do so. Otherwise, commit the changes \
+                     and report what was done.\n\n\
+                     ## Usage as a Chain\n\n\
+                     This skill is designed to be run as a two-step chain:\n\
+                     - Step 1: Plan phase with read-only tools (Read, Grep, Glob, Bash)\n\
+                     - Step 2: Execute phase with full tools, receiving the plan as input\n\n\
+                     The coordinator reviews the plan between steps and can abort if needed."
+                .into(),
+            arguments: vec![SkillArgument {
+                name: "task".into(),
+                description: "Description of the task to plan and execute.".into(),
+                required: true,
+            }],
+            config: None,
+            scope: SkillScope::Chain,
+        },
     ]
 }
 
@@ -644,6 +715,134 @@ mod tests {
 
         let result = skill.render(&HashMap::new());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_dollar_arguments_all() {
+        let skill = Skill {
+            name: "fix".into(),
+            description: "Fix issue".into(),
+            prompt: "Fix issue $ARGUMENTS following conventions.".into(),
+            arguments: vec![SkillArgument {
+                name: "issue".into(),
+                description: "Issue number".into(),
+                required: true,
+            }],
+            config: None,
+            scope: SkillScope::Task,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("issue".into(), "123".into());
+        let rendered = skill.render(&args).unwrap();
+        assert_eq!(rendered, "Fix issue 123 following conventions.");
+    }
+
+    #[test]
+    fn render_dollar_positional() {
+        let skill = Skill {
+            name: "migrate".into(),
+            description: "Migrate component".into(),
+            prompt: "Migrate $0 from $1 to $2.".into(),
+            arguments: vec![
+                SkillArgument {
+                    name: "component".into(),
+                    description: "Component name".into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "from".into(),
+                    description: "Source framework".into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "to".into(),
+                    description: "Target framework".into(),
+                    required: true,
+                },
+            ],
+            config: None,
+            scope: SkillScope::Task,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("component".into(), "SearchBar".into());
+        args.insert("from".into(), "React".into());
+        args.insert("to".into(), "Vue".into());
+        let rendered = skill.render(&args).unwrap();
+        assert_eq!(rendered, "Migrate SearchBar from React to Vue.");
+    }
+
+    #[test]
+    fn render_dollar_arguments_n_bracket() {
+        let skill = Skill {
+            name: "test".into(),
+            description: "Test".into(),
+            prompt: "Process $ARGUMENTS[0] then $ARGUMENTS[1].".into(),
+            arguments: vec![
+                SkillArgument {
+                    name: "a".into(),
+                    description: "A".into(),
+                    required: true,
+                },
+                SkillArgument {
+                    name: "b".into(),
+                    description: "B".into(),
+                    required: true,
+                },
+            ],
+            config: None,
+            scope: SkillScope::Task,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("a".into(), "foo".into());
+        args.insert("b".into(), "bar".into());
+        let rendered = skill.render(&args).unwrap();
+        assert_eq!(rendered, "Process foo then bar.");
+    }
+
+    #[test]
+    fn render_no_placeholder_appends_arguments() {
+        let skill = Skill {
+            name: "test".into(),
+            description: "Test".into(),
+            prompt: "Do the thing.".into(),
+            arguments: vec![SkillArgument {
+                name: "target".into(),
+                description: "Target".into(),
+                required: true,
+            }],
+            config: None,
+            scope: SkillScope::Task,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("target".into(), "src/main.rs".into());
+        let rendered = skill.render(&args).unwrap();
+        assert_eq!(rendered, "Do the thing.\n\nARGUMENTS: src/main.rs");
+    }
+
+    #[test]
+    fn render_legacy_placeholder_no_append() {
+        let skill = Skill {
+            name: "test".into(),
+            description: "Test".into(),
+            prompt: "Review {target} carefully.".into(),
+            arguments: vec![SkillArgument {
+                name: "target".into(),
+                description: "Target".into(),
+                required: true,
+            }],
+            config: None,
+            scope: SkillScope::Task,
+        };
+
+        let mut args = HashMap::new();
+        args.insert("target".into(), "src/main.rs".into());
+        let rendered = skill.render(&args).unwrap();
+        // Legacy placeholder consumed the arg, no ARGUMENTS append.
+        assert_eq!(rendered, "Review src/main.rs carefully.");
     }
 
     #[test]
@@ -749,7 +948,7 @@ mod tests {
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
         // 7 task-scoped + 2 coordinator-scoped = 9 builtins
-        assert_eq!(registry.list().len(), 9);
+        assert_eq!(registry.list().len(), 10);
         // Task-scoped
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
@@ -772,7 +971,7 @@ mod tests {
 
         assert_eq!(tasks.len(), 7);
         assert_eq!(coordinators.len(), 2);
-        assert_eq!(chains.len(), 0);
+        assert_eq!(chains.len(), 1);
     }
 
     #[test]
