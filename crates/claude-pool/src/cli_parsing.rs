@@ -6,16 +6,6 @@
 
 use crate::error::Error;
 
-/// Generate a short unique ID based on the current timestamp.
-pub(crate) fn new_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{nanos:x}")
-}
-
 // ── Permission prompt detection ─────────────────────────────────────
 
 /// Patterns in stderr that indicate the CLI is waiting for permission/tool approval.
