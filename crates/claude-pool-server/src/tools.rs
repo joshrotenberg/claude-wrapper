@@ -1,4 +1,80 @@
-//! MCP tool definitions for claude-pool.
+//! # MCP Tool Definitions for claude-pool
+//!
+//! This module provides all 34 MCP tools exposed by the claude-pool server, organized into 10 categories
+//! for task execution, slot management, chain coordination, skill registration, messaging, and context sharing.
+//!
+//! ## Tool Categories
+//!
+//! ### Task Management (6 tools)
+//! - `pool_run` — Run a task synchronously, block until completion
+//! - `pool_submit` — Fire a task asynchronously, returns task_id immediately
+//! - `pool_result` — Check on a fired task, returns result if complete or pending_review
+//! - `pool_cancel` — Cancel a pending or running task
+//! - `pool_fan_out` — Fan out N independent tasks in parallel, returns all results
+//! - `pool_submit_with_review` — Fire a task requiring coordinator approval before completion
+//!
+//! ### Review Management (2 tools)
+//! - `pool_approve_result` — Approve a pending_review task, mark as completed
+//! - `pool_reject_result` — Reject with feedback, re-queue with appended feedback
+//!
+//! ### Chain Management (5 tools)
+//! - `pool_chain` — Chain sequential steps, block until all complete
+//! - `pool_submit_chain` — Fire a chain for async execution, returns task_id immediately
+//! - `pool_fan_out_chains` — Fan out N independent chains in parallel on separate slots
+//! - `pool_chain_result` — Check on fired chain, shows per-step progress
+//! - `pool_cancel_chain` — Cancel a running chain, finishes current step before stopping
+//!
+//! ### Slot Management (6 tools)
+//! - `pool_status` — Get pool status: slots, tasks, budget, server metadata
+//! - `pool_configure_slot` — Set name/role/description for persistent slot identity
+//! - `pool_find_slots` — Query slots by name, role, and/or state (all filters optional)
+//! - `pool_claim` — Self-service task claiming: idle slot grabs next pending task
+//! - `pool_scale_up` — Add N new slots to the pool
+//! - `pool_scale_down` — Remove N slots from pool
+//!
+//! ### Pool Control (2 tools)
+//! - `pool_drain` — Gracefully shut down pool, wait for in-flight tasks
+//! - `pool_set_target_slots` — Set pool to specific number of slots
+//!
+//! ### Skill Management (7 tools)
+//! - `pool_skill_run` — Run a registered skill by name with arguments (blocks)
+//! - `pool_skill_list` — List skills with optional scope/source filters
+//! - `pool_skill_get` — Get full details of skill by name including prompt template
+//! - `pool_skill_add` — Register skill at runtime (ephemeral unless saved)
+//! - `pool_skill_remove` — Remove skill by name (runtime-only)
+//! - `pool_skill_save` — Persist skill to project skills dir as SKILL.md
+//! - `pool_skill_eject` — Eject builtin skill to disk for customization
+//!
+//! ### Messaging (4 tools)
+//! - `pool_send_message` — Send message from one slot to another
+//! - `pool_read_messages` — Drain and read all messages for slot
+//! - `pool_peek_messages` — Read messages without removing from inbox
+//! - `pool_broadcast` — Send message from one slot to all others
+//!
+//! ### Context Management (4 tools)
+//! - `context_set` — Set shared context value (injected into slot system prompts)
+//! - `context_get` — Get shared context value by key
+//! - `context_delete` — Delete shared context value by key
+//! - `context_list` — List all shared context keys and values
+//!
+//! ### Workflow Management (1 tool)
+//! - `pool_invoke_workflow` — Submit named workflow template (issue_to_pr, refactor_and_test, review_and_fix)
+//!
+//! ## Tool Response Format
+//!
+//! All tools return a `CallToolResult` containing either:
+//! - **Success**: JSON object/array (via `CallToolResult::json()`) or plain text (via `CallToolResult::text()`)
+//! - **Error**: Error message (via `CallToolResult::error()`)
+//!
+//! ## Common Error Cases
+//!
+//! Tools may fail with:
+//! - **TaskNotFound** — Task ID doesn't exist or was already cleaned up
+//! - **NoSlotsAvailable** — Pool has no idle slots (for synchronous operations)
+//! - **ChainFailure** — Chain step failed, subsequent steps skipped
+//! - **InvalidInput** — Input validation failed (missing required field, invalid enum variant)
+//! - **StorageError** — Underlying pool store error
+//! - **PermissionDenied** — Slot authorization check failed (future)
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -325,6 +401,39 @@ fn parse_source(s: &str) -> Option<SkillSource> {
 
 // ── Tool builders ────────────────────────────────────────────────────
 
+/// **pool_status** — Get pool status: slots, tasks in flight, budget, server metadata
+///
+/// # Description
+/// Query the overall health and state of the pool without modifying anything.
+///
+/// # Parameters
+/// None. This tool takes no parameters.
+///
+/// # Response Format
+/// ```json
+/// {
+///   "total_slots": 8,
+///   "idle_slots": 3,
+///   "busy_slots": 5,
+///   "in_flight_tasks": 5,
+///   "in_flight_chains": 2,
+///   "total_cost_tokens": 127430,
+///   "budget_exhausted": false,
+///   "server_name": "claude-pool-server",
+///   "server_version": "0.3.0"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator checking pool health before submitting batch work:
+/// ```text
+/// await client.call_tool("pool_status", {})
+/// // Returns: { idle_slots: 3, in_flight_tasks: 5, ... }
+/// ```
+///
+/// # Error Cases
+/// - **StorageError** — Underlying pool store unavailable
+/// - **Internal** — Concurrent modification during status collection (rare)
 pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_status")
         .title("Pool Status")
@@ -352,6 +461,41 @@ pub fn pool_status_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_run** — Run a task synchronously, block until completion
+///
+/// # Description
+/// Execute a prompt on the next available slot and wait for completion. Returns the full result.
+/// Use this for single, clear actions with one clear output where you need the result before proceeding.
+///
+/// # Parameters
+/// - **prompt** (string, required) — The prompt/task to execute
+/// - **model** (string, optional) — Model override (e.g., "claude-opus-4-6")
+/// - **effort** (string, optional) — Effort override: "min", "low", "medium", "high", "max"
+/// - **mcp_servers** (object, optional) — Additional MCP servers: `{"server_name": {...config...}}`
+///
+/// # Response Format
+/// ```json
+/// {
+///   "output": "the task output",
+///   "tokens_used": 1427,
+///   "model_used": "claude-sonnet-4-6",
+///   "effort_applied": "medium"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator running a single analysis task:
+/// ```text
+/// await client.call_tool("pool_run", {
+///   "prompt": "Analyze this PR for security issues",
+///   "model": "claude-opus-4-6"
+/// })
+/// ```
+///
+/// # Error Cases
+/// - **NoSlotsAvailable** — Pool has no idle slots
+/// - **TaskFailed** — Task execution failed or timed out
+/// - **InvalidInput** — Missing required prompt field
 pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_run")
         .title("Run a Task")
@@ -372,6 +516,39 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_submit** — Fire a task asynchronously, returns task_id immediately
+///
+/// # Description
+/// Submit a task for execution without waiting. The task is queued and executed when a slot becomes available.
+/// Use this to fire off independent work and check progress later with `pool_result`.
+///
+/// # Parameters
+/// - **prompt** (string, required) — The prompt/task to execute
+/// - **model** (string, optional) — Model override
+/// - **effort** (string, optional) — Effort override: "min", "low", "medium", "high", "max"
+/// - **tags** (array, optional) — Tags for grouping/filtering (e.g., ["code-review", "urgent"])
+/// - **mcp_servers** (object, optional) — Additional MCP servers
+///
+/// # Response Format
+/// ```json
+/// {
+///   "task_id": "task-1234567890abcdef"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator firing off a batch of independent reviews:
+/// ```text
+/// await client.call_tool("pool_submit", {
+///   "prompt": "Review this feature PR",
+///   "tags": ["review", "feature"]
+/// })
+/// // Returns: { task_id: "task-abc123" }
+/// ```
+///
+/// # Error Cases
+/// - **InvalidInput** — Missing required prompt field
+/// - **StorageError** — Task could not be persisted
 pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit")
         .title("Fire a Task")
@@ -396,6 +573,51 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_result** — Check on a fired task, returns result if complete or pending_review
+///
+/// # Description
+/// Poll for a task's result. Returns result object if complete/pending_review, or `{"status": "running"}` if still executing.
+/// For tasks with `review_required=true`, use `pool_approve_result` or `pool_reject_result` to finalize.
+///
+/// # Parameters
+/// - **task_id** (string, required) — Task ID from `pool_submit` or `pool_submit_chain`
+///
+/// # Response Format
+/// Success (task complete):
+/// ```json
+/// {
+///   "output": "the task result",
+///   "state": "completed",
+///   "tokens_used": 1427
+/// }
+/// ```
+/// Pending review:
+/// ```json
+/// {
+///   "output": "...",
+///   "state": "pending_review",
+///   "review_required": true,
+///   "rejection_count": 0,
+///   "max_rejections": 3
+/// }
+/// ```
+/// Still running:
+/// ```json
+/// {
+///   "status": "running"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator polling for task completion:
+/// ```text
+/// await client.call_tool("pool_result", { "task_id": "task-abc123" })
+/// // Returns: { output: "...", state: "completed" }
+/// ```
+///
+/// # Error Cases
+/// - **TaskNotFound** — Task ID doesn't exist or was cleaned up
+/// - **InvalidInput** — Missing task_id parameter
 pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_result")
         .title("Check on a Task")
@@ -447,6 +669,30 @@ pub fn pool_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_cancel** — Cancel a pending or running task
+///
+/// # Description
+/// Stop a task before it completes. If the task is running, it continues to completion but the result is discarded.
+/// If the task is pending, it's removed from the queue.
+///
+/// # Parameters
+/// - **task_id** (string, required) — Task ID to cancel
+///
+/// # Response Format
+/// ```json
+/// "cancelled"
+/// ```
+///
+/// # Example
+/// Coordinator cancelling a long-running task:
+/// ```text
+/// await client.call_tool("pool_cancel", { "task_id": "task-abc123" })
+/// // Returns: "cancelled"
+/// ```
+///
+/// # Error Cases
+/// - **TaskNotFound** — Task ID doesn't exist
+/// - **AlreadyCompleted** — Task already finished
 pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_cancel")
         .title("Cancel a Task")
@@ -464,6 +710,42 @@ pub fn pool_cancel_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_fan_out** — Fan out N independent tasks in parallel, returns all results
+///
+/// # Description
+/// Submit multiple independent prompts for parallel execution, blocking until all complete.
+/// Results are returned in the same order as input prompts.
+///
+/// # Parameters
+/// - **prompts** (array of strings, required) — List of prompts to execute in parallel
+///
+/// # Response Format
+/// ```json
+/// {
+///   "results": [
+///     { "output": "result 1", "tokens_used": 1200 },
+///     { "output": "result 2", "tokens_used": 800 },
+///     { "output": "result 3", "tokens_used": 950 }
+///   ]
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator fanning out multiple reviews in parallel:
+/// ```text
+/// await client.call_tool("pool_fan_out", {
+///   "prompts": [
+///     "Review PR #1 for security",
+///     "Review PR #2 for performance",
+///     "Review PR #3 for design"
+///   ]
+/// })
+/// // Returns: { results: [{output: "...", tokens_used: 1200}, ...] }
+/// ```
+///
+/// # Error Cases
+/// - **NoSlotsAvailable** — Pool has no idle slots for parallel execution
+/// - **TaskFailed** — One or more tasks failed; array index indicates which failed
 pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_fan_out")
         .title("Fan Out Tasks")
@@ -485,6 +767,33 @@ pub fn pool_fan_out_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_drain** — Gracefully shut down the pool
+///
+/// # Description
+/// Stop accepting new tasks, wait for all in-flight tasks to complete, then shut down all slots.
+/// This is a destructive operation and cannot be undone without restarting.
+///
+/// # Parameters
+/// None. This tool takes no parameters.
+///
+/// # Response Format
+/// ```json
+/// {
+///   "slots_stopped": 8,
+///   "tasks_completed": 42,
+///   "total_time_seconds": 125
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator shutting down pool for deployment:
+/// ```text
+/// await client.call_tool("pool_drain", {})
+/// // Returns: { slots_stopped: 8, tasks_completed: 42 }
+/// ```
+///
+/// # Error Cases
+/// - **DeadlockDetected** — Circular task dependencies prevent shutdown
 pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_drain")
         .title("Drain the Pool")
@@ -506,6 +815,34 @@ pub fn pool_drain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **context_set** — Set shared context value (injected into slot system prompts)
+///
+/// # Description
+/// Store a key-value pair in shared context. All slots have access to context variables and
+/// can include them in their system prompts for decision-making.
+///
+/// # Parameters
+/// - **key** (string, required) — Context key (e.g., "release_version", "build_status")
+/// - **value** (string, required) — Context value (e.g., "0.3.0", "stable")
+///
+/// # Response Format
+/// ```json
+/// "ok"
+/// ```
+///
+/// # Example
+/// Coordinator setting shared release version:
+/// ```text
+/// await client.call_tool("context_set", {
+///   "key": "release_version",
+///   "value": "0.3.0"
+/// })
+/// // Returns: "ok"
+/// ```
+///
+/// # Error Cases
+/// - **KeyTooLong** — Context key exceeds max length
+/// - **ValueTooLarge** — Context value exceeds max size
 pub fn context_set_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_set")
         .title("Set Context")
@@ -520,6 +857,28 @@ pub fn context_set_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **context_get** — Get shared context value by key
+///
+/// # Description
+/// Retrieve a context value set by `context_set`. Returns the value as plain text.
+///
+/// # Parameters
+/// - **key** (string, required) — Context key to retrieve
+///
+/// # Response Format
+/// ```json
+/// "value content here"
+/// ```
+///
+/// # Example
+/// Coordinator checking release version:
+/// ```text
+/// await client.call_tool("context_get", { "key": "release_version" })
+/// // Returns: "0.3.0"
+/// ```
+///
+/// # Error Cases
+/// - **KeyNotFound** — Key doesn't exist in context
 pub fn context_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_get")
         .title("Get Context")
@@ -540,6 +899,28 @@ pub fn context_get_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **context_delete** — Delete shared context value by key
+///
+/// # Description
+/// Remove a context key-value pair. This is permanent for the pool session.
+///
+/// # Parameters
+/// - **key** (string, required) — Context key to delete
+///
+/// # Response Format
+/// ```json
+/// "ok"
+/// ```
+///
+/// # Example
+/// Coordinator clearing release version:
+/// ```text
+/// await client.call_tool("context_delete", { "key": "release_version" })
+/// // Returns: "ok"
+/// ```
+///
+/// # Error Cases
+/// - **KeyNotFound** — Key doesn't exist (non-fatal, still returns "ok")
 pub fn context_delete_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_delete")
         .title("Delete Context")
@@ -554,6 +935,33 @@ pub fn context_delete_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
         .build()
 }
 
+/// **context_list** — List all shared context keys and values
+///
+/// # Description
+/// Retrieve all context key-value pairs currently stored in the pool. Useful for debugging
+/// or verifying shared state.
+///
+/// # Parameters
+/// None. This tool takes no parameters.
+///
+/// # Response Format
+/// ```json
+/// {
+///   "release_version": "0.3.0",
+///   "build_status": "stable",
+///   "deployment_target": "production"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator inspecting all context:
+/// ```text
+/// await client.call_tool("context_list", {})
+/// // Returns: { release_version: "0.3.0", build_status: "stable", ... }
+/// ```
+///
+/// # Error Cases
+/// - None (always returns JSON object, possibly empty)
 pub fn context_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("context_list")
         .title("List Context")
@@ -573,6 +981,39 @@ pub fn context_list_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_configure_slot** — Set name/role/description for persistent slot identity
+///
+/// # Description
+/// Assign metadata to a slot for identification and filtering. Configured slots persist across runs.
+///
+/// # Parameters
+/// - **slot_id** (string, required) — Slot ID to configure (e.g., "slot-0")
+/// - **name** (string, optional) — Human-readable name (e.g., "code-reviewer")
+/// - **role** (string, optional) — Role classification (e.g., "coordinator", "worker")
+/// - **description** (string, optional) — Purpose description
+///
+/// # Response Format
+/// ```json
+/// {
+///   "slot_id": "slot-0",
+///   "name": "code-reviewer",
+///   "role": "worker",
+///   "description": "Reviews pull requests for security"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator naming a slot for later discovery:
+/// ```text
+/// await client.call_tool("pool_configure_slot", {
+///   "slot_id": "slot-0",
+///   "name": "code-reviewer",
+///   "role": "worker"
+/// })
+/// ```
+///
+/// # Error Cases
+/// - **SlotNotFound** — Slot ID doesn't exist
 pub fn pool_configure_slot_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_configure_slot")
         .title("Configure Slot")
@@ -714,6 +1155,40 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
         .collect()
 }
 
+/// **pool_skill_run** — Run a registered skill by name with arguments (blocks)
+///
+/// # Description
+/// Execute a named skill with provided arguments. Returns result immediately.
+/// Skills are reusable prompt templates that encapsulate complex workflows.
+///
+/// # Parameters
+/// - **skill** (string, required) — Skill name to run
+/// - **arguments** (object, required) — Key-value pairs matching skill's argument definitions
+/// - **model** (string, optional) — Model override for this skill run
+/// - **effort** (string, optional) — Effort override: "min", "low", "medium", "high", "max"
+///
+/// # Response Format
+/// ```json
+/// {
+///   "output": "skill execution result",
+///   "tokens_used": 2100,
+///   "duration_ms": 4500
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator running a security review skill:
+/// ```text
+/// await client.call_tool("pool_skill_run", {
+///   "skill": "security_review",
+///   "arguments": { "code": "...", "focus": "injection attacks" }
+/// })
+/// ```
+///
+/// # Error Cases
+/// - **SkillNotFound** — Skill name doesn't exist
+/// - **InvalidArguments** — Missing or invalid argument values
+/// - **SkillFailed** — Skill execution error
 pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_skill_run")
         .title("Run a Skill")
@@ -756,6 +1231,44 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
         .build()
 }
 
+/// **pool_chain** — Chain sequential steps, blocks until all complete
+///
+/// # Description
+/// Execute a pipeline where each step's output feeds into the next as context.
+/// Steps can be inline prompts or skill references. For long chains, use `pool_submit_chain` instead.
+///
+/// # Parameters
+/// - **steps** (array, required) — List of step objects with name, type ("prompt" or "skill"), and value
+///
+/// # Response Format
+/// ```json
+/// {
+///   "steps_executed": 3,
+///   "final_output": "pipeline result",
+///   "total_tokens": 3200,
+///   "execution_path": [
+///     { "step": "lint", "duration_ms": 1200 },
+///     { "step": "test", "duration_ms": 2100 },
+///     { "step": "build", "duration_ms": 800 }
+///   ]
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator chaining lint → test → build:
+/// ```text
+/// await client.call_tool("pool_chain", {
+///   "steps": [
+///     { "name": "lint", "type": "prompt", "value": "Lint this code: ..." },
+///     { "name": "test", "type": "skill", "value": "run_tests" },
+///     { "name": "build", "type": "prompt", "value": "Build the project" }
+///   ]
+/// })
+/// ```
+///
+/// # Error Cases
+/// - **StepFailed** — A step failed; remaining steps are skipped
+/// - **InvalidStep** — Step type or name invalid
 pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain")
         .title("Chain Steps")
@@ -778,6 +1291,40 @@ pub fn pool_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_submit_chain** — Fire chain for async execution, returns task_id immediately
+///
+/// # Description
+/// Submit a chain pipeline for asynchronous execution without waiting.
+/// Check progress with `pool_chain_result` to see per-step completion.
+///
+/// # Parameters
+/// - **steps** (array, required) — Pipeline steps (same format as pool_chain)
+/// - **tags** (array, optional) — Tags for grouping chains
+/// - **isolation** (string, optional) — Isolation mode: "none", "clone", or "worktree" (default)
+///
+/// # Response Format
+/// ```json
+/// {
+///   "task_id": "task-chain-abc1234567"
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator firing a long chain for background execution:
+/// ```text
+/// await client.call_tool("pool_submit_chain", {
+///   "steps": [
+///     { "name": "lint", "type": "prompt", "value": "Lint the code" },
+///     { "name": "test", "type": "skill", "value": "run_tests" }
+///   ],
+///   "tags": ["ci", "release"]
+/// })
+/// // Returns: { task_id: "task-chain-abc..." }
+/// ```
+///
+/// # Error Cases
+/// - **InvalidStep** — Step definition is malformed
+/// - **StorageError** — Chain could not be persisted
 pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit_chain")
         .title("Fire a Chain")
@@ -834,6 +1381,40 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
         .build()
 }
 
+/// **pool_chain_result** — Check on fired chain, shows per-step progress
+///
+/// # Description
+/// Poll a chain for detailed progress. Shows which step is currently running, completed steps,
+/// failed steps, and total execution cost.
+///
+/// # Parameters
+/// - **task_id** (string, required) — Chain task ID from `pool_submit_chain`
+///
+/// # Response Format
+/// ```json
+/// {
+///   "steps": 3,
+///   "current_step": 1,
+///   "completed": ["lint"],
+///   "status": "running",
+///   "total_cost": 1500,
+///   "step_details": [
+///     { "name": "lint", "status": "completed", "duration_ms": 1200 },
+///     { "name": "test", "status": "running", "duration_ms": 450 }
+///   ]
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator checking chain progress:
+/// ```text
+/// await client.call_tool("pool_chain_result", { "task_id": "task-chain-abc123" })
+/// // Returns: { steps: 3, current_step: 1, completed: ["lint"], status: "running" }
+/// ```
+///
+/// # Error Cases
+/// - **ChainNotFound** — Task ID is not a chain
+/// - **TaskNotFound** — Task ID doesn't exist
 pub fn pool_chain_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_chain_result")
         .title("Check on a Chain")
@@ -1407,6 +1988,44 @@ pub fn pool_broadcast_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
         .build()
 }
 
+/// **pool_find_slots** — Query slots by name, role, and/or state (all filters optional)
+///
+/// # Description
+/// Find slots matching one or more criteria. All filters are optional; omitted filters match anything.
+///
+/// # Parameters
+/// - **name** (string, optional) — Exact match on slot name (e.g., "code-reviewer")
+/// - **role** (string, optional) — Exact match on slot role (e.g., "worker", "coordinator")
+/// - **state** (string, optional) — Filter by state: "idle", "busy", "stopped", "errored"
+///
+/// # Response Format
+/// ```json
+/// {
+///   "slots": [
+///     {
+///       "id": "slot-0",
+///       "state": "idle",
+///       "name": "code-reviewer",
+///       "role": "worker",
+///       "description": "Reviews PRs for quality",
+///       "current_task": null,
+///       "tasks_completed": 42,
+///       "cost_microdollars": 125000
+///     }
+///   ],
+///   "count": 1
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator finding idle worker slots:
+/// ```text
+/// await client.call_tool("pool_find_slots", { "state": "idle", "role": "worker" })
+/// // Returns: { slots: [{id: "slot-0", state: "idle", ...}], count: 1 }
+/// ```
+///
+/// # Error Cases
+/// - **InvalidState** — State filter value not recognized
 pub fn pool_find_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_find_slots")
         .title("Find Slots by Name, Role, or State")
@@ -1457,6 +2076,41 @@ pub fn pool_find_slots_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
         .build()
 }
 
+/// **pool_claim** — Self-service: idle slot grabs next pending task
+///
+/// # Description
+/// Atomically claim the oldest unassigned pending task. Used by slots to pull work.
+/// Returns the task ID or null if queue is empty.
+///
+/// # Parameters
+/// - **slot_id** (string, required) — Slot ID claiming the task
+/// - **labels** (array, optional) — Only claim tasks with one of these labels
+///
+/// # Response Format
+/// Task found:
+/// ```json
+/// {
+///   "task_id": "task-abc123",
+///   "prompt": "the task prompt",
+///   "tags": ["review", "urgent"]
+/// }
+/// ```
+/// No tasks available:
+/// ```json
+/// {
+///   "message": "no pending tasks"
+/// }
+/// ```
+///
+/// # Example
+/// Slot self-service claiming:
+/// ```text
+/// await client.call_tool("pool_claim", { "slot_id": "slot-2" })
+/// // Returns: { task_id: "task-abc123", ... }
+/// ```
+///
+/// # Error Cases
+/// - **SlotNotFound** — Slot ID doesn't exist
 pub fn pool_claim_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_claim")
         .title("Claim Next Pending Task")
@@ -1486,6 +2140,40 @@ pub fn pool_claim_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .build()
 }
 
+/// **pool_submit_with_review** — Fire task requiring coordinator approval before completion
+///
+/// # Description
+/// Submit a task that requires human/coordinator approval after execution.
+/// When the task completes, it waits in 'pending_review' state until `pool_approve_result` or `pool_reject_result` is called.
+///
+/// # Parameters
+/// - **prompt** (string, required) — The prompt/task to execute
+/// - **model** (string, optional) — Model override
+/// - **effort** (string, optional) — Effort override
+/// - **tags** (array, optional) — Tags for grouping
+/// - **max_rejections** (number, optional) — Max rejections before failing (default: 3)
+/// - **mcp_servers** (object, optional) — Additional MCP servers
+///
+/// # Response Format
+/// ```json
+/// {
+///   "task_id": "task-review-abc123",
+///   "review_required": true
+/// }
+/// ```
+///
+/// # Example
+/// Coordinator submitting code change for review:
+/// ```text
+/// await client.call_tool("pool_submit_with_review", {
+///   "prompt": "Refactor this function",
+///   "max_rejections": 2
+/// })
+/// // Returns: { task_id: "task-review-abc123", review_required: true }
+/// ```
+///
+/// # Error Cases
+/// - **InvalidInput** — Missing prompt field
 pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_submit_with_review")
         .title("Fire a Task with Review Gate")
@@ -1514,6 +2202,29 @@ pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>
         .build()
 }
 
+/// **pool_approve_result** — Approve pending review task, mark as completed
+///
+/// # Description
+/// Accept a task result that was waiting for review. Marks it as completed and finalizes.
+///
+/// # Parameters
+/// - **task_id** (string, required) — Task ID in 'pending_review' state
+///
+/// # Response Format
+/// ```json
+/// "approved"
+/// ```
+///
+/// # Example
+/// Coordinator accepting task result:
+/// ```text
+/// await client.call_tool("pool_approve_result", { "task_id": "task-review-abc123" })
+/// // Returns: "approved"
+/// ```
+///
+/// # Error Cases
+/// - **TaskNotFound** — Task ID doesn't exist
+/// - **NotPendingReview** — Task is not in pending_review state
 pub fn pool_approve_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_approve_result")
         .title("Approve Task Result")
@@ -1534,6 +2245,35 @@ pub fn pool_approve_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
         .build()
 }
 
+/// **pool_reject_result** — Reject task with feedback, re-queue with appended feedback
+///
+/// # Description
+/// Reject a task result and send it back to the queue with feedback appended to the prompt.
+/// If the task has been rejected `max_rejections` times, it's marked as failed instead.
+///
+/// # Parameters
+/// - **task_id** (string, required) — Task ID in 'pending_review' state
+/// - **feedback** (string, required) — Reason for rejection (appended to prompt on re-queue)
+///
+/// # Response Format
+/// ```json
+/// "rejected and re-queued"
+/// ```
+///
+/// # Example
+/// Coordinator rejecting with feedback:
+/// ```text
+/// await client.call_tool("pool_reject_result", {
+///   "task_id": "task-review-abc123",
+///   "feedback": "Output is incomplete, needs full implementation details"
+/// })
+/// // Returns: "rejected and re-queued"
+/// ```
+///
+/// # Error Cases
+/// - **TaskNotFound** — Task ID doesn't exist
+/// - **NotPendingReview** — Task is not in pending_review state
+/// - **MaxRejectionsExceeded** — Task has reached max rejection count (marked as failed)
 pub fn pool_reject_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
     ToolBuilder::new("pool_reject_result")
         .title("Reject Task Result")
