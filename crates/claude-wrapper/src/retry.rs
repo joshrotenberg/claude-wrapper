@@ -243,6 +243,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: String::new(),
+            working_dir: None,
         };
         assert!(policy.should_retry(&retryable));
 
@@ -251,6 +252,7 @@ mod tests {
             exit_code: 99,
             stdout: String::new(),
             stderr: String::new(),
+            working_dir: None,
         };
         assert!(!policy.should_retry(&not_retryable));
     }

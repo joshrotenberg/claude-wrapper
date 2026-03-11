@@ -23,6 +23,7 @@ use crate::exec::{self, CommandOutput};
 #[derive(Debug, Clone, Default)]
 pub struct AgentsCommand {
     setting_sources: Option<String>,
+    json: bool,
 }
 
 impl AgentsCommand {
@@ -37,6 +38,13 @@ impl AgentsCommand {
         self.setting_sources = Some(sources.into());
         self
     }
+
+    /// Output as JSON.
+    #[must_use]
+    pub fn json(mut self) -> Self {
+        self.json = true;
+        self
+    }
 }
 
 impl ClaudeCommand for AgentsCommand {
@@ -44,6 +52,9 @@ impl ClaudeCommand for AgentsCommand {
 
     fn args(&self) -> Vec<String> {
         let mut args = vec!["agents".to_string()];
+        if self.json {
+            args.push("--json".to_string());
+        }
         if let Some(ref sources) = self.setting_sources {
             args.push("--setting-sources".to_string());
             args.push(sources.clone());
@@ -74,5 +85,11 @@ mod tests {
             ClaudeCommand::args(&cmd),
             vec!["agents", "--setting-sources", "user,project"]
         );
+    }
+
+    #[test]
+    fn test_agents_json_flag() {
+        let cmd = AgentsCommand::new().json();
+        assert_eq!(ClaudeCommand::args(&cmd), vec!["agents", "--json"]);
     }
 }

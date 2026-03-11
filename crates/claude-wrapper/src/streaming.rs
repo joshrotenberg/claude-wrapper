@@ -111,6 +111,7 @@ where
     let mut child = cmd.spawn().map_err(|e| Error::Io {
         message: format!("failed to spawn claude: {e}"),
         source: e,
+        working_dir: claude.working_dir.clone(),
     })?;
 
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -119,6 +120,7 @@ where
     while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
         message: "failed to read stdout line".to_string(),
         source: e,
+        working_dir: claude.working_dir.clone(),
     })? {
         if line.trim().is_empty() {
             continue;
@@ -134,6 +136,7 @@ where
     let output = child.wait_with_output().await.map_err(|e| Error::Io {
         message: "failed to wait for claude process".to_string(),
         source: e,
+        working_dir: claude.working_dir.clone(),
     })?;
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -145,6 +148,7 @@ where
             exit_code,
             stdout: String::new(),
             stderr,
+            working_dir: claude.working_dir.clone(),
         });
     }
 
