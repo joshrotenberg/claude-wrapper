@@ -292,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              \"fire a chain\" = pool_submit_chain (async pipeline, check with pool_chain_result), \
              \"fan out\" = pool_fan_out (parallel independent tasks), \
              \"run skill\" = pool_skill_run (execute a registered skill), \
+             \"claim\" = pool_claim (worker self-service: idle slot grabs next pending task), \
              \"cancel\" = pool_cancel / pool_cancel_chain, \
              \"check\" = pool_result / pool_chain_result, \
              \"inline\" = do the work yourself without the pool. \

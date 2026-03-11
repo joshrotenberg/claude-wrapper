@@ -472,6 +472,96 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
     }
 
+    /// Claim the next pending task for a specific slot.
+    ///
+    /// Atomically finds the oldest pending task (with no slot assigned),
+    /// assigns it to the given slot, and executes it in the background.
+    /// Returns the claimed task ID, or `None` if no pending tasks are available.
+    pub async fn claim(&self, slot_id: &SlotId) -> Result<Option<TaskId>> {
+        self.check_shutdown()?;
+
+        // Verify the slot exists and is idle.
+        let slot = self
+            .inner
+            .store
+            .get_slot(slot_id)
+            .await?
+            .ok_or_else(|| Error::SlotNotFound(slot_id.0.clone()))?;
+
+        if slot.state != SlotState::Idle {
+            return Ok(None);
+        }
+
+        // Find the oldest pending task with no slot assigned.
+        let pending = self
+            .inner
+            .store
+            .list_tasks(&TaskFilter {
+                state: Some(TaskState::Pending),
+                ..Default::default()
+            })
+            .await?;
+
+        let task = match pending.into_iter().find(|t| t.slot_id.is_none()) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let task_id = task.id.clone();
+        let prompt = task.prompt.clone();
+        let slot_config = slot.config.clone();
+
+        // Mark task as running and assign to slot.
+        let mut updated_task = task;
+        updated_task.state = TaskState::Running;
+        updated_task.slot_id = Some(slot_id.clone());
+        self.inner.store.put_task(updated_task.clone()).await?;
+
+        // Mark slot as busy.
+        let mut updated_slot = slot;
+        updated_slot.state = SlotState::Busy;
+        updated_slot.current_task = Some(task_id.clone());
+        self.inner.store.put_slot(updated_slot).await?;
+
+        // Execute in background.
+        let pool = self.clone();
+        let tid = task_id.clone();
+        let sid = slot_id.clone();
+        tokio::spawn(async move {
+            let result = pool
+                .execute_task(&tid, &prompt, &sid, &slot_config, None)
+                .await;
+
+            let _ = pool.release_slot(&sid, &tid, &result).await;
+
+            if let Ok(Some(mut task)) = pool.inner.store.get_task(&tid).await {
+                match result {
+                    Ok(task_result) => {
+                        task.state = TaskState::Completed;
+                        task.result = Some(task_result);
+                    }
+                    Err(e) => {
+                        let details = extract_failure_details(&e);
+                        task.state = TaskState::Failed;
+                        task.result = Some(TaskResult {
+                            output: e.to_string(),
+                            success: false,
+                            cost_microdollars: 0,
+                            turns_used: 0,
+                            session_id: None,
+                            failed_command: details.failed_command,
+                            exit_code: details.exit_code,
+                            stderr: details.stderr,
+                        });
+                    }
+                }
+                let _ = pool.inner.store.put_task(task).await;
+            }
+        });
+
+        Ok(Some(task_id))
+    }
+
     /// Cancel a running chain, skipping remaining steps.
     ///
     /// Sets the chain's task state to `Cancelled`. The currently-executing step
@@ -891,6 +981,31 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// Get the count of messages in a slot's inbox.
     pub fn message_count(&self, slot_id: &SlotId) -> usize {
         self.inner.message_bus.count(slot_id)
+    }
+
+    /// Drain pending messages for a slot and prepend them to a prompt.
+    ///
+    /// If the slot has pending messages, they are consumed (removed from inbox)
+    /// and formatted as a preamble before the actual task prompt. This provides
+    /// automatic message delivery at task boundaries without requiring polling.
+    fn prepend_messages(&self, slot_id: &SlotId, prompt: &str) -> String {
+        let messages = self.inner.message_bus.read(slot_id);
+        if messages.is_empty() {
+            return prompt.to_string();
+        }
+
+        let mut preamble = String::from("## Messages received while idle\n\n");
+        for msg in &messages {
+            preamble.push_str(&format!(
+                "**From {}** ({}): {}\n\n",
+                msg.from.0,
+                msg.timestamp.format("%H:%M:%S"),
+                msg.content
+            ));
+        }
+        preamble.push_str("---\n\n");
+        preamble.push_str(prompt);
+        preamble
     }
 
     /// Gracefully shut down the pool.
@@ -1326,8 +1441,11 @@ impl<S: PoolStore + 'static> Pool<S> {
         // Build the system prompt with identity and context injection.
         let system_prompt = self.build_system_prompt(&resolved, slot_config);
 
+        // Auto-deliver pending messages by prepending them to the prompt.
+        let effective_prompt = self.prepend_messages(slot_id, prompt);
+
         // Build and execute the query.
-        let mut cmd = claude_wrapper::QueryCommand::new(prompt)
+        let mut cmd = claude_wrapper::QueryCommand::new(&effective_prompt)
             .output_format(OutputFormat::Json)
             .permission_mode(resolved.permission_mode);
 
@@ -1452,8 +1570,11 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let system_prompt = self.build_system_prompt(&resolved, slot_config);
 
+        // Auto-deliver pending messages by prepending them to the prompt.
+        let effective_prompt = self.prepend_messages(slot_id, prompt);
+
         // Build the query with StreamJson format for streaming.
-        let mut cmd = claude_wrapper::QueryCommand::new(prompt)
+        let mut cmd = claude_wrapper::QueryCommand::new(&effective_prompt)
             .output_format(OutputFormat::StreamJson)
             .permission_mode(resolved.permission_mode);
 
