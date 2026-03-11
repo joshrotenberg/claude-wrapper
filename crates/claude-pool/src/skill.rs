@@ -511,6 +511,9 @@ pub fn builtin_skills() -> Vec<Skill> {
         include_str!("../skills/pool_dashboard/SKILL.md"),
         include_str!("../skills/chain_watcher/SKILL.md"),
         include_str!("../skills/plan_then_execute/SKILL.md"),
+        include_str!("../skills/rebase_onto_main/SKILL.md"),
+        include_str!("../skills/chain_implement_issue/SKILL.md"),
+        include_str!("../skills/issue_triage/SKILL.md"),
     ];
 
     SKILL_SOURCES
@@ -818,8 +821,8 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        // 7 task + 4 coordinator + 1 chain = 12 builtins
-        assert_eq!(registry.list().len(), 12);
+        // 8 task + 5 coordinator + 2 chain = 15 builtins
+        assert_eq!(registry.list().len(), 15);
         // Task-scoped
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
@@ -828,11 +831,15 @@ mod tests {
         assert!(registry.get("summarize").is_some());
         assert!(registry.get("pre_push").is_some());
         assert!(registry.get("create_pr").is_some());
+        assert!(registry.get("rebase_onto_main").is_some());
         // Coordinator-scoped
         assert!(registry.get("issue_watcher").is_some());
         assert!(registry.get("loop_monitor").is_some());
         assert!(registry.get("pool_dashboard").is_some());
         assert!(registry.get("chain_watcher").is_some());
+        assert!(registry.get("issue_triage").is_some());
+        // Chain-scoped
+        assert!(registry.get("chain_implement_issue").is_some());
     }
 
     #[test]
@@ -842,9 +849,9 @@ mod tests {
         let coordinators = registry.list_by_scope(SkillScope::Coordinator);
         let chains = registry.list_by_scope(SkillScope::Chain);
 
-        assert_eq!(tasks.len(), 7);
-        assert_eq!(coordinators.len(), 4);
-        assert_eq!(chains.len(), 1);
+        assert_eq!(tasks.len(), 8);
+        assert_eq!(coordinators.len(), 5);
+        assert_eq!(chains.len(), 2);
     }
 
     #[test]
