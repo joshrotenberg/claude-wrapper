@@ -169,6 +169,30 @@ pub struct SkillSaveInput {
     pub dir: Option<String>,
 }
 
+// ── Messaging input schemas ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendMessageInput {
+    /// Slot ID of the sender.
+    pub from: String,
+    /// Slot ID of the recipient.
+    pub to: String,
+    /// Message content.
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadMessagesInput {
+    /// Slot ID whose inbox to drain.
+    pub slot_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeekMessagesInput {
+    /// Slot ID whose inbox to peek at.
+    pub slot_id: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -208,6 +232,7 @@ fn parse_scope(s: &str) -> SkillScope {
 fn parse_isolation(s: Option<&str>) -> claude_pool::chain::ChainIsolation {
     match s {
         Some("none") => claude_pool::chain::ChainIsolation::None,
+        Some("clone") => claude_pool::chain::ChainIsolation::Clone,
         _ => claude_pool::chain::ChainIsolation::Worktree,
     }
 }
@@ -1066,6 +1091,62 @@ pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
         .build()
 }
 
+/// Send a message from one slot to another.
+pub fn pool_send_message_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_send_message")
+        .title("Send Message")
+        .description("Send a message from one slot to another.")
+        .handler(move |input: SendMessageInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let from = claude_pool::SlotId(input.from);
+                let to = claude_pool::SlotId(input.to);
+                let message_id = state.pool.send_message(&from, &to, input.content);
+                Ok(CallToolResult::json(serde_json::json!({
+                    "message_id": message_id,
+                })))
+            }
+        })
+        .build()
+}
+
+/// Read and drain messages from a slot's inbox.
+pub fn pool_read_messages_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_read_messages")
+        .title("Read Messages")
+        .description("Read and drain all messages for a slot. Removes messages from the inbox.")
+        .handler(move |input: ReadMessagesInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_id = claude_pool::SlotId(input.slot_id);
+                let messages = state.pool.read_messages(&slot_id);
+                Ok(CallToolResult::json(serde_json::json!({
+                    "messages": messages,
+                })))
+            }
+        })
+        .build()
+}
+
+/// Peek at messages without draining.
+pub fn pool_peek_messages_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_peek_messages")
+        .title("Peek Messages")
+        .description("Peek at messages without draining. Returns messages without removing them.")
+        .read_only()
+        .handler(move |input: PeekMessagesInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_id = claude_pool::SlotId(input.slot_id);
+                let messages = state.pool.peek_messages(&slot_id);
+                Ok(CallToolResult::json(serde_json::json!({
+                    "messages": messages,
+                })))
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -1095,5 +1176,8 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         pool_skill_add_tool(Arc::clone(state)),
         pool_skill_remove_tool(Arc::clone(state)),
         pool_skill_save_tool(Arc::clone(state)),
+        pool_send_message_tool(Arc::clone(state)),
+        pool_read_messages_tool(Arc::clone(state)),
+        pool_peek_messages_tool(Arc::clone(state)),
     ]
 }

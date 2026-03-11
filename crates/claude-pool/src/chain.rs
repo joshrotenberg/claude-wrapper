@@ -89,6 +89,8 @@ pub enum ChainIsolation {
     /// Create a temporary git worktree shared by all steps in the chain (default).
     #[default]
     Worktree,
+    /// Create a full clone with `git clone --local --shared` for complete isolation.
+    Clone,
 }
 
 /// Options for chain execution.
@@ -621,11 +623,18 @@ mod tests {
         let json = serde_json::to_string(&none).unwrap();
         assert_eq!(json, r#""none""#);
 
+        let clone = ChainIsolation::Clone;
+        let json = serde_json::to_string(&clone).unwrap();
+        assert_eq!(json, r#""clone""#);
+
         let parsed: ChainIsolation = serde_json::from_str(r#""worktree""#).unwrap();
         assert_eq!(parsed, ChainIsolation::Worktree);
 
         let parsed: ChainIsolation = serde_json::from_str(r#""none""#).unwrap();
         assert_eq!(parsed, ChainIsolation::None);
+
+        let parsed: ChainIsolation = serde_json::from_str(r#""clone""#).unwrap();
+        assert_eq!(parsed, ChainIsolation::Clone);
     }
 
     #[test]

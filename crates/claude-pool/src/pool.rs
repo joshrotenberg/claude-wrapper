@@ -52,6 +52,8 @@ struct PoolInner<S: PoolStore> {
     worktree_manager: Option<crate::worktree::WorktreeManager>,
     /// In-flight chain progress, keyed by task ID.
     chain_progress: dashmap::DashMap<String, crate::chain::ChainProgress>,
+    /// Message bus for inter-slot communication.
+    message_bus: crate::messaging::MessageBus,
 }
 
 /// A pool of Claude CLI slots.
@@ -144,6 +146,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             assignment_lock: Mutex::new(()),
             worktree_manager,
             chain_progress: dashmap::DashMap::new(),
+            message_bus: crate::messaging::MessageBus::new(),
         });
 
         // Register slots in the store.
@@ -565,25 +568,43 @@ impl<S: PoolStore + 'static> Pool<S> {
             self.inner.store.put_task(task).await?;
         }
 
-        // Create chain worktree if isolation is requested.
-        let chain_working_dir = if isolation == crate::chain::ChainIsolation::Worktree {
-            if let Some(ref mgr) = self.inner.worktree_manager {
-                match mgr.create_for_chain(&task_id).await {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_id.0,
-                            error = %e,
-                            "failed to create chain worktree, falling back to slot dir"
-                        );
-                        None
+        // Create chain working directory based on isolation mode.
+        let chain_working_dir = match isolation {
+            crate::chain::ChainIsolation::Worktree => {
+                if let Some(ref mgr) = self.inner.worktree_manager {
+                    match mgr.create_for_chain(&task_id).await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id.0,
+                                error = %e,
+                                "failed to create chain worktree, falling back to slot dir"
+                            );
+                            None
+                        }
                     }
+                } else {
+                    None
                 }
-            } else {
-                None
             }
-        } else {
-            None
+            crate::chain::ChainIsolation::Clone => {
+                if let Some(ref mgr) = self.inner.worktree_manager {
+                    match mgr.create_clone_for_chain(&task_id).await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id.0,
+                                error = %e,
+                                "failed to create chain clone, falling back to slot dir"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            crate::chain::ChainIsolation::None => None,
         };
 
         let pool = self.clone();
@@ -599,16 +620,33 @@ impl<S: PoolStore + 'static> Pool<S> {
             )
             .await;
 
-            // Clean up chain worktree if we created one.
+            // Clean up chain isolation based on the mode used.
             if chain_working_dir.is_some()
                 && let Some(ref mgr) = pool.inner.worktree_manager
-                && let Err(e) = mgr.remove_chain(&tid).await
             {
-                tracing::warn!(
-                    task_id = %tid.0,
-                    error = %e,
-                    "failed to clean up chain worktree"
-                );
+                match isolation {
+                    crate::chain::ChainIsolation::Worktree => {
+                        if let Err(e) = mgr.remove_chain(&tid).await {
+                            tracing::warn!(
+                                task_id = %tid.0,
+                                error = %e,
+                                "failed to clean up chain worktree"
+                            );
+                        }
+                    }
+                    crate::chain::ChainIsolation::Clone => {
+                        if let Err(e) = mgr.remove_clone(&tid).await {
+                            tracing::warn!(
+                                task_id = %tid.0,
+                                error = %e,
+                                "failed to clean up chain clone"
+                            );
+                        }
+                    }
+                    crate::chain::ChainIsolation::None => {
+                        // No cleanup needed for None mode.
+                    }
+                }
             }
 
             // Store the chain result as the task result.
@@ -772,6 +810,32 @@ impl<S: PoolStore + 'static> Pool<S> {
             .iter()
             .map(|r| (r.key().clone(), r.value().clone()))
             .collect()
+    }
+
+    /// Send a message from one slot to another.
+    ///
+    /// Returns the message ID.
+    pub fn send_message(&self, from: &SlotId, to: &SlotId, content: String) -> String {
+        self.inner.message_bus.send(from, to, content)
+    }
+
+    /// Read and drain all messages for a slot.
+    ///
+    /// Removes all messages from the slot's inbox and returns them.
+    pub fn read_messages(&self, slot_id: &SlotId) -> Vec<crate::messaging::Message> {
+        self.inner.message_bus.read(slot_id)
+    }
+
+    /// Peek at messages without draining.
+    ///
+    /// Returns all messages in the slot's inbox without removing them.
+    pub fn peek_messages(&self, slot_id: &SlotId) -> Vec<crate::messaging::Message> {
+        self.inner.message_bus.peek(slot_id)
+    }
+
+    /// Get the number of messages in a slot's inbox.
+    pub fn message_count(&self, slot_id: &SlotId) -> usize {
+        self.inner.message_bus.count(slot_id)
     }
 
     /// Gracefully shut down the pool.

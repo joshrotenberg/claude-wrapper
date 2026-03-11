@@ -280,6 +280,78 @@ impl WorktreeManager {
     pub fn chain_worktree_path(&self, task_id: &TaskId) -> PathBuf {
         self.base_dir.join("chains").join(&task_id.0)
     }
+
+    /// Create a full clone for a chain execution using `git clone --local --shared`.
+    ///
+    /// Creates a clone at `{base_dir}/clones/{task_id}` with no shared .git directory.
+    pub async fn create_clone_for_chain(&self, task_id: &TaskId) -> Result<PathBuf> {
+        let clone_path = self.clone_path(task_id);
+
+        // Ensure clones directory exists.
+        let clones_dir = self.base_dir.join("clones");
+        tokio::fs::create_dir_all(&clones_dir)
+            .await
+            .map_err(|e| Error::Store(format!("failed to create clones dir: {e}")))?;
+
+        // Remove existing clone if it exists (stale from previous run).
+        if clone_path.exists() {
+            self.remove_clone(task_id).await?;
+        }
+
+        // Use `git clone --local --shared` for full isolation with shared objects.
+        let output = tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--local",
+                "--shared",
+                self.repo_dir.to_str().unwrap_or_default(),
+                clone_path.to_str().unwrap_or_default(),
+            ])
+            .output()
+            .await
+            .map_err(|e| Error::Store(format!("failed to create chain clone: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Store(format!(
+                "git clone failed for chain: {stderr}"
+            )));
+        }
+
+        tracing::info!(
+            task_id = %task_id.0,
+            path = %clone_path.display(),
+            "created chain clone"
+        );
+
+        Ok(clone_path)
+    }
+
+    /// Remove a chain's clone directory.
+    pub async fn remove_clone(&self, task_id: &TaskId) -> Result<()> {
+        let clone_path = self.clone_path(task_id);
+
+        if clone_path.exists() {
+            tokio::fs::remove_dir_all(&clone_path).await.map_err(|e| {
+                Error::Store(format!(
+                    "failed to remove chain clone at {}: {e}",
+                    clone_path.display()
+                ))
+            })?;
+        }
+
+        tracing::debug!(
+            task_id = %task_id.0,
+            "removed chain clone"
+        );
+
+        Ok(())
+    }
+
+    /// Get the clone path for a chain (may not exist yet).
+    pub fn clone_path(&self, task_id: &TaskId) -> PathBuf {
+        self.base_dir.join("clones").join(&task_id.0)
+    }
 }
 
 #[cfg(test)]
@@ -332,5 +404,69 @@ mod tests {
             mgr.chain_worktree_path(&task_id),
             PathBuf::from("/tmp/wt/chains/chain-abc123")
         );
+    }
+
+    #[test]
+    fn clone_path_construction() {
+        let mgr = WorktreeManager::new("/repo", Some(PathBuf::from("/tmp/wt")));
+        let task_id = TaskId("chain-xyz789".into());
+        assert_eq!(
+            mgr.clone_path(&task_id),
+            PathBuf::from("/tmp/wt/clones/chain-xyz789")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_clone_for_chain_creates_directory() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmpdir.path())
+            .output()
+            .unwrap();
+
+        let mgr_base = tempfile::tempdir().unwrap();
+        let mgr =
+            WorktreeManager::new_validated(tmpdir.path(), Some(mgr_base.path().to_path_buf()))
+                .await
+                .unwrap();
+
+        let task_id = TaskId("chain-test".into());
+        let clone_path = mgr.create_clone_for_chain(&task_id).await.unwrap();
+
+        assert!(clone_path.exists(), "clone directory should exist");
+        assert!(clone_path.join(".git").exists(), "clone should have .git");
+    }
+
+    #[tokio::test]
+    async fn remove_clone_deletes_directory() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmpdir.path())
+            .output()
+            .unwrap();
+
+        let mgr_base = tempfile::tempdir().unwrap();
+        let mgr =
+            WorktreeManager::new_validated(tmpdir.path(), Some(mgr_base.path().to_path_buf()))
+                .await
+                .unwrap();
+
+        let task_id = TaskId("chain-remove-test".into());
+        let clone_path = mgr.create_clone_for_chain(&task_id).await.unwrap();
+        assert!(clone_path.exists());
+
+        mgr.remove_clone(&task_id).await.unwrap();
+        assert!(!clone_path.exists(), "clone directory should be deleted");
+    }
+
+    #[test]
+    fn clone_path_idempotent() {
+        let mgr = WorktreeManager::new("/repo", Some(PathBuf::from("/tmp/wt")));
+        let task_id = TaskId("chain-test".into());
+        let path1 = mgr.clone_path(&task_id);
+        let path2 = mgr.clone_path(&task_id);
+        assert_eq!(path1, path2);
     }
 }
