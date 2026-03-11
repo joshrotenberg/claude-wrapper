@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::types::SlotId;
+use crate::types::{SlotId, TaskId};
 
 /// Manages git worktrees for pool slots.
 #[derive(Debug)]
@@ -152,6 +152,104 @@ impl WorktreeManager {
     pub fn repo_dir(&self) -> &Path {
         &self.repo_dir
     }
+
+    /// Create a worktree for a chain execution.
+    ///
+    /// Creates a git worktree at `{base_dir}/chains/{task_id}` branched from
+    /// the current HEAD.
+    pub async fn create_for_chain(&self, task_id: &TaskId) -> Result<PathBuf> {
+        let worktree_path = self.chain_worktree_path(task_id);
+
+        // Ensure chains directory exists.
+        let chains_dir = self.base_dir.join("chains");
+        tokio::fs::create_dir_all(&chains_dir)
+            .await
+            .map_err(|e| Error::Store(format!("failed to create chains dir: {e}")))?;
+
+        // Remove existing worktree if it exists (stale from previous run).
+        if worktree_path.exists() {
+            self.remove_chain(task_id).await?;
+        }
+
+        let branch_name = format!("claude-pool/chain/{}", task_id.0);
+        let output = tokio::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                &branch_name,
+                worktree_path.to_str().unwrap_or_default(),
+                "HEAD",
+            ])
+            .current_dir(&self.repo_dir)
+            .output()
+            .await
+            .map_err(|e| Error::Store(format!("failed to create chain worktree: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Store(format!(
+                "git worktree add failed for chain: {stderr}"
+            )));
+        }
+
+        tracing::info!(
+            task_id = %task_id.0,
+            path = %worktree_path.display(),
+            "created chain worktree"
+        );
+
+        Ok(worktree_path)
+    }
+
+    /// Remove a chain's worktree and its branch.
+    pub async fn remove_chain(&self, task_id: &TaskId) -> Result<()> {
+        let worktree_path = self.chain_worktree_path(task_id);
+
+        if worktree_path.exists() {
+            let output = tokio::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree_path.to_str().unwrap_or_default(),
+                ])
+                .current_dir(&self.repo_dir)
+                .output()
+                .await
+                .map_err(|e| Error::Store(format!("failed to remove chain worktree: {e}")))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    task_id = %task_id.0,
+                    error = %stderr,
+                    "failed to remove chain worktree, cleaning up manually"
+                );
+                let _ = tokio::fs::remove_dir_all(&worktree_path).await;
+            }
+        }
+
+        // Clean up the branch.
+        let branch_name = format!("claude-pool/chain/{}", task_id.0);
+        let _ = tokio::process::Command::new("git")
+            .args(["branch", "-D", &branch_name])
+            .current_dir(&self.repo_dir)
+            .output()
+            .await;
+
+        tracing::debug!(
+            task_id = %task_id.0,
+            "removed chain worktree"
+        );
+
+        Ok(())
+    }
+
+    /// Get the worktree path for a chain (may not exist yet).
+    pub fn chain_worktree_path(&self, task_id: &TaskId) -> PathBuf {
+        self.base_dir.join("chains").join(&task_id.0)
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +268,15 @@ mod tests {
         let mgr = WorktreeManager::new("/repo", None);
         let expected = std::env::temp_dir().join("claude-pool").join("worktrees");
         assert_eq!(mgr.base_dir(), expected);
+    }
+
+    #[test]
+    fn chain_worktree_path_construction() {
+        let mgr = WorktreeManager::new("/repo", Some(PathBuf::from("/tmp/wt")));
+        let task_id = TaskId("chain-abc123".into());
+        assert_eq!(
+            mgr.chain_worktree_path(&task_id),
+            PathBuf::from("/tmp/wt/chains/chain-abc123")
+        );
     }
 }

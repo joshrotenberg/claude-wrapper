@@ -205,6 +205,13 @@ fn parse_scope(s: &str) -> SkillScope {
     }
 }
 
+fn parse_isolation(s: Option<&str>) -> claude_pool::chain::ChainIsolation {
+    match s {
+        Some("worktree") => claude_pool::chain::ChainIsolation::Worktree,
+        _ => claude_pool::chain::ChainIsolation::None,
+    }
+}
+
 fn parse_source(s: &str) -> Option<SkillSource> {
     match s {
         "builtin" => Some(SkillSource::Builtin),
@@ -498,6 +505,8 @@ pub struct SubmitChainInput {
     pub steps: Vec<ChainStepInput>,
     /// Tags for grouping/filtering.
     pub tags: Option<Vec<String>>,
+    /// Isolation mode: "worktree" for per-chain git worktree, or omit for default (none).
+    pub isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -506,6 +515,8 @@ pub struct FanOutChainsInput {
     pub chains: Vec<Vec<ChainStepInput>>,
     /// Tags for grouping/filtering.
     pub tags: Option<Vec<String>>,
+    /// Isolation mode: "worktree" for per-chain git worktree, or omit for default (none).
+    pub isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -630,8 +641,10 @@ pub fn pool_submit_chain_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> T
             let state = Arc::clone(&state);
             async move {
                 let steps = convert_chain_steps(input.steps);
+                let isolation = parse_isolation(input.isolation.as_deref());
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
+                    isolation,
                 };
                 let skills = state.skills.read().await;
                 match state.pool.submit_chain(steps, &skills, options).await {
@@ -656,8 +669,10 @@ pub fn pool_fan_out_chains_tool<S: PoolStore + 'static>(state: Arc<State<S>>) ->
             let state = Arc::clone(&state);
             async move {
                 let chains = input.chains.into_iter().map(convert_chain_steps).collect();
+                let isolation = parse_isolation(input.isolation.as_deref());
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
+                    isolation,
                 };
                 let skills = state.skills.read().await;
                 match state.pool.fan_out_chains(chains, &skills, options).await {
