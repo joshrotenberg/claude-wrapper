@@ -4,6 +4,7 @@
 //! over stdio or HTTP transport.
 
 use std::path::PathBuf;
+
 use std::sync::Arc;
 
 use clap::Parser;
@@ -137,6 +138,15 @@ fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Strip CLAUDECODE so child `claude` processes don't refuse to start.
+    // When launched as an MCP server from within Claude Code, the server
+    // inherits this variable, causing slots to fail with "Claude Code cannot
+    // be launched inside another Claude Code session."
+    // SAFETY: called before any threads are spawned.
+    unsafe {
+        std::env::remove_var("CLAUDECODE");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
