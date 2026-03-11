@@ -105,14 +105,34 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
 
     /// Build and initialize the pool, registering slots in the store.
     pub async fn build(self) -> Result<Pool<S>> {
-        // Always create the worktree manager so it's available for
-        // per-chain worktrees even when global worktree_isolation is off.
+        // Resolve repo directory from Claude's working_dir or current directory.
         let repo_dir = self
             .claude
             .working_dir()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let worktree_manager = Some(crate::worktree::WorktreeManager::new(repo_dir, None));
+
+        // Validate repo_dir is a git repo. Hard error when global worktree
+        // isolation is on; soft warning otherwise (per-chain isolation may
+        // still request worktrees).
+        let worktree_manager = match crate::worktree::WorktreeManager::new_validated(
+            &repo_dir, None,
+        )
+        .await
+        {
+            Ok(mgr) => Some(mgr),
+            Err(e) => {
+                if self.config.worktree_isolation {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    repo_dir = %repo_dir.display(),
+                    error = %e,
+                    "worktree manager unavailable; per-chain worktree isolation will fall back to shared CWD"
+                );
+                None
+            }
+        };
 
         let inner = Arc::new(PoolInner {
             claude: self.claude,

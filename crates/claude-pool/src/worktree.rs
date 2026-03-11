@@ -31,6 +31,36 @@ impl WorktreeManager {
         Self { base_dir, repo_dir }
     }
 
+    /// Create a worktree manager after verifying the repo directory is a git repository.
+    ///
+    /// Returns an error if `repo_dir` is not inside a git working tree.
+    pub async fn new_validated(
+        repo_dir: impl Into<PathBuf>,
+        base_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        let repo_dir = repo_dir.into();
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&repo_dir)
+            .output()
+            .await
+            .map_err(|e| {
+                Error::Store(format!(
+                    "failed to check git repo at {}: {e}",
+                    repo_dir.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(Error::Store(format!(
+                "worktree isolation requires a git repository, but {} is not inside a git work tree",
+                repo_dir.display()
+            )));
+        }
+
+        Ok(Self::new(repo_dir, base_dir))
+    }
+
     /// Create a worktree for a slot.
     ///
     /// Creates a git worktree at `{base_dir}/{slot_id}` branched from
@@ -255,6 +285,30 @@ impl WorktreeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn new_validated_rejects_non_repo() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let result = WorktreeManager::new_validated(tmpdir.path(), None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not inside a git work tree"),
+            "expected git work tree error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_validated_accepts_git_repo() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmpdir.path())
+            .output()
+            .unwrap();
+        let mgr = WorktreeManager::new_validated(tmpdir.path(), None).await;
+        assert!(mgr.is_ok());
+    }
 
     #[test]
     fn worktree_path_construction() {
