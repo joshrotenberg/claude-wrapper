@@ -111,6 +111,13 @@ pub struct PoolConfig {
     ///
     /// Only used when [`supervisor_enabled`](Self::supervisor_enabled) is true.
     pub supervisor_interval_secs: u64,
+
+    /// Use `--strict-mcp-config` when passing MCP config to slots.
+    ///
+    /// Prevents slots from inheriting the coordinator's `.mcp.json`, which
+    /// avoids accidental recursive pool calls (a slot invoking `pool_run` on itself).
+    /// Default: `true`.
+    pub strict_mcp_config: bool,
 }
 
 impl Default for PoolConfig {
@@ -133,6 +140,7 @@ impl Default for PoolConfig {
             detect_permission_prompts: true,
             supervisor_enabled: false,
             supervisor_interval_secs: 30,
+            strict_mcp_config: true,
         }
     }
 }
@@ -220,6 +228,13 @@ pub struct SlotRecord {
 
     /// Git worktree path, if worktree isolation is enabled.
     pub worktree_path: Option<String>,
+
+    /// Path to the slot's temp `.mcp.json` file, if MCP servers are configured.
+    ///
+    /// Written once per slot (on first task that needs it) and reused across
+    /// subsequent tasks. Cleaned up on pool drain/shutdown.
+    #[serde(skip)]
+    pub mcp_config_path: Option<std::path::PathBuf>,
 }
 
 // ── Task types ───────────────────────────────────────────────────────
