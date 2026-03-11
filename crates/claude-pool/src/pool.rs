@@ -23,6 +23,8 @@
 //! # }
 //! ```
 
+use std::future::IntoFuture;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -200,6 +202,79 @@ impl Pool<crate::store::InMemoryStore> {
     }
 }
 
+/// Builder for a synchronous pool task, returned by [`Pool::run`].
+///
+/// Implements [`IntoFuture`] so it can be `.await`ed directly. Builder
+/// methods add optional overrides before awaiting.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> claude_pool::Result<()> {
+/// # use claude_pool::{Pool, TaskOverrides};
+/// # let claude = claude_wrapper::Claude::builder().build()?;
+/// # let pool = Pool::builder(claude).build().await?;
+/// // Simplest form
+/// let result = pool.run("write a poem").await?;
+///
+/// // With overrides
+/// let result = pool
+///     .run("refactor this module")
+///     .config(TaskOverrides { model: Some("claude-opus-4-6".into()), ..Default::default() })
+///     .working_dir("/tmp/project")
+///     .on_output(|chunk| print!("{chunk}"))
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct RunOptions<'pool, S: PoolStore + 'static> {
+    pool: &'pool Pool<S>,
+    prompt: String,
+    config: Option<TaskOverrides>,
+    working_dir: Option<std::path::PathBuf>,
+    on_output: Option<crate::chain::OnOutputChunk>,
+}
+
+impl<'pool, S: PoolStore + 'static> RunOptions<'pool, S> {
+    /// Override per-task configuration for this run.
+    pub fn config(mut self, config: TaskOverrides) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Override the working directory for this run.
+    pub fn working_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(dir.into());
+        self
+    }
+
+    /// Set a streaming output callback.
+    ///
+    /// The callback is called with each text chunk as it arrives from Claude.
+    pub fn on_output(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.on_output = Some(Arc::new(f));
+        self
+    }
+}
+
+impl<'pool, S: PoolStore + 'static> IntoFuture for RunOptions<'pool, S> {
+    type Output = Result<TaskResult>;
+    type IntoFuture = Pin<Box<dyn std::future::Future<Output = Result<TaskResult>> + Send + 'pool>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            self.pool
+                .run_with_config_streaming(
+                    &self.prompt,
+                    self.config,
+                    self.on_output,
+                    self.working_dir,
+                )
+                .await
+        })
+    }
+}
+
 impl<S: PoolStore + 'static> Pool<S> {
     /// Create a builder with a custom store.
     pub fn builder_with_store(claude: Claude, store: S) -> PoolBuilder<S> {
@@ -212,77 +287,82 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
     }
 
-    /// Run a task synchronously, blocking until completion.
+    /// Begin building a synchronous task execution.
     ///
-    /// Assigns the task to the next idle slot, executes the prompt,
-    /// and returns the result.
-    pub async fn run(&self, prompt: &str) -> Result<TaskResult> {
-        self.run_with_config(prompt, None).await
+    /// Returns a [`RunOptions`] builder. Call `.await` immediately for the
+    /// simple case, or chain builder methods before awaiting:
+    ///
+    /// ```no_run
+    /// # async fn example() -> claude_pool::Result<()> {
+    /// # use claude_pool::{Pool, PoolConfig, TaskOverrides};
+    /// # let claude = claude_wrapper::Claude::builder().build()?;
+    /// # let pool = Pool::builder(claude).build().await?;
+    /// // Simple usage — identical to the old pool.run("prompt").await
+    /// let result = pool.run("write a haiku about rust").await?;
+    ///
+    /// // With overrides
+    /// let result = pool
+    ///     .run("refactor this file")
+    ///     .config(TaskOverrides { model: Some("claude-opus-4-6".into()), ..Default::default() })
+    ///     .working_dir("/tmp/myproject")
+    ///     .on_output(|chunk| print!("{chunk}"))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn run<'pool>(&'pool self, prompt: impl Into<String>) -> RunOptions<'pool, S> {
+        RunOptions {
+            pool: self,
+            prompt: prompt.into(),
+            config: None,
+            working_dir: None,
+            on_output: None,
+        }
     }
 
     /// Run a task with per-task config overrides.
+    ///
+    /// # Deprecated
+    ///
+    /// Use [`Pool::run`] with the builder instead:
+    /// `pool.run(prompt).config(config).await`
+    #[deprecated(since = "0.1.0", note = "use pool.run(prompt).config(config).await")]
     pub async fn run_with_config(
         &self,
         prompt: &str,
         task_config: Option<TaskOverrides>,
     ) -> Result<TaskResult> {
-        self.run_with_config_and_dir(prompt, task_config, None)
-            .await
+        let mut builder = self.run(prompt);
+        if let Some(cfg) = task_config {
+            builder = builder.config(cfg);
+        }
+        builder.await
     }
 
     /// Run a task with per-task config overrides and an optional working directory override.
+    ///
+    /// # Deprecated
+    ///
+    /// Use [`Pool::run`] with the builder instead:
+    /// `pool.run(prompt).config(config).working_dir(dir).await`
+    #[deprecated(
+        since = "0.1.0",
+        note = "use pool.run(prompt).config(config).working_dir(dir).await"
+    )]
     pub async fn run_with_config_and_dir(
         &self,
         prompt: &str,
         task_config: Option<TaskOverrides>,
         working_dir: Option<std::path::PathBuf>,
     ) -> Result<TaskResult> {
-        self.check_shutdown()?;
-        self.check_budget()?;
-
-        let task_id = TaskId(format!("task-{}", new_id()));
-
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: prompt.to_string(),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags: vec![],
-            config: task_config,
-            review_required: false,
-            max_rejections: 3,
-            rejection_count: 0,
-            original_prompt: None,
-        };
-        self.inner.store.put_task(record).await?;
-
-        let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
-        let result = crate::executor::execute_task(
-            &self.inner,
-            &task_id,
-            prompt,
-            &slot_id,
-            &slot_config,
-            working_dir.as_deref(),
-        )
-        .await;
-
-        self.release_slot(&slot_id, &task_id, &result).await?;
-
-        let task_result = result?;
-        // Update task record with result.
-        let mut task = self
-            .inner
-            .store
-            .get_task(&task_id)
-            .await?
-            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
-        task.state = TaskState::Completed;
-        task.result = Some(task_result.clone());
-        self.inner.store.put_task(task).await?;
-
-        Ok(task_result)
+        let mut builder = self.run(prompt);
+        if let Some(cfg) = task_config {
+            builder = builder.config(cfg);
+        }
+        if let Some(dir) = working_dir {
+            builder = builder.working_dir(dir);
+        }
+        builder.await
     }
 
     /// Run a task with per-task config overrides, optional streaming output,
@@ -290,7 +370,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     ///
     /// When `on_output` is `Some`, the task uses streaming execution and calls
     /// the callback with each text chunk as it arrives. When `None`, behaves
-    /// identically to [`run_with_config_and_dir`](Self::run_with_config_and_dir).
+    /// identically to the non-streaming path.
     pub(crate) async fn run_with_config_streaming(
         &self,
         prompt: &str,
