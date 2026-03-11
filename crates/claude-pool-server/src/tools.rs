@@ -169,6 +169,33 @@ pub struct SkillSaveInput {
     pub dir: Option<String>,
 }
 
+// ── Messaging input schemas ────────────────────────────────────────────
+
+/// Input for sending a message between slots.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendMessageInput {
+    /// Sender slot ID (e.g., "slot-0").
+    pub from: String,
+    /// Recipient slot ID (e.g., "slot-1").
+    pub to: String,
+    /// Message content.
+    pub content: String,
+}
+
+/// Input for reading messages from a slot's inbox.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadMessagesInput {
+    /// Slot ID to read messages from (e.g., "slot-0").
+    pub slot_id: String,
+}
+
+/// Input for peeking at messages in a slot's inbox.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PeekMessagesInput {
+    /// Slot ID to peek at messages from (e.g., "slot-0").
+    pub slot_id: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
@@ -1077,6 +1104,59 @@ pub fn pool_skill_save_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Too
         .build()
 }
 
+pub fn pool_send_message_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_send_message")
+        .title("Send Message Between Slots")
+        .description("Send a message from one slot to another. Returns the message ID.")
+        .handler(move |input: SendMessageInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let from = claude_pool::types::SlotId(input.from);
+                let to = claude_pool::types::SlotId(input.to);
+                let message_id = state.pool.send_message(from, to, input.content);
+                Ok(CallToolResult::json(serde_json::json!({
+                    "message_id": message_id,
+                })))
+            }
+        })
+        .build()
+}
+
+pub fn pool_read_messages_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_read_messages")
+        .title("Read Messages from Slot")
+        .description("Drain and read all messages for a slot, removing them from the inbox.")
+        .handler(move |input: ReadMessagesInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_id = claude_pool::types::SlotId(input.slot_id);
+                let messages = state.pool.read_messages(&slot_id);
+                Ok(CallToolResult::json(
+                    serde_json::to_value(&messages).unwrap(),
+                ))
+            }
+        })
+        .build()
+}
+
+pub fn pool_peek_messages_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_peek_messages")
+        .title("Peek Messages from Slot")
+        .description("Read messages from a slot's inbox without removing them.")
+        .read_only()
+        .handler(move |input: PeekMessagesInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let slot_id = claude_pool::types::SlotId(input.slot_id);
+                let messages = state.pool.peek_messages(&slot_id);
+                Ok(CallToolResult::json(
+                    serde_json::to_value(&messages).unwrap(),
+                ))
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
@@ -1100,6 +1180,9 @@ pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
         context_get_tool(Arc::clone(state)),
         context_delete_tool(Arc::clone(state)),
         context_list_tool(Arc::clone(state)),
+        pool_send_message_tool(Arc::clone(state)),
+        pool_read_messages_tool(Arc::clone(state)),
+        pool_peek_messages_tool(Arc::clone(state)),
         pool_configure_slot_tool(Arc::clone(state)),
         pool_skill_list_tool(Arc::clone(state)),
         pool_skill_get_tool(Arc::clone(state)),

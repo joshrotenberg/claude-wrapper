@@ -33,6 +33,7 @@ use claude_wrapper::types::OutputFormat;
 
 use crate::config::ResolvedConfig;
 use crate::error::{Error, Result};
+use crate::messaging::MessageBus;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::*;
@@ -52,6 +53,8 @@ struct PoolInner<S: PoolStore> {
     worktree_manager: Option<crate::worktree::WorktreeManager>,
     /// In-flight chain progress, keyed by task ID.
     chain_progress: dashmap::DashMap<String, crate::chain::ChainProgress>,
+    /// Message bus for inter-slot communication.
+    message_bus: MessageBus,
 }
 
 /// A pool of Claude CLI slots.
@@ -144,6 +147,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             assignment_lock: Mutex::new(()),
             worktree_manager,
             chain_progress: dashmap::DashMap::new(),
+            message_bus: MessageBus::default(),
         });
 
         // Register slots in the store.
@@ -805,6 +809,32 @@ impl<S: PoolStore + 'static> Pool<S> {
             .iter()
             .map(|r| (r.key().clone(), r.value().clone()))
             .collect()
+    }
+
+    /// Send a message from one slot to another.
+    ///
+    /// Returns the message ID.
+    pub fn send_message(&self, from: SlotId, to: SlotId, content: String) -> String {
+        self.inner.message_bus.send(from, to, content)
+    }
+
+    /// Read and drain all messages for a slot.
+    ///
+    /// Returns messages in order, removing them from the inbox.
+    pub fn read_messages(&self, slot_id: &SlotId) -> Vec<crate::messaging::Message> {
+        self.inner.message_bus.read(slot_id)
+    }
+
+    /// Peek at all messages for a slot without removing them.
+    ///
+    /// Returns messages in order without draining the inbox.
+    pub fn peek_messages(&self, slot_id: &SlotId) -> Vec<crate::messaging::Message> {
+        self.inner.message_bus.peek(slot_id)
+    }
+
+    /// Get the count of messages in a slot's inbox.
+    pub fn message_count(&self, slot_id: &SlotId) -> usize {
+        self.inner.message_bus.count(slot_id)
     }
 
     /// Gracefully shut down the pool.

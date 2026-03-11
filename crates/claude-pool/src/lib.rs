@@ -21,6 +21,7 @@
 pub mod chain;
 pub mod config;
 pub mod error;
+pub mod messaging;
 pub mod pool;
 pub mod skill;
 pub mod store;
@@ -34,6 +35,7 @@ pub use chain::{
     StepFailurePolicy, StepResult, execute_chain,
 };
 pub use error::{Error, Result};
+pub use messaging::{Message, MessageBus};
 pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
 pub use skill::{RegisteredSkill, Skill, SkillArgument, SkillRegistry, SkillScope, SkillSource};
 pub use store::{InMemoryStore, PoolStore};
