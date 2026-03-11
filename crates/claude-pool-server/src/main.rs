@@ -105,6 +105,13 @@ struct Cli {
     /// header with a valid token. When omitted, authentication is disabled.
     #[arg(long, value_delimiter = ',')]
     http_token: Vec<String>,
+
+    /// Working directory for pool operations.
+    ///
+    /// Defaults to the git repository root detected via `git rev-parse --show-toplevel`.
+    /// Required for worktree isolation to function correctly.
+    #[arg(long)]
+    working_dir: Option<PathBuf>,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -171,7 +178,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let claude = claude_wrapper::Claude::builder().build()?;
+    // Resolve working directory: explicit flag > git repo root > current dir.
+    let working_dir = if let Some(dir) = cli.working_dir {
+        dir
+    } else {
+        match std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+            }
+            _ => {
+                tracing::warn!(
+                    "not inside a git repository; worktree isolation will not work. \
+                     Use --working-dir to set a repo path explicitly."
+                );
+                std::env::current_dir().unwrap_or_default()
+            }
+        }
+    };
+    tracing::info!(working_dir = %working_dir.display(), "resolved working directory");
+
+    let claude = claude_wrapper::Claude::builder()
+        .working_dir(&working_dir)
+        .build()?;
 
     let pool = Pool::builder_with_store(claude, InMemoryStore::new())
         .slots(cli.slots)
