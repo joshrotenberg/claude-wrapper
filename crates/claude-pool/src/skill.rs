@@ -5,7 +5,7 @@
 //! then references them by name in `pool/run` or `pool/submit`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +103,15 @@ pub struct Skill {
     /// Example: `"[issue-number]"`, `"<file> [--verbose]"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+
+    /// Path to the skill's directory on disk.
+    ///
+    /// Set when loaded from a SKILL.md folder (project or global skills).
+    /// Used for `${CLAUDE_SKILL_DIR}` substitution in prompts, allowing
+    /// skills to reference bundled scripts and supporting files.
+    /// `None` for builtins and runtime-added skills.
+    #[serde(skip)]
+    pub skill_dir: Option<PathBuf>,
 }
 
 /// An argument accepted by a skill.
@@ -197,6 +206,7 @@ fn parse_skill_md(content: &str) -> crate::Result<Skill> {
         config,
         scope,
         argument_hint: fm.argument_hint,
+        skill_dir: None,
     })
 }
 
@@ -262,6 +272,16 @@ impl Skill {
             .any(|a| self.prompt.contains(&format!("{{{}}}", a.name)));
         if !has_arguments_var && !had_legacy_placeholders && !all_args.is_empty() {
             rendered.push_str(&format!("\n\nARGUMENTS: {all_args}"));
+        }
+
+        // ${CLAUDE_SKILL_DIR} substitution (Agent Skills standard).
+        if let Some(ref dir) = self.skill_dir {
+            rendered = rendered.replace("${CLAUDE_SKILL_DIR}", &dir.display().to_string());
+        } else if rendered.contains("${CLAUDE_SKILL_DIR}") {
+            rendered = rendered.replace(
+                "${CLAUDE_SKILL_DIR}",
+                "[CLAUDE_SKILL_DIR unavailable: skill has no directory]",
+            );
         }
 
         // Dynamic command injection: !`command` is replaced with stdout.
@@ -415,7 +435,8 @@ impl SkillRegistry {
                 let skill_md = path.join("SKILL.md");
                 if skill_md.is_file() {
                     let contents = std::fs::read_to_string(&skill_md)?;
-                    let skill = parse_skill_md(&contents)?;
+                    let mut skill = parse_skill_md(&contents)?;
+                    skill.skill_dir = Some(path.clone());
                     self.register(skill, source);
                     count += 1;
                 }
@@ -491,6 +512,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -515,6 +537,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let result = skill.render(&HashMap::new());
@@ -535,6 +558,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -569,6 +593,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -600,6 +625,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -623,6 +649,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -645,6 +672,7 @@ mod tests {
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
@@ -668,6 +696,7 @@ mod tests {
                 config: None,
                 scope: SkillScope::Task,
                 argument_hint: None,
+                skill_dir: None,
             },
             SkillSource::Runtime,
         );
@@ -830,6 +859,7 @@ mod tests {
                 config: None,
                 scope: SkillScope::Task,
                 argument_hint: None,
+                skill_dir: None,
             },
             SkillSource::Builtin,
         );
@@ -842,6 +872,7 @@ mod tests {
                 config: None,
                 scope: SkillScope::Task,
                 argument_hint: None,
+                skill_dir: None,
             },
             SkillSource::Runtime,
         );
@@ -1227,11 +1258,87 @@ Fix issue $ARGUMENTS.
             config: None,
             scope: SkillScope::Task,
             argument_hint: None,
+            skill_dir: None,
         };
 
         let mut args = HashMap::new();
         args.insert("task".into(), "the thing".into());
         let rendered = skill.render(&args).unwrap();
         assert_eq!(rendered, "Context: injected\n\nDo the thing.");
+    }
+
+    #[test]
+    fn skill_dir_substitution() {
+        let skill = Skill {
+            name: "vis".into(),
+            description: "Visualize".into(),
+            prompt: "Run: python ${CLAUDE_SKILL_DIR}/scripts/viz.py .".into(),
+            arguments: vec![],
+            config: None,
+            scope: SkillScope::Task,
+            argument_hint: None,
+            skill_dir: Some(PathBuf::from("/home/user/.claude-pool/skills/vis")),
+        };
+
+        let rendered = skill.render(&HashMap::new()).unwrap();
+        assert_eq!(
+            rendered,
+            "Run: python /home/user/.claude-pool/skills/vis/scripts/viz.py ."
+        );
+    }
+
+    #[test]
+    fn skill_dir_substitution_missing() {
+        let skill = Skill {
+            name: "vis".into(),
+            description: "Visualize".into(),
+            prompt: "Run: python ${CLAUDE_SKILL_DIR}/scripts/viz.py .".into(),
+            arguments: vec![],
+            config: None,
+            scope: SkillScope::Task,
+            argument_hint: None,
+            skill_dir: None,
+        };
+
+        let rendered = skill.render(&HashMap::new()).unwrap();
+        assert!(rendered.contains("[CLAUDE_SKILL_DIR unavailable"));
+    }
+
+    #[test]
+    fn skill_dir_no_substitution_when_absent() {
+        let skill = Skill {
+            name: "simple".into(),
+            description: "Simple".into(),
+            prompt: "Do the thing.".into(),
+            arguments: vec![],
+            config: None,
+            scope: SkillScope::Task,
+            argument_hint: None,
+            skill_dir: None,
+        };
+
+        let rendered = skill.render(&HashMap::new()).unwrap();
+        assert_eq!(rendered, "Do the thing.");
+    }
+
+    #[test]
+    fn skill_dir_set_from_directory_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my_skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my_skill\ndescription: Test\n---\n\nRun ${CLAUDE_SKILL_DIR}/run.sh",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        registry.load_from_dir(dir.path()).unwrap();
+
+        let skill = registry.get("my_skill").unwrap();
+        assert_eq!(skill.skill_dir.as_deref(), Some(skill_dir.as_path()));
+
+        let rendered = skill.render(&HashMap::new()).unwrap();
+        assert!(rendered.contains(&skill_dir.display().to_string()));
     }
 }
