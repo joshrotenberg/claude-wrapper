@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
+use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
 
 const FAKE_CLAUDE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -64,4 +64,89 @@ async fn fake_claude_non_zero_exit_is_error() {
     let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
 
     assert!(result.is_err(), "non-zero exit should be an error");
+}
+
+/// Verify that stream_query fires the handler for each NDJSON event type.
+#[tokio::test]
+async fn streaming_ndjson_parsed_correctly() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "streamed response")]);
+    let cmd = QueryCommand::new("test prompt")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    stream_query(&claude, &cmd, |event| events.push(event))
+        .await
+        .expect("streaming should succeed");
+
+    // Fake binary emits exactly three lines: system, assistant, result.
+    assert_eq!(events.len(), 3, "expected 3 events, got {}", events.len());
+    assert_eq!(events[0].event_type(), Some("system"));
+    assert_eq!(events[1].event_type(), Some("assistant"));
+    assert_eq!(events[2].event_type(), Some("result"));
+}
+
+/// Verify that the result event contains the correct session_id, result text,
+/// and cost fields.
+#[tokio::test]
+async fn streaming_extracts_cost_and_session() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "test output"),
+        ("FAKE_CLAUDE_SESSION_ID", "test-session-123"),
+    ]);
+    let cmd = QueryCommand::new("test prompt")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let mut result_event: Option<StreamEvent> = None;
+    stream_query(&claude, &cmd, |event| {
+        if event.is_result() {
+            result_event = Some(event);
+        }
+    })
+    .await
+    .expect("streaming should succeed");
+
+    let result = result_event.expect("should have received a result event");
+    assert_eq!(result.session_id(), Some("test-session-123"));
+    assert_eq!(result.result_text(), Some("test output"));
+    assert_eq!(result.cost_usd(), Some(0.0));
+}
+
+/// Verify that a short timeout fires before the fake binary finishes sleeping.
+#[tokio::test]
+async fn fake_claude_timeout_fires() {
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "5")
+        .timeout_secs(1)
+        .build()
+        .expect("failed to build client");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    assert!(result.is_err(), "expected a timeout error");
+    let err_str = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err_str.contains("timeout") || err_str.contains("timed out"),
+        "expected timeout error, got: {err_str}"
+    );
+}
+
+/// Verify that pointing at a nonexistent binary surfaces an error at execution
+/// time (not at build time).
+#[tokio::test]
+async fn binary_not_found_returns_error() {
+    let claude = Claude::builder()
+        .binary("/nonexistent/binary/fake-claude")
+        .build()
+        .expect("builder should not validate binary existence");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    assert!(result.is_err(), "should fail when binary does not exist");
 }

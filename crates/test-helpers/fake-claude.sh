@@ -6,6 +6,7 @@
 #   FAKE_CLAUDE_EXIT_CODE   - exit code to return (default: 0)
 #   FAKE_CLAUDE_SESSION_ID  - session_id in JSON output (default: "fake-session-id")
 #   FAKE_CLAUDE_ERROR_MSG   - error message for stderr on non-zero exit
+#   FAKE_CLAUDE_DELAY       - seconds to sleep before any output (default: 0)
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -16,6 +17,12 @@ OUTPUT="${FAKE_CLAUDE_OUTPUT:-fake response}"
 EXIT_CODE="${FAKE_CLAUDE_EXIT_CODE:-0}"
 SESSION_ID="${FAKE_CLAUDE_SESSION_ID:-fake-session-id}"
 ERROR_MSG="${FAKE_CLAUDE_ERROR_MSG:-command failed}"
+DELAY="${FAKE_CLAUDE_DELAY:-0}"
+
+# Optional delay before any output - used to test timeouts.
+if [[ "$DELAY" -gt 0 ]]; then
+    sleep "$DELAY"
+fi
 
 if [[ "$EXIT_CODE" -ne 0 ]]; then
     echo "$ERROR_MSG" >&2
