@@ -181,12 +181,14 @@ impl McpConfigBuilder {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::Error::Io {
                 message: format!("failed to create directory: {}", parent.display()),
                 source: e,
+                working_dir: None,
             })?;
         }
 
         std::fs::write(&path, json).map_err(|e| crate::error::Error::Io {
             message: format!("failed to write MCP config to {}", path.display()),
             source: e,
+            working_dir: None,
         })?;
 
         Ok(path)
@@ -229,12 +231,14 @@ impl McpConfigBuilder {
             .map_err(|e| crate::error::Error::Io {
                 message: "failed to create temp MCP config file".to_string(),
                 source: e,
+                working_dir: None,
             })?;
 
         file.write_all(json.as_bytes())
             .map_err(|e| crate::error::Error::Io {
                 message: "failed to write temp MCP config".to_string(),
                 source: e,
+                working_dir: None,
             })?;
 
         Ok(TempMcpConfig { file })

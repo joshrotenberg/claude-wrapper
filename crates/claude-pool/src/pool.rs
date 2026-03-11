@@ -1968,6 +1968,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: "Allow Bash tool? (y/n)".into(),
+            working_dir: None,
         };
         let result = detect_permission_prompt(&err, "slot-1");
         assert!(result.is_some());
@@ -1990,6 +1991,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: "Claude wants to use Edit tool.".into(),
+            working_dir: None,
         };
         let result = detect_permission_prompt(&err, "slot-2");
         assert!(result.is_some());
@@ -2008,6 +2010,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: "some unrelated error output".into(),
+            working_dir: None,
         };
         assert!(detect_permission_prompt(&err, "slot-1").is_none());
     }
@@ -2019,6 +2022,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: String::new(),
+            working_dir: None,
         };
         assert!(detect_permission_prompt(&err, "slot-1").is_none());
     }

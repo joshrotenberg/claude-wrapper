@@ -150,3 +150,89 @@ async fn binary_not_found_returns_error() {
 
     assert!(result.is_err(), "should fail when binary does not exist");
 }
+
+/// Verify that CommandFailed includes the working directory in its error message.
+#[tokio::test]
+async fn command_failed_includes_working_dir() {
+    use claude_wrapper::Error;
+
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_EXIT_CODE", "1")
+        .env("FAKE_CLAUDE_ERROR_MSG", "oops")
+        .working_dir(dir.path())
+        .build()
+        .expect("failed to build client");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Error::CommandFailed { working_dir, .. } => {
+            assert_eq!(working_dir.as_deref(), Some(dir.path()));
+        }
+        other => panic!("expected CommandFailed, got {other:?}"),
+    }
+}
+
+/// Verify that CommandFailed error message includes the working directory path.
+#[tokio::test]
+async fn command_failed_error_message_includes_working_dir() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_EXIT_CODE", "1")
+        .working_dir(dir.path())
+        .build()
+        .expect("failed to build client");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains(dir.path().to_str().unwrap()),
+        "error message should include working dir, got: {err_str}"
+    );
+}
+
+/// Verify that spawn failure (nonexistent binary) includes the working directory.
+#[tokio::test]
+async fn io_error_includes_working_dir() {
+    use claude_wrapper::Error;
+
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let claude = Claude::builder()
+        .binary("/nonexistent/binary/fake-claude")
+        .working_dir(dir.path())
+        .build()
+        .expect("builder should not validate binary existence");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Error::Io { working_dir, .. } => {
+            assert_eq!(working_dir.as_deref(), Some(dir.path()));
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
+/// Verify that without a working directory set, working_dir is None in errors.
+#[tokio::test]
+async fn command_failed_without_working_dir_is_none() {
+    use claude_wrapper::Error;
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_EXIT_CODE", "1")]);
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        Error::CommandFailed { working_dir, .. } => {
+            assert!(working_dir.is_none());
+        }
+        other => panic!("expected CommandFailed, got {other:?}"),
+    }
+}

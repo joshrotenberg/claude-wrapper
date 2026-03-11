@@ -123,6 +123,7 @@ async fn run_supervised(
                 exit_code: 1,
                 stdout: String::new(),
                 stderr: format!("max restarts ({}) exceeded", config.max_restarts),
+                working_dir: None,
             });
         }
 
@@ -140,6 +141,7 @@ async fn run_supervised(
                     "budget exhausted: ${:.4} >= ${:.4}",
                     state.total_cost, config.total_budget_usd
                 ),
+                working_dir: None,
             });
         }
 
