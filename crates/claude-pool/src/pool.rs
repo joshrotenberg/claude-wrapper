@@ -30,12 +30,13 @@ use tokio::sync::Mutex;
 
 use claude_wrapper::Claude;
 
-use crate::cli_parsing::{extract_failure_details, new_id};
+use crate::cli_parsing::extract_failure_details;
 use crate::error::{Error, Result};
 use crate::messaging::MessageBus;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::*;
+use crate::utils::new_id;
 
 /// Shared pool state behind an `Arc`.
 pub(crate) struct PoolInner<S: PoolStore> {

@@ -29,6 +29,7 @@ pub mod skill;
 pub mod store;
 pub mod supervisor;
 pub mod types;
+pub(crate) mod utils;
 pub mod workflow;
 pub mod worktree;
 
