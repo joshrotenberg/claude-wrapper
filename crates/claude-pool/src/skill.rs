@@ -3,6 +3,38 @@
 //! Skills are parameterized templates that define how to approach a specific
 //! kind of task. The coordinator discovers them via MCP prompt listing,
 //! then references them by name in `pool/run` or `pool/submit`.
+//!
+//! # Skill directory layout
+//!
+//! Skills follow the [Agent Skills](https://agentskills.io) standard directory
+//! layout. Each skill lives in its own folder with a `SKILL.md` file:
+//!
+//! ```text
+//! .claude-pool/skills/
+//!   my_skill/
+//!     SKILL.md          # Required: frontmatter + prompt
+//!     scripts/           # Optional: bundled scripts
+//!       analyze.py
+//!     templates/         # Optional: prompt templates
+//!       report.md
+//!     examples/          # Optional: example inputs/outputs
+//!       input.json
+//! ```
+//!
+//! Supporting files can be referenced in prompts via `${CLAUDE_SKILL_DIR}`:
+//!
+//! ```text
+//! ---
+//! name: analyze
+//! description: Run analysis script
+//! ---
+//! Run the analysis:
+//! python ${CLAUDE_SKILL_DIR}/scripts/analyze.py .
+//! ```
+//!
+//! The `${CLAUDE_SKILL_DIR}` variable resolves to the skill's directory path
+//! at render time. It is available for project and global skills loaded from
+//! disk, but not for builtins or runtime-added skills.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
