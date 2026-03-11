@@ -412,6 +412,10 @@ impl QueryCommand {
         if let Some(ref format) = self.output_format {
             args.push("--output-format".to_string());
             args.push(format.as_arg().to_string());
+            // CLI v2.1.72+ requires --verbose when using stream-json with --print
+            if matches!(format, OutputFormat::StreamJson) {
+                args.push("--verbose".to_string());
+            }
         }
 
         if let Some(budget) = self.max_budget_usd {
@@ -590,6 +594,8 @@ mod tests {
         assert!(args.contains(&"--system-prompt".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"json".to_string()));
+        // json format should NOT include --verbose (only stream-json needs it)
+        assert!(!args.contains(&"--verbose".to_string()));
         assert!(args.contains(&"--max-budget-usd".to_string()));
         assert!(args.contains(&"--permission-mode".to_string()));
         assert!(args.contains(&"bypassPermissions".to_string()));
@@ -601,6 +607,15 @@ mod tests {
         assert!(args.contains(&"--no-session-persistence".to_string()));
         // Prompt is last
         assert_eq!(args.last().unwrap(), "explain this");
+    }
+
+    #[test]
+    fn test_stream_json_includes_verbose() {
+        let cmd = QueryCommand::new("test").output_format(OutputFormat::StreamJson);
+        let args = cmd.args();
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--verbose".to_string()));
     }
 
     #[test]
