@@ -624,6 +624,108 @@ pub fn builtin_skills() -> Vec<Skill> {
             scope: SkillScope::Coordinator,
         },
         Skill {
+            name: "pool_dashboard".into(),
+            description: "Monitor pool health: slot utilization, queue depth, budget spend, \
+                          and active chains. Reports only changes between iterations. Designed \
+                          for /loop usage."
+                .into(),
+            prompt: "Generate a pool health dashboard. Compare against previous state and \
+                     report changes.\n\n\
+                     ## Step 1: Gather Current State\n\n\
+                     Call these MCP tools and collect the results:\n\
+                     1. `pool_status` - get slot counts, task counts, spend, budget\n\
+                     2. `pool_find_slots` with no filters - get all slot details\n\
+                     3. `context_get` key: `pool_dashboard_state` - get previous snapshot\n\n\
+                     ## Step 2: Compare and Detect Changes\n\n\
+                     Compare current vs previous snapshot. Track:\n\
+                     - **Slot state changes**: idle->busy, busy->idle, errored, stopped\n\
+                     - **Queue depth changes**: pending tasks increasing (backlog) or clearing\n\
+                     - **Budget consumption**: spend delta since last check, % remaining\n\
+                     - **New completions**: tasks completed since last check\n\
+                     - **Errors**: any slots in errored state, failed tasks\n\n\
+                     ## Step 3: Format Output\n\n\
+                     Always show the compact dashboard header:\n\
+                     ```\n\
+                     Pool: {idle}/{total} idle | Queue: {pending} pending, {running} running | \
+                     Spend: ${spend/100} / ${budget/100}\n\
+                     ```\n\n\
+                     If changes detected, add a Changes section:\n\
+                     ```\n\
+                     Changes:\n\
+                     - slot-0: idle -> busy (task-abc)\n\
+                     - 3 tasks completed ($0.12 spent)\n\
+                     - Budget: 45% -> 52% consumed\n\
+                     ```\n\n\
+                     If no changes: just show the header line with \"(no changes)\".\n\n\
+                     ## Step 4: Store State\n\n\
+                     Call `context_set` with key `pool_dashboard_state` and a compact JSON \
+                     snapshot of current state for next iteration comparison.\n\n\
+                     ## Usage\n\n\
+                     `/loop 2m pool_skill_run skill: \"pool_dashboard\"`"
+                .into(),
+            arguments: vec![],
+            config: None,
+            scope: SkillScope::Coordinator,
+        },
+        Skill {
+            name: "chain_watcher".into(),
+            description: "Watch one or more active chains and report step progress changes. \
+                          Designed for /loop usage to babysit long-running chains."
+                .into(),
+            prompt: "Monitor active chains and report progress changes.\n\n\
+                     ## Step 1: Gather State\n\n\
+                     1. Get previous state: `context_get` key: `chain_watcher_state`\n\
+                     2. Get the list of chain task IDs to watch from the previous state, \
+                        or from the arguments if this is the first run.\n\
+                     3. For each chain ID, call `pool_chain_result` to get current progress.\n\n\
+                     ## Step 2: Detect Changes\n\n\
+                     For each chain, compare current vs previous:\n\
+                     - **Step transitions**: step N completed, step N+1 started\n\
+                     - **Completions**: chain finished (success or failure)\n\
+                     - **Cost accumulation**: new spend since last check\n\
+                     - **Retries**: if a step used retries, note it\n\
+                     - **Failures**: step failed, chain stopped\n\n\
+                     ## Step 3: Format Output\n\n\
+                     Compact per-chain status line:\n\
+                     ```\n\
+                     chain-abc: [3/5] running \"test\" ($0.08)\n\
+                     chain-def: [5/5] completed ($0.15)\n\
+                     chain-ghi: [2/4] FAILED at \"build\" ($0.04)\n\
+                     ```\n\n\
+                     If changes since last check, add details:\n\
+                     ```\n\
+                     Changes:\n\
+                     - chain-abc: step \"lint\" completed (0 retries), started \"test\"\n\
+                     - chain-def: completed successfully, total cost $0.15\n\
+                     ```\n\n\
+                     If no changes: show status lines with \"(no changes)\".\n\n\
+                     ## Step 4: Store State\n\n\
+                     Call `context_set` key: `chain_watcher_state` with JSON:\n\
+                     ```json\n\
+                     {{\n\
+                       \"chain_ids\": [\"chain-abc\", \"chain-def\"],\n\
+                       \"snapshots\": {{\n\
+                         \"chain-abc\": {{ \"step\": 2, \"status\": \"running\", \"cost\": 8000 }},\n\
+                         \"chain-def\": {{ \"step\": 4, \"status\": \"completed\", \"cost\": 15000 }}\n\
+                       }}\n\
+                     }}\n\
+                     ```\n\n\
+                     ## Usage\n\n\
+                     `/loop 1m pool_skill_run skill: \"chain_watcher\" arguments: \
+                     {{ \"chain_ids\": \"chain-abc,chain-def\" }}`\n\n\
+                     On subsequent iterations, chain IDs are loaded from context state. \
+                     Completed/failed chains are kept in the report until removed."
+                .into(),
+            arguments: vec![SkillArgument {
+                name: "chain_ids".into(),
+                description: "Comma-separated chain task IDs to watch (only needed on first run)."
+                    .into(),
+                required: false,
+            }],
+            config: None,
+            scope: SkillScope::Coordinator,
+        },
+        Skill {
             name: "plan_then_execute".into(),
             description: "Two-phase workflow: plan in read-only mode, then execute after review. \
                           Use for complex or risky tasks where you want to approve the approach \
@@ -947,8 +1049,8 @@ mod tests {
     #[test]
     fn builtins_load() {
         let registry = SkillRegistry::with_builtins();
-        // 7 task-scoped + 2 coordinator-scoped = 9 builtins
-        assert_eq!(registry.list().len(), 10);
+        // 7 task + 4 coordinator + 1 chain = 12 builtins
+        assert_eq!(registry.list().len(), 12);
         // Task-scoped
         assert!(registry.get("code_review").is_some());
         assert!(registry.get("implement").is_some());
@@ -960,6 +1062,8 @@ mod tests {
         // Coordinator-scoped
         assert!(registry.get("issue_watcher").is_some());
         assert!(registry.get("loop_monitor").is_some());
+        assert!(registry.get("pool_dashboard").is_some());
+        assert!(registry.get("chain_watcher").is_some());
     }
 
     #[test]
@@ -970,7 +1074,7 @@ mod tests {
         let chains = registry.list_by_scope(SkillScope::Chain);
 
         assert_eq!(tasks.len(), 7);
-        assert_eq!(coordinators.len(), 2);
+        assert_eq!(coordinators.len(), 4);
         assert_eq!(chains.len(), 1);
     }
 
