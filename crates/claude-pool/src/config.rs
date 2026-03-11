@@ -5,6 +5,8 @@
 //! 2. [`SlotConfig`] — per-slot overrides
 //! 3. [`SlotConfig`] on a task record — per-task overrides
 
+use std::collections::HashMap;
+
 use claude_wrapper::types::{Effort, PermissionMode};
 
 use crate::types::{PoolConfig, SlotConfig};
@@ -20,13 +22,19 @@ pub struct ResolvedConfig {
     pub system_prompt: Option<String>,
     pub allowed_tools: Vec<String>,
     pub effort: Option<Effort>,
+    /// Merged MCP servers from global + slot + task layers.
+    /// Later layers override earlier layers by server name.
+    pub mcp_servers: HashMap<String, serde_json::Value>,
+    /// Whether to pass `--strict-mcp-config` to the CLI.
+    pub strict_mcp_config: bool,
 }
 
 impl ResolvedConfig {
     /// Resolve configuration by layering global, slot, and task configs.
     ///
     /// Later layers override earlier layers for scalar fields.
-    /// List fields (allowed_tools) are merged.
+    /// Map/list fields (allowed_tools, mcp_servers) are merged additively,
+    /// with later layers overriding same-named entries.
     pub fn resolve(global: &PoolConfig, slot: &SlotConfig, task: Option<&SlotConfig>) -> Self {
         let model = task
             .and_then(|t| t.model.clone())
@@ -65,6 +73,20 @@ impl ResolvedConfig {
             allowed_tools.extend(tt.iter().cloned());
         }
 
+        // Merge MCP servers: global base, slot overrides/adds, task overrides/adds.
+        // Same-named servers in later layers replace earlier ones.
+        let mut mcp_servers = global.mcp_servers.clone();
+        if let Some(ref slot_servers) = slot.mcp_servers {
+            mcp_servers.extend(slot_servers.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if let Some(task_cfg) = task
+            && let Some(ref task_servers) = task_cfg.mcp_servers
+        {
+            mcp_servers.extend(task_servers.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        let strict_mcp_config = global.strict_mcp_config;
+
         Self {
             model,
             permission_mode,
@@ -72,6 +94,8 @@ impl ResolvedConfig {
             system_prompt,
             allowed_tools,
             effort,
+            mcp_servers,
+            strict_mcp_config,
         }
     }
 }
@@ -90,6 +114,8 @@ mod tests {
         assert_eq!(resolved.permission_mode, PermissionMode::Plan);
         assert!(resolved.model.is_none());
         assert!(resolved.allowed_tools.is_empty());
+        assert!(resolved.mcp_servers.is_empty());
+        assert!(resolved.strict_mcp_config);
     }
 
     #[test]
@@ -150,5 +176,83 @@ mod tests {
             resolved.allowed_tools,
             vec!["Bash", "Read", "Write", "Edit"]
         );
+    }
+
+    #[test]
+    fn mcp_servers_merge() {
+        let global = PoolConfig {
+            mcp_servers: [(
+                "hub".to_string(),
+                serde_json::json!({"type": "http", "url": "http://global/"}),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let slot = SlotConfig {
+            mcp_servers: Some(
+                [(
+                    "tool".to_string(),
+                    serde_json::json!({"type": "stdio", "command": "npx"}),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&global, &slot, None);
+
+        assert_eq!(resolved.mcp_servers.len(), 2);
+        assert!(resolved.mcp_servers.contains_key("hub"));
+        assert!(resolved.mcp_servers.contains_key("tool"));
+    }
+
+    #[test]
+    fn task_mcp_servers_override_slot() {
+        let global = PoolConfig::default();
+        let slot = SlotConfig {
+            mcp_servers: Some(
+                [(
+                    "hub".to_string(),
+                    serde_json::json!({"type": "http", "url": "http://slot/"}),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let task = SlotConfig {
+            mcp_servers: Some(
+                [(
+                    "hub".to_string(),
+                    serde_json::json!({"type": "http", "url": "http://task/"}),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&global, &slot, Some(&task));
+
+        assert_eq!(resolved.mcp_servers["hub"]["url"], "http://task/");
+    }
+
+    #[test]
+    fn strict_mcp_config_defaults_true() {
+        let global = PoolConfig::default();
+        let slot = SlotConfig::default();
+        let resolved = ResolvedConfig::resolve(&global, &slot, None);
+        assert!(resolved.strict_mcp_config);
+    }
+
+    #[test]
+    fn strict_mcp_config_can_be_disabled() {
+        let global = PoolConfig {
+            strict_mcp_config: false,
+            ..Default::default()
+        };
+        let slot = SlotConfig::default();
+        let resolved = ResolvedConfig::resolve(&global, &slot, None);
+        assert!(!resolved.strict_mcp_config);
     }
 }

@@ -24,6 +24,9 @@ pub struct RunInput {
     pub model: Option<String>,
     /// Effort override for this task (min, low, medium, high, max).
     pub effort: Option<String>,
+    /// Additional MCP servers for this task (merged with global/slot servers).
+    /// Keys are server names, values are server config objects.
+    pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -36,6 +39,9 @@ pub struct SubmitInput {
     pub effort: Option<String>,
     /// Tags for grouping/filtering.
     pub tags: Option<Vec<String>>,
+    /// Additional MCP servers for this task (merged with global/slot servers).
+    /// Keys are server names, values are server config objects.
+    pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -175,13 +181,18 @@ fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
     }
 }
 
-fn task_config_from(model: Option<String>, effort: Option<String>) -> Option<SlotConfig> {
-    if model.is_none() && effort.is_none() {
+fn task_config_from(
+    model: Option<String>,
+    effort: Option<String>,
+    mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+) -> Option<SlotConfig> {
+    if model.is_none() && effort.is_none() && mcp_servers.is_none() {
         return None;
     }
     Some(SlotConfig {
         model,
         effort: effort.and_then(|e| parse_effort(&e)),
+        mcp_servers,
         ..Default::default()
     })
 }
@@ -231,7 +242,7 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .handler(move |input: RunInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort);
+                let config = task_config_from(input.model, input.effort, input.mcp_servers);
                 match state.pool.run_with_config(&input.prompt, config).await {
                     Ok(result) => Ok(CallToolResult::json(serde_json::to_value(&result).unwrap())),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
@@ -248,7 +259,7 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .handler(move |input: SubmitInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort);
+                let config = task_config_from(input.model, input.effort, input.mcp_servers);
                 let tags = input.tags.unwrap_or_default();
                 match state
                     .pool
@@ -529,7 +540,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
                 },
                 _ => claude_pool::StepAction::Prompt { prompt: s.value },
             };
-            let config = task_config_from(s.model, s.effort);
+            let config = task_config_from(s.model, s.effort, None);
             let failure_policy = claude_pool::StepFailurePolicy {
                 retries: s.retries.unwrap_or(0),
                 recovery_prompt: s.recovery_prompt,

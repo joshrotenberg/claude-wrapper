@@ -153,6 +153,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
                 cost_microdollars: 0,
                 restart_count: 0,
                 worktree_path,
+                mcp_config_path: None,
             };
             inner.store.put_slot(record).await?;
         }
@@ -634,6 +635,21 @@ impl<S: PoolStore + 'static> Pool<S> {
             mgr.cleanup_all(&slot_ids).await?;
         }
 
+        // Clean up per-slot MCP config temp files.
+        for slot_id in &slot_ids {
+            if let Some(slot) = self.inner.store.get_slot(slot_id).await?
+                && let Some(ref path) = slot.mcp_config_path
+                && let Err(e) = std::fs::remove_file(path)
+            {
+                tracing::warn!(
+                    slot_id = %slot_id.0,
+                    path = %path.display(),
+                    error = %e,
+                    "failed to clean up slot MCP config"
+                );
+            }
+        }
+
         Ok(DrainSummary {
             total_cost_microdollars: total_cost,
             total_tasks_completed: total_tasks,
@@ -757,6 +773,7 @@ impl<S: PoolStore + 'static> Pool<S> {
                 cost_microdollars: 0,
                 restart_count: 0,
                 worktree_path,
+                mcp_config_path: None,
             };
             self.inner.store.put_slot(record).await?;
         }
@@ -935,6 +952,60 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(())
     }
 
+    /// Ensure a per-slot MCP config temp file exists. Writes a new one on first
+    /// call for a given slot, then reuses the stored path on subsequent calls.
+    ///
+    /// Returns the path to the temp file.
+    async fn ensure_slot_mcp_config(
+        &self,
+        slot_id: &SlotId,
+        servers: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<std::path::PathBuf> {
+        // Check if this slot already has a temp file.
+        if let Some(slot) = self.inner.store.get_slot(slot_id).await?
+            && let Some(ref path) = slot.mcp_config_path
+        {
+            // Re-write the file in case servers changed (task-level overrides).
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": servers
+            }))?;
+            std::fs::write(path, json)?;
+            return Ok(path.clone());
+        }
+
+        // First call for this slot — create a new temp file.
+        use std::io::Write as _;
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": servers
+        }))?;
+        let mut file = tempfile::Builder::new()
+            .prefix(&format!("claude-pool-{}-", slot_id.0))
+            .suffix(".mcp.json")
+            .tempfile()?;
+        file.write_all(json.as_bytes())?;
+
+        // Persist the temp file (prevents deletion on drop) and store the path.
+        let path = file
+            .into_temp_path()
+            .keep()
+            .map_err(std::io::Error::other)?
+            .to_path_buf();
+
+        if let Some(mut slot) = self.inner.store.get_slot(slot_id).await? {
+            slot.mcp_config_path = Some(path.clone());
+            self.inner.store.put_slot(slot).await?;
+        }
+
+        tracing::debug!(
+            slot_id = %slot_id.0,
+            path = %path.display(),
+            servers = servers.len(),
+            "created slot MCP config"
+        );
+
+        Ok(path)
+    }
+
     /// Execute a task on a specific slot by invoking the Claude CLI.
     async fn execute_task(
         &self,
@@ -976,6 +1047,19 @@ impl<S: PoolStore + 'static> Pool<S> {
             cmd = cmd.allowed_tools(&resolved.allowed_tools);
         }
 
+        // Write per-slot MCP config if servers are configured.
+        // Reuses an existing temp file if the slot already has one; otherwise
+        // writes a new one and stores the path on the slot record.
+        if !resolved.mcp_servers.is_empty() {
+            let mcp_path = self
+                .ensure_slot_mcp_config(slot_id, &resolved.mcp_servers)
+                .await?;
+            cmd = cmd.mcp_config(mcp_path.to_string_lossy());
+            if resolved.strict_mcp_config {
+                cmd = cmd.strict_mcp_config();
+            }
+        }
+
         // Use worktree working dir if the slot has one, otherwise use default.
         let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
             // Resume session if the slot has one.
@@ -996,6 +1080,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             slot_id = %slot_id.0,
             model = ?resolved.model,
             effort = ?resolved.effort,
+            mcp_servers = resolved.mcp_servers.len(),
             "executing task"
         );
 

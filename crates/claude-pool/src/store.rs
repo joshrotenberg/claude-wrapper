@@ -165,6 +165,7 @@ mod tests {
             cost_microdollars: 0,
             restart_count: 0,
             worktree_path: None,
+            mcp_config_path: None,
         };
 
         store.put_slot(record).await.unwrap();

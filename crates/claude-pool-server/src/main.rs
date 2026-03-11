@@ -82,6 +82,21 @@ struct Cli {
     /// Disable specific skills by name (comma-separated).
     #[arg(long, value_delimiter = ',')]
     disable_skill: Vec<String>,
+
+    /// Path to an .mcp.json file defining MCP servers available to all slots.
+    ///
+    /// The file format is `{"mcpServers": {"name": {...}}}`.
+    /// Servers defined here are passed to slots via `--mcp-config`.
+    #[arg(long, value_name = "PATH")]
+    mcp_config: Option<PathBuf>,
+
+    /// Disable strict MCP config mode.
+    ///
+    /// By default, `--strict-mcp-config` is passed to slots so they only use
+    /// the servers defined in the pool config (not the coordinator's .mcp.json).
+    /// Pass this flag to allow slots to also inherit the coordinator's servers.
+    #[arg(long)]
+    no_strict_mcp_config: bool,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -118,6 +133,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
+    // Load MCP servers from --mcp-config file if provided.
+    let mcp_servers = if let Some(ref path) = cli.mcp_config {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read --mcp-config {}: {e}", path.display()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| format!("invalid JSON in --mcp-config: {e}"))?;
+        parsed["mcpServers"]
+            .as_object()
+            .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let config = PoolConfig {
         model: cli.model,
         effort: cli.effort.and_then(|e| parse_effort(&e)),
@@ -129,6 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_slots: cli.min_slots,
             max_slots: cli.max_slots,
         },
+        mcp_servers,
+        strict_mcp_config: !cli.no_strict_mcp_config,
         ..Default::default()
     };
 
