@@ -82,17 +82,17 @@ pub async fn run_claude_allow_exit_codes(
     let output = run_claude(claude, args).await;
 
     match output {
-        Err(Error::CommandFailed { exit_code, .. }) if allowed_codes.contains(&exit_code) => {
-            // Re-run to get the output without the error — this is a bit wasteful
-            // but keeps the API clean. In practice, we capture before erroring.
-            // TODO: refactor to capture output before checking exit code
-            Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code,
-                success: false,
-            })
-        }
+        Err(Error::CommandFailed {
+            exit_code,
+            stdout,
+            stderr,
+            ..
+        }) if allowed_codes.contains(&exit_code) => Ok(CommandOutput {
+            stdout,
+            stderr,
+            exit_code,
+            success: false,
+        }),
         other => other,
     }
 }
