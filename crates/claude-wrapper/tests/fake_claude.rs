@@ -236,3 +236,99 @@ async fn command_failed_without_working_dir_is_none() {
         other => panic!("expected CommandFailed, got {other:?}"),
     }
 }
+
+/// Verify that Session tracks cumulative cost and turns across queries.
+#[tokio::test]
+async fn session_query_resumes_and_tracks_cost() {
+    use claude_wrapper::session::Session;
+
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "first"),
+        ("FAKE_CLAUDE_SESSION_ID", "sess-001"),
+        ("FAKE_CLAUDE_COST_USD", "0.05"),
+        ("FAKE_CLAUDE_NUM_TURNS", "3"),
+    ]);
+
+    // Initial query to get a session
+    let first = QueryCommand::new("start")
+        .execute_json(&claude)
+        .await
+        .expect("initial query should succeed");
+
+    assert_eq!(first.session_id, "sess-001");
+
+    let mut session = Session::from_result(&claude, &first);
+    assert_eq!(session.id(), "sess-001");
+    assert!((session.total_cost_usd() - 0.05).abs() < f64::EPSILON);
+    assert_eq!(session.total_turns(), 3);
+
+    // Follow-up query accumulates
+    let second = session
+        .query("follow up")
+        .execute()
+        .await
+        .expect("follow-up query should succeed");
+
+    assert_eq!(second.session_id, "sess-001");
+    assert!((session.total_cost_usd() - 0.10).abs() < f64::EPSILON);
+    assert_eq!(session.total_turns(), 6);
+}
+
+/// Verify that Session::fork() uses --fork-session and returns a new session.
+#[tokio::test]
+async fn session_fork_creates_new_session() {
+    use claude_wrapper::session::Session;
+
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "forked"),
+        ("FAKE_CLAUDE_SESSION_ID", "sess-original"),
+        ("FAKE_CLAUDE_FORKED_SESSION_ID", "sess-forked"),
+        ("FAKE_CLAUDE_COST_USD", "0.02"),
+        ("FAKE_CLAUDE_NUM_TURNS", "1"),
+    ]);
+
+    let session = Session::from_id(&claude, "sess-original");
+
+    let (forked, result) = session
+        .fork("branch this conversation")
+        .await
+        .expect("fork should succeed");
+
+    assert_eq!(result.session_id, "sess-forked");
+    assert_eq!(forked.id(), "sess-forked");
+    // Original session is not modified
+    assert_eq!(session.id(), "sess-original");
+}
+
+/// Verify that Session::continue_recent() uses --continue on the first query.
+#[tokio::test]
+async fn session_continue_recent() {
+    use claude_wrapper::session::Session;
+
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "continued"),
+        ("FAKE_CLAUDE_SESSION_ID", "sess-recent"),
+        ("FAKE_CLAUDE_COST_USD", "0.01"),
+        ("FAKE_CLAUDE_NUM_TURNS", "2"),
+    ]);
+
+    let (mut session, first) = Session::continue_recent(&claude, "continue from before")
+        .await
+        .expect("continue_recent should succeed");
+
+    assert_eq!(first.session_id, "sess-recent");
+    assert_eq!(session.id(), "sess-recent");
+    assert!((session.total_cost_usd() - 0.01).abs() < f64::EPSILON);
+    assert_eq!(session.total_turns(), 2);
+
+    // Subsequent query uses --resume
+    let second = session
+        .query("and then?")
+        .execute()
+        .await
+        .expect("follow-up should succeed");
+
+    assert_eq!(second.session_id, "sess-recent");
+    assert!((session.total_cost_usd() - 0.02).abs() < f64::EPSILON);
+    assert_eq!(session.total_turns(), 4);
+}

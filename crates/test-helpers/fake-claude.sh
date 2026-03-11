@@ -7,6 +7,9 @@
 #   FAKE_CLAUDE_SESSION_ID  - session_id in JSON output (default: "fake-session-id")
 #   FAKE_CLAUDE_ERROR_MSG   - error message for stderr on non-zero exit
 #   FAKE_CLAUDE_DELAY       - seconds to sleep before any output (default: 0)
+#   FAKE_CLAUDE_COST_USD    - cost in JSON output (default: 0.0)
+#   FAKE_CLAUDE_NUM_TURNS   - num_turns in JSON output (default: 1)
+#   FAKE_CLAUDE_FORKED_SESSION_ID - session_id when --fork-session is present
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -18,6 +21,8 @@ EXIT_CODE="${FAKE_CLAUDE_EXIT_CODE:-0}"
 SESSION_ID="${FAKE_CLAUDE_SESSION_ID:-fake-session-id}"
 ERROR_MSG="${FAKE_CLAUDE_ERROR_MSG:-command failed}"
 DELAY="${FAKE_CLAUDE_DELAY:-0}"
+COST_USD="${FAKE_CLAUDE_COST_USD:-0.0}"
+NUM_TURNS="${FAKE_CLAUDE_NUM_TURNS:-1}"
 
 # Optional delay before any output - used to test timeouts.
 if [[ "$DELAY" -gt 0 ]]; then
@@ -29,19 +34,26 @@ if [[ "$EXIT_CODE" -ne 0 ]]; then
     exit "$EXIT_CODE"
 fi
 
-# Parse --output-format value from args
+# Parse --output-format value and detect --fork-session from args
 OUTPUT_FORMAT=""
+FORK_SESSION=false
 args=("$@")
 for i in "${!args[@]}"; do
     if [[ "${args[$i]}" == "--output-format" ]]; then
         OUTPUT_FORMAT="${args[$((i+1))]}"
-        break
     fi
     if [[ "${args[$i]}" == --output-format=* ]]; then
         OUTPUT_FORMAT="${args[$i]#--output-format=}"
-        break
+    fi
+    if [[ "${args[$i]}" == "--fork-session" ]]; then
+        FORK_SESSION=true
     fi
 done
+
+# Override session ID when --fork-session is present.
+if [[ "$FORK_SESSION" == "true" && -n "$FAKE_CLAUDE_FORKED_SESSION_ID" ]]; then
+    SESSION_ID="$FAKE_CLAUDE_FORKED_SESSION_ID"
+fi
 
 if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     # Emit NDJSON matching real claude's stream-json format.
@@ -49,11 +61,11 @@ if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
     printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
     printf '{"type":"assistant","message":{"id":"msg_fake","type":"message","role":"assistant","content":[{"type":"text","text":"%s"}],"model":"claude-fake","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":3}},"session_id":"%s"}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
-    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","cost_usd":0.0,"total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
+    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","cost_usd":%s,"total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$COST_USD" "$NUM_TURNS"
 elif [[ "$OUTPUT_FORMAT" == "json" ]]; then
     # Emit a single JSON object matching QueryResult.
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
-    printf '{"result":"%s","session_id":"%s","total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
+    printf '{"result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS"
 else
     # Plain text.
     printf '%s\n' "$OUTPUT"

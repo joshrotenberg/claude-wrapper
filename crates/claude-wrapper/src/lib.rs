@@ -169,6 +169,8 @@ pub mod error;
 pub mod exec;
 pub mod mcp_config;
 pub mod retry;
+#[cfg(feature = "json")]
+pub mod session;
 pub mod streaming;
 pub mod types;
 pub mod version;
@@ -202,6 +204,8 @@ pub use exec::CommandOutput;
 pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use retry::{BackoffStrategy, RetryPolicy};
+#[cfg(feature = "json")]
+pub use session::{Session, SessionQuery};
 pub use types::*;
 pub use version::{CliVersion, VersionParseError};
 
