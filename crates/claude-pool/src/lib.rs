@@ -37,7 +37,7 @@ pub use error::{Error, Result};
 pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
 pub use skill::{RegisteredSkill, Skill, SkillArgument, SkillRegistry, SkillScope, SkillSource};
 pub use store::{InMemoryStore, PoolStore};
-pub use supervisor::SupervisorHandle;
+pub use supervisor::{SupervisorHandle, check_and_restart_slots};
 pub use types::*;
 pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};
 pub use worktree::WorktreeManager;

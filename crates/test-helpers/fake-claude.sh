@@ -45,12 +45,15 @@ done
 
 if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     # Emit NDJSON matching real claude's stream-json format.
+    # Escape the output for safe embedding in a JSON string value.
+    ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
     printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
-    printf '{"type":"assistant","message":{"id":"msg_fake","type":"message","role":"assistant","content":[{"type":"text","text":"%s"}],"model":"claude-fake","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":3}},"session_id":"%s"}\n' "$OUTPUT" "$SESSION_ID"
-    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","cost_usd":0.0,"total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$OUTPUT" "$SESSION_ID"
+    printf '{"type":"assistant","message":{"id":"msg_fake","type":"message","role":"assistant","content":[{"type":"text","text":"%s"}],"model":"claude-fake","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":3}},"session_id":"%s"}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
+    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","cost_usd":0.0,"total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
 elif [[ "$OUTPUT_FORMAT" == "json" ]]; then
     # Emit a single JSON object matching QueryResult.
-    printf '{"result":"%s","session_id":"%s","total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$OUTPUT" "$SESSION_ID"
+    ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+    printf '{"result":"%s","session_id":"%s","total_cost_usd":0.0,"num_turns":1,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
 else
     # Plain text.
     printf '%s\n' "$OUTPUT"

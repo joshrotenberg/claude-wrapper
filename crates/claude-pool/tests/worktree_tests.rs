@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for git worktree management.
 
 mod helpers;

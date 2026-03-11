@@ -1,5 +1,9 @@
 //! Test helpers for claude-pool integration tests.
+//!
+//! These helpers use shell scripts and Unix permissions, so they are
+//! only available on Unix platforms.
 
+#![cfg(unix)]
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -8,7 +12,7 @@ use std::process::Command;
 /// Path to the fake-claude.sh script relative to the workspace root.
 pub const FAKE_CLAUDE_SCRIPT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../test-helpers/fake-claude.sh"
+    "/../test-helpers/fake-claude.sh"
 );
 
 /// Return the path to the fake-claude binary.
@@ -51,4 +55,42 @@ pub fn claude_with_fake_binary(fake_binary: &Path) -> claude_wrapper::Claude {
         .binary(fake_binary)
         .build()
         .expect("failed to build Claude client")
+}
+
+/// Build a [`claude_wrapper::Claude`] client with env vars injected.
+///
+/// Passes env vars via the builder (safe for Rust 2024 — no `set_var`).
+pub fn claude_with_fake_binary_env(
+    fake_binary: &Path,
+    env: &[(&str, &str)],
+) -> claude_wrapper::Claude {
+    let mut builder = claude_wrapper::Claude::builder().binary(fake_binary);
+    for (k, v) in env {
+        builder = builder.env(*k, *v);
+    }
+    builder.build().expect("failed to build Claude client")
+}
+
+/// Write a temporary wrapper shell script that sets env vars before exec-ing the real binary.
+///
+/// Returns the temp file (keep it alive for the duration of the test).
+/// This approach avoids `std::env::set_var` (unsafe in Rust 2024).
+pub fn write_env_wrapper(env: &[(&str, &str)], target: &Path) -> tempfile::NamedTempFile {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::NamedTempFile::new().expect("temp file");
+    let mut script = String::from("#!/bin/sh\n");
+    for (k, v) in env {
+        // Shell-escape the value: wrap in single quotes, escape embedded single quotes.
+        let escaped = v.replace('\'', "'\\''");
+        write!(script, "{}='{}' ", k, escaped).unwrap();
+    }
+    writeln!(script, "exec {} \"$@\"", target.display()).unwrap();
+
+    std::fs::write(tmp.path(), &script).expect("write wrapper");
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod wrapper");
+
+    tmp
 }
