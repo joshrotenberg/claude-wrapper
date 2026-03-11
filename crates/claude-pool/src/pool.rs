@@ -1925,6 +1925,7 @@ mod tests {
                 retries: 0,
                 recovery_prompt: None,
             },
+            output_vars: Default::default(),
         }];
 
         let chain2 = vec![crate::chain::ChainStep {
@@ -1937,6 +1938,7 @@ mod tests {
                 retries: 0,
                 recovery_prompt: None,
             },
+            output_vars: Default::default(),
         }];
 
         let chains = vec![chain1, chain2];

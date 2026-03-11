@@ -103,6 +103,7 @@ impl Workflow {
                 action,
                 config: ws.config.clone(),
                 failure_policy: ws.failure_policy.clone(),
+                output_vars: Default::default(),
             });
         }
 
