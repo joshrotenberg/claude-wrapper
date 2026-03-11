@@ -1,8 +1,9 @@
 //! claude-pool MCP server binary.
 //!
 //! Manages a pool of Claude CLI slots, exposed as an MCP server
-//! over stdio transport.
+//! over stdio or HTTP transport.
 
+mod auth;
 mod prompts;
 mod resources;
 mod tools;
@@ -97,6 +98,29 @@ struct Cli {
     /// Pass this flag to allow slots to also inherit the coordinator's servers.
     #[arg(long)]
     no_strict_mcp_config: bool,
+
+    /// Use HTTP transport instead of stdio.
+    ///
+    /// When enabled, the server listens on an HTTP port for MCP requests
+    /// using the Streamable HTTP transport (SSE for notifications).
+    /// Multiple coordinators can connect simultaneously.
+    #[arg(long)]
+    http: bool,
+
+    /// Port to listen on for HTTP transport.
+    #[arg(long, default_value = "3100")]
+    port: u16,
+
+    /// Bind address for HTTP transport.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind: String,
+
+    /// Bearer tokens for HTTP authentication (comma-separated).
+    ///
+    /// When set, all HTTP requests must include an `Authorization: Bearer <token>`
+    /// header with a valid token. When omitted, authentication is disabled.
+    #[arg(long, value_delimiter = ',')]
+    http_token: Vec<String>,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -255,10 +279,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router = router.resource_template(template);
     }
 
-    tracing::info!(slots = cli.slots, "claude-pool-server starting");
+    if cli.http {
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = router;
+            return Err("--http requires the `http` feature: install with `cargo install claude-pool-server --features http`".into());
+        }
 
-    let mut transport = StdioTransport::new(router);
-    transport.run().await?;
+        #[cfg(feature = "http")]
+        {
+            let addr = format!("{}:{}", cli.bind, cli.port);
+
+            let tokens = auth::BearerTokens::new(cli.http_token);
+            if tokens.is_empty() {
+                tracing::warn!(
+                    "HTTP transport started without authentication -- use --http-token for production"
+                );
+            }
+
+            let app = build_http_app(router, tokens);
+
+            tracing::info!(slots = cli.slots, %addr, "claude-pool-server starting (HTTP)");
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, app).await?;
+        }
+    } else {
+        tracing::info!(slots = cli.slots, "claude-pool-server starting (stdio)");
+        let mut transport = StdioTransport::new(router);
+        transport.run().await?;
+    }
 
     Ok(())
+}
+
+/// Build an axum application with optional bearer token authentication.
+#[cfg(feature = "http")]
+fn build_http_app(router: McpRouter, tokens: auth::BearerTokens) -> axum::Router {
+    use tower_mcp::HttpTransport;
+
+    let transport = HttpTransport::new(router).disable_origin_validation();
+    let app = transport.into_router();
+
+    if tokens.is_empty() {
+        app
+    } else {
+        app.layer(axum::middleware::from_fn(move |req, next| {
+            bearer_auth_middleware(req, next, tokens.clone())
+        }))
+    }
+}
+
+/// Axum middleware that validates `Authorization: Bearer <token>` headers.
+#[cfg(feature = "http")]
+async fn bearer_auth_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    tokens: auth::BearerTokens,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Allow unauthenticated access to health endpoint.
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+
+    let authorized = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| tokens.validate(token));
+
+    if authorized {
+        next.run(req).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
 }

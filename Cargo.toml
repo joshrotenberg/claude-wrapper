@@ -24,7 +24,7 @@ tracing = "0.1"
 anyhow = "1"
 async-trait = "0.1"
 dashmap = "6"
-tower-mcp = "0.8"
+tower-mcp = { version = "0.8", default-features = false }
 schemars = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
