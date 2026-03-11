@@ -1054,6 +1054,7 @@ pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                     config,
                     scope,
                     argument_hint: None,
+                    skill_dir: None,
                 };
                 let mut registry = state.skills.write().await;
                 let overwritten = registry.get(&input.name).is_some();
