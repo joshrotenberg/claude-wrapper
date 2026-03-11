@@ -34,7 +34,7 @@ impl SupervisorHandle {
 ///
 /// Errored slots below the restart limit are reset to idle.
 /// Returns the number of slots restarted.
-pub(crate) async fn check_and_restart_slots<S: PoolStore + 'static>(pool: &Pool<S>) -> usize {
+pub async fn check_and_restart_slots<S: PoolStore + 'static>(pool: &Pool<S>) -> usize {
     let max_restarts = pool.config().max_restarts;
     let slots = match pool.store().list_slots().await {
         Ok(s) => s,
