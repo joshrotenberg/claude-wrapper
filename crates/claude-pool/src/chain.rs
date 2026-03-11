@@ -7,6 +7,8 @@
 //! for async execution via [`Pool::submit_chain`](crate::Pool::submit_chain).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +117,17 @@ pub struct ChainProgress {
     pub current_step: Option<usize>,
     /// Name of the currently running step.
     pub current_step_name: Option<String>,
+    /// Live partial output from the currently running step.
+    ///
+    /// Updated incrementally as streaming output arrives. `None` when
+    /// no step is running (chain completed or not yet started).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_partial_output: Option<String>,
+    /// Unix timestamp (seconds) when the current step started.
+    ///
+    /// Callers can compute elapsed time as `now - started_at`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_started_at: Option<u64>,
     /// Completed step results so far.
     pub completed_steps: Vec<StepResult>,
     /// Overall status.
@@ -135,6 +148,16 @@ pub enum ChainStatus {
     Cancelled,
 }
 
+/// Callback for receiving partial output chunks during streaming execution.
+pub type OnOutputChunk = Arc<dyn Fn(&str) + Send + Sync>;
+
+fn unix_secs_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Execute a chain of steps against the pool.
 pub async fn execute_chain<S: PoolStore + 'static>(
     pool: &Pool<S>,
@@ -147,7 +170,9 @@ pub async fn execute_chain<S: PoolStore + 'static>(
 /// Execute a chain with optional progress tracking.
 ///
 /// If `chain_task_id` is provided, intermediate progress is stored so callers
-/// can poll for status.
+/// can poll for status. When a chain task ID is present, steps execute with
+/// streaming output so partial results are visible via
+/// [`Pool::chain_progress`](crate::Pool::chain_progress).
 pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     pool: &Pool<S>,
     skills: &SkillRegistry,
@@ -196,6 +221,8 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
                 total_steps: steps.len(),
                 current_step: Some(step_idx),
                 current_step_name: Some(step.name.clone()),
+                current_step_partial_output: Some(String::new()),
+                current_step_started_at: Some(unix_secs_now()),
                 completed_steps: step_results.clone(),
                 status: ChainStatus::Running,
             };
@@ -204,8 +231,18 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
 
         let prompt = render_step_prompt(step, &previous_output, skills)?;
 
+        // Build an output callback that updates chain progress when we have a task ID.
+        let on_output: Option<OnOutputChunk> = chain_task_id.map(|tid| {
+            let pool = pool.clone();
+            let tid = tid.clone();
+            Arc::new(move |chunk: &str| {
+                pool.append_chain_partial_output(&tid, chunk);
+            }) as OnOutputChunk
+        });
+
         let (step_result, step_cost) =
-            execute_step_with_retries(pool, step, &prompt, &previous_output, skills).await;
+            execute_step_with_retries(pool, step, &prompt, &previous_output, skills, on_output)
+                .await;
 
         total_cost += step_cost;
 
@@ -307,6 +344,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
     initial_prompt: &str,
     previous_output: &str,
     skills: &SkillRegistry,
+    on_output: Option<OnOutputChunk>,
 ) -> (std::result::Result<StepResult, String>, u64) {
     let max_attempts = 1 + step.failure_policy.retries;
     let mut total_cost = 0u64;
@@ -323,7 +361,11 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
             }
         };
 
-        match pool.run_with_config(&prompt, step.config.clone()).await {
+        let result = pool
+            .run_with_config_streaming(&prompt, step.config.clone(), on_output.clone())
+            .await;
+
+        match result {
             Ok(task_result) => {
                 total_cost += task_result.cost_microdollars;
                 if task_result.success {
@@ -363,10 +405,11 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
 
         tracing::info!(step = %step.name, "attempting recovery prompt");
 
-        match pool
-            .run_with_config(&recovery_prompt, step.config.clone())
-            .await
-        {
+        let result = pool
+            .run_with_config_streaming(&recovery_prompt, step.config.clone(), on_output)
+            .await;
+
+        match result {
             Ok(task_result) => {
                 total_cost += task_result.cost_microdollars;
                 return (
@@ -403,6 +446,8 @@ async fn update_chain_progress_final<S: PoolStore + 'static>(
             total_steps,
             current_step: None,
             current_step_name: None,
+            current_step_partial_output: None,
+            current_step_started_at: None,
             completed_steps: completed_steps.to_vec(),
             status,
         };
@@ -465,11 +510,13 @@ mod tests {
     }
 
     #[test]
-    fn chain_progress_serializes() {
+    fn chain_progress_serializes_with_partial_output() {
         let progress = ChainProgress {
             total_steps: 3,
             current_step: Some(1),
             current_step_name: Some("implement".into()),
+            current_step_partial_output: Some("partial text".into()),
+            current_step_started_at: Some(1700000000),
             completed_steps: vec![StepResult {
                 name: "plan".into(),
                 output: "planned".into(),
@@ -484,6 +531,42 @@ mod tests {
         let json = serde_json::to_string(&progress).unwrap();
         assert!(json.contains("implement"));
         assert!(json.contains("running"));
+        assert!(json.contains("partial text"));
+        assert!(json.contains("1700000000"));
+    }
+
+    #[test]
+    fn chain_progress_omits_none_fields() {
+        let progress = ChainProgress {
+            total_steps: 2,
+            current_step: None,
+            current_step_name: None,
+            current_step_partial_output: None,
+            current_step_started_at: None,
+            completed_steps: vec![],
+            status: ChainStatus::Completed,
+        };
+
+        let json = serde_json::to_string(&progress).unwrap();
+        assert!(!json.contains("current_step_partial_output"));
+        assert!(!json.contains("current_step_started_at"));
+    }
+
+    #[test]
+    fn chain_progress_empty_partial_output_when_step_starts() {
+        let progress = ChainProgress {
+            total_steps: 3,
+            current_step: Some(0),
+            current_step_name: Some("plan".into()),
+            current_step_partial_output: Some(String::new()),
+            current_step_started_at: Some(1700000000),
+            completed_steps: vec![],
+            status: ChainStatus::Running,
+        };
+
+        let json = serde_json::to_string(&progress).unwrap();
+        // Empty string is still serialized (not None).
+        assert!(json.contains("\"current_step_partial_output\":\"\""));
     }
 
     #[test]
@@ -492,6 +575,8 @@ mod tests {
             total_steps: 3,
             current_step: None,
             current_step_name: None,
+            current_step_partial_output: None,
+            current_step_started_at: None,
             completed_steps: vec![
                 StepResult {
                     name: "plan".into(),

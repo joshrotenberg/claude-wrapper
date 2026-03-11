@@ -239,6 +239,54 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(task_result)
     }
 
+    /// Run a task with per-task config overrides and optional streaming output.
+    ///
+    /// When `on_output` is `Some`, the task uses streaming execution and calls
+    /// the callback with each text chunk as it arrives. When `None`, behaves
+    /// identically to [`run_with_config`](Self::run_with_config).
+    pub(crate) async fn run_with_config_streaming(
+        &self,
+        prompt: &str,
+        task_config: Option<SlotConfig>,
+        on_output: Option<crate::chain::OnOutputChunk>,
+    ) -> Result<TaskResult> {
+        self.check_shutdown()?;
+        self.check_budget()?;
+
+        let task_id = TaskId(format!("task-{}", new_id()));
+
+        let record = TaskRecord {
+            id: task_id.clone(),
+            prompt: prompt.to_string(),
+            state: TaskState::Pending,
+            slot_id: None,
+            result: None,
+            tags: vec![],
+            config: task_config,
+        };
+        self.inner.store.put_task(record).await?;
+
+        let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
+        let result = self
+            .execute_task_streaming(&task_id, prompt, &slot_id, &slot_config, on_output)
+            .await;
+
+        self.release_slot(&slot_id, &task_id, &result).await?;
+
+        let task_result = result?;
+        let mut task = self
+            .inner
+            .store
+            .get_task(&task_id)
+            .await?
+            .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
+        task.state = TaskState::Completed;
+        task.result = Some(task_result.clone());
+        self.inner.store.put_task(task).await?;
+
+        Ok(task_result)
+    }
+
     /// Submit a task for async execution, returning the task ID immediately.
     ///
     /// Use [`Pool::result`] to poll for completion.
@@ -453,6 +501,8 @@ impl<S: PoolStore + 'static> Pool<S> {
             total_steps: steps.len(),
             current_step: None,
             current_step_name: None,
+            current_step_partial_output: None,
+            current_step_started_at: None,
             completed_steps: vec![],
             status: crate::chain::ChainStatus::Running,
         };
@@ -593,6 +643,18 @@ impl<S: PoolStore + 'static> Pool<S> {
         self.inner
             .chain_progress
             .insert(task_id.0.clone(), progress);
+    }
+
+    /// Append a text chunk to the current step's partial output.
+    ///
+    /// Called from the streaming output callback during chain execution.
+    /// This is a synchronous DashMap mutation — fast and lock-free.
+    pub(crate) fn append_chain_partial_output(&self, task_id: &TaskId, chunk: &str) {
+        if let Some(mut progress) = self.inner.chain_progress.get_mut(&task_id.0)
+            && let Some(ref mut partial) = progress.current_step_partial_output
+        {
+            partial.push_str(chunk);
+        }
     }
 
     /// Set a shared context value.
@@ -1133,6 +1195,169 @@ impl<S: PoolStore + 'static> Pool<S> {
             cost_microdollars,
             turns_used: query_result.num_turns.unwrap_or(0),
             session_id: Some(query_result.session_id),
+        })
+    }
+
+    /// Execute a task with optional streaming output.
+    ///
+    /// When `on_output` is `Some`, uses streaming execution (`stream-json` format)
+    /// and calls the callback with each text chunk as it arrives. When `None`,
+    /// falls back to the standard `execute_task` path.
+    async fn execute_task_streaming(
+        &self,
+        task_id: &TaskId,
+        prompt: &str,
+        slot_id: &SlotId,
+        slot_config: &SlotConfig,
+        on_output: Option<crate::chain::OnOutputChunk>,
+    ) -> Result<TaskResult> {
+        // If no streaming callback, use the standard non-streaming path.
+        let on_output = match on_output {
+            Some(cb) => cb,
+            None => {
+                return self
+                    .execute_task(task_id, prompt, slot_id, slot_config)
+                    .await;
+            }
+        };
+
+        let task_record = self.inner.store.get_task(task_id).await?;
+        let task_cfg = task_record.as_ref().and_then(|t| t.config.as_ref());
+        let resolved = ResolvedConfig::resolve(&self.inner.config, slot_config, task_cfg);
+
+        let system_prompt = self.build_system_prompt(&resolved, slot_config);
+
+        // Build the query with StreamJson format for streaming.
+        let mut cmd = claude_wrapper::QueryCommand::new(prompt)
+            .output_format(OutputFormat::StreamJson)
+            .permission_mode(resolved.permission_mode);
+
+        if resolved.permission_mode == PermissionMode::BypassPermissions {
+            cmd = cmd.dangerously_skip_permissions();
+        }
+        if let Some(ref model) = resolved.model {
+            cmd = cmd.model(model);
+        }
+        if let Some(max_turns) = resolved.max_turns {
+            cmd = cmd.max_turns(max_turns);
+        }
+        if let Some(ref sp) = system_prompt {
+            cmd = cmd.system_prompt(sp);
+        }
+        if let Some(effort) = resolved.effort {
+            cmd = cmd.effort(effort);
+        }
+        if !resolved.allowed_tools.is_empty() {
+            cmd = cmd.allowed_tools(&resolved.allowed_tools);
+        }
+
+        if !resolved.mcp_servers.is_empty() {
+            let mcp_path = self
+                .ensure_slot_mcp_config(slot_id, &resolved.mcp_servers)
+                .await?;
+            cmd = cmd.mcp_config(mcp_path.to_string_lossy());
+            if resolved.strict_mcp_config {
+                cmd = cmd.strict_mcp_config();
+            }
+        }
+
+        let claude_instance = if let Some(slot) = self.inner.store.get_slot(slot_id).await? {
+            if let Some(ref session_id) = slot.session_id {
+                cmd = cmd.resume(session_id);
+            }
+            if let Some(ref wt_path) = slot.worktree_path {
+                self.inner.claude.with_working_dir(wt_path)
+            } else {
+                self.inner.claude.clone()
+            }
+        } else {
+            self.inner.claude.clone()
+        };
+
+        tracing::debug!(
+            slot_id = %slot_id.0,
+            model = ?resolved.model,
+            effort = ?resolved.effort,
+            mcp_servers = resolved.mcp_servers.len(),
+            "executing task (streaming)"
+        );
+
+        // Collect the final result from stream events.
+        let mut result_text = String::new();
+        let mut session_id = String::new();
+        let mut cost_usd: Option<f64> = None;
+        let mut is_error = false;
+
+        let stream_result = claude_wrapper::streaming::stream_query(
+            &claude_instance,
+            &cmd,
+            |event: claude_wrapper::streaming::StreamEvent| {
+                match event.event_type() {
+                    Some("result") => {
+                        if let Some(text) = event.result_text() {
+                            result_text = text.to_string();
+                        }
+                        if let Some(sid) = event.session_id() {
+                            session_id = sid.to_string();
+                        }
+                        cost_usd = event.cost_usd();
+                        is_error = event
+                            .data
+                            .get("is_error")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                    }
+                    Some("assistant") => {
+                        // Extract text from content blocks in assistant messages.
+                        // Content may be at top level or nested under message.
+                        let content_sources = [
+                            event.data.get("content"),
+                            event.data.get("message").and_then(|m| m.get("content")),
+                        ];
+                        for content in content_sources.into_iter().flatten() {
+                            for block in content.as_array().into_iter().flatten() {
+                                if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                                    && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                                {
+                                    on_output(text);
+                                }
+                            }
+                        }
+                    }
+                    Some("content_block_delta") => {
+                        // Handle incremental text deltas.
+                        if let Some(delta) = event.data.get("delta")
+                            && delta.get("type").and_then(|t| t.as_str()) == Some("text_delta")
+                            && let Some(text) = delta.get("text").and_then(|t| t.as_str())
+                        {
+                            on_output(text);
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .await;
+
+        match stream_result {
+            Ok(_) => {}
+            Err(e) if self.inner.config.detect_permission_prompts => {
+                if let Some(detected) = detect_permission_prompt(&e, &slot_id.0) {
+                    return Err(detected);
+                }
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let cost_microdollars = cost_usd.map(|c| (c * 1_000_000.0) as u64).unwrap_or(0);
+
+        Ok(TaskResult {
+            output: result_text,
+            success: !is_error,
+            cost_microdollars,
+            turns_used: 0,
+            session_id: Some(session_id),
         })
     }
 
@@ -1763,6 +1988,8 @@ mod tests {
                 total_steps: 3,
                 current_step: Some(1),
                 current_step_name: Some("implement".into()),
+                current_step_partial_output: None,
+                current_step_started_at: None,
                 completed_steps: vec![],
                 status: crate::chain::ChainStatus::Running,
             },
@@ -1814,5 +2041,66 @@ mod tests {
         let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
         let result = pool.cancel_chain(&TaskId("nonexistent".into())).await;
         assert!(matches!(result, Err(Error::TaskNotFound(_))));
+    }
+
+    // ── Live output tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn append_chain_partial_output_accumulates() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+
+        let task_id = TaskId("chain-test".into());
+        let progress = crate::chain::ChainProgress {
+            total_steps: 2,
+            current_step: Some(0),
+            current_step_name: Some("plan".into()),
+            current_step_partial_output: Some(String::new()),
+            current_step_started_at: Some(1700000000),
+            completed_steps: vec![],
+            status: crate::chain::ChainStatus::Running,
+        };
+        pool.set_chain_progress(&task_id, progress).await;
+
+        pool.append_chain_partial_output(&task_id, "hello ");
+        pool.append_chain_partial_output(&task_id, "world");
+
+        let progress = pool.chain_progress(&task_id).unwrap();
+        assert_eq!(
+            progress.current_step_partial_output.as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[tokio::test]
+    async fn append_chain_partial_output_noop_when_none() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+
+        let task_id = TaskId("chain-test-2".into());
+        // Progress with partial output = None (completed state).
+        let progress = crate::chain::ChainProgress {
+            total_steps: 1,
+            current_step: None,
+            current_step_name: None,
+            current_step_partial_output: None,
+            current_step_started_at: None,
+            completed_steps: vec![],
+            status: crate::chain::ChainStatus::Completed,
+        };
+        pool.set_chain_progress(&task_id, progress).await;
+
+        // Should not panic or create a partial output field.
+        pool.append_chain_partial_output(&task_id, "ignored");
+
+        let progress = pool.chain_progress(&task_id).unwrap();
+        assert!(progress.current_step_partial_output.is_none());
+    }
+
+    #[tokio::test]
+    async fn append_chain_partial_output_noop_for_missing_task() {
+        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+
+        // Should not panic when task doesn't exist.
+        let task_id = TaskId("nonexistent".into());
+        pool.append_chain_partial_output(&task_id, "ignored");
     }
 }
