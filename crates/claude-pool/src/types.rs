@@ -253,6 +253,8 @@ pub enum TaskState {
     Failed,
     /// Task was cancelled.
     Cancelled,
+    /// Task completed but awaits coordinator approval before being considered done.
+    PendingReview,
 }
 
 /// A task submitted to the pool.
@@ -278,6 +280,26 @@ pub struct TaskRecord {
 
     /// Per-task config overrides (takes precedence over slot and global config).
     pub config: Option<SlotConfig>,
+
+    /// When true, completed tasks transition to `PendingReview` instead of `Completed`.
+    #[serde(default)]
+    pub review_required: bool,
+
+    /// Maximum number of rejections before the task is marked as failed (default: 3).
+    #[serde(default = "default_max_rejections")]
+    pub max_rejections: u32,
+
+    /// Number of times this task has been rejected and re-queued.
+    #[serde(default)]
+    pub rejection_count: u32,
+
+    /// The original prompt before any rejection feedback was appended.
+    #[serde(default)]
+    pub original_prompt: Option<String>,
+}
+
+fn default_max_rejections() -> u32 {
+    3
 }
 
 /// The result of a completed task.
