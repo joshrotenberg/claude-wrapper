@@ -99,7 +99,7 @@ claude-pool-server -n 4 --budget-usd 10.0 --model sonnet
 
 ## Features
 
-- **claude-wrapper**: Type-safe CLI wrapper with full option coverage (28 options), MCP server management, plugin management, streaming NDJSON events
+- **claude-wrapper**: Type-safe CLI wrapper with full option coverage (28 options), MCP server management, plugin management, streaming NDJSON events, session management
 - **claude-pool**: Multi-slot coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, budget control, shared context injection, optional worktree isolation, reusable skills registry
 - **claude-pool-server**: Standalone MCP server binary, configurable via CLI flags, full pool tool exposure, MCP resources for state inspection
 
@@ -124,13 +124,7 @@ cargo install claude-pool-server
 
 ## Status
 
-**Production-ready.** All three crates are actively maintained with comprehensive test coverage (85+ tests).
-
-### Latest Releases
-
-- **claude-wrapper** v0.2.0 - Full CLI surface, streaming, all subcommands
-- **claude-pool** v0.1.0 - Slot pool, chains, skills, worktree isolation
-- **claude-pool-server** v0.1.0 - MCP server with all tools and resources
+**Production-ready.** All three crates are actively maintained with comprehensive test coverage (168+ lib tests, plus integration and doc tests).
 
 ### Implemented
 

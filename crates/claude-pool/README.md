@@ -215,22 +215,32 @@ All tasks run concurrently. Returns when all complete (or timeout).
 Execute steps in order, with control over failures:
 
 ```rust
-use claude_pool::{ChainStep, StepFailurePolicy};
+use claude_pool::{ChainStep, StepAction, StepFailurePolicy};
 
 let steps = vec![
-    ChainStep::new("analyze the error").with_policy(StepFailurePolicy::Abort),
-    ChainStep::new("write a fix").with_policy(StepFailurePolicy::Retry(2)),
-    ChainStep::new("write tests").with_policy(StepFailurePolicy::Skip),
+    ChainStep {
+        name: "analyze".into(),
+        action: StepAction::Prompt { prompt: "analyze the error".into() },
+        config: None,
+        failure_policy: StepFailurePolicy::default(),
+        output_vars: Default::default(),
+    },
+    ChainStep {
+        name: "fix".into(),
+        action: StepAction::Prompt { prompt: "write a fix based on {previous_output}".into() },
+        config: None,
+        failure_policy: StepFailurePolicy { retries: 2, recovery_prompt: None },
+        output_vars: Default::default(),
+    },
 ];
 
-let result = execute_chain(&pool, steps, ChainOptions::default()).await?;
-println!("Chain result: {}", result.final_output);
+let task_id = pool.submit_chain(steps, &skills, ChainOptions::default()).await?;
+let result = pool.result(&task_id).await?;
 ```
 
 Failure policies:
-- **Abort** - Stop chain on failure
-- **Retry(n)** - Retry up to N times
-- **Skip** - Skip this step, continue
+- **retries** - Number of retries before failing (default: 0)
+- **recovery_prompt** - Optional prompt to run on failure instead of aborting
 
 Access chain progress:
 ```rust
@@ -245,27 +255,31 @@ for step in progress.steps {
 Register reusable task patterns with argument validation:
 
 ```rust
-use claude_pool::{Skill, SkillArgument, SkillRegistry};
+use claude_pool::{Skill, SkillArgument, SkillRegistry, SkillSource};
 
 let mut registry = SkillRegistry::new();
-registry.register(Skill {
-    name: "code_review".to_string(),
-    description: "Review code for bugs and style".to_string(),
-    prompt: "Review the code at {path} for {criteria}".to_string(),
-    arguments: vec![
-        SkillArgument {
-            name: "path".to_string(),
-            description: "File to review".to_string(),
-            required: true,
-        },
-        SkillArgument {
-            name: "criteria".to_string(),
-            description: "What to focus on (bugs, style, performance)".to_string(),
-            required: false,
-        },
-    ],
-    config: None,
-});
+registry.register(
+    Skill {
+        name: "code_review".to_string(),
+        description: "Review code for bugs and style".to_string(),
+        prompt: "Review the code at {path} for {criteria}".to_string(),
+        arguments: vec![
+            SkillArgument {
+                name: "path".to_string(),
+                description: "File to review".to_string(),
+                required: true,
+            },
+            SkillArgument {
+                name: "criteria".to_string(),
+                description: "What to focus on (bugs, style, performance)".to_string(),
+                required: false,
+            },
+        ],
+        config: None,
+        scope: Default::default(),
+    },
+    SkillSource::Runtime,
+);
 ```
 
 Skills can be triggered via the MCP server or called programmatically.
