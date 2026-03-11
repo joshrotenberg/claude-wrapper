@@ -283,24 +283,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut router = McpRouter::new()
         .server_info("claude-pool", env!("CARGO_PKG_VERSION"))
         .instructions(
-            "Execution modes: use inline for decisions and interactive work; pool_run for simple \
-             administrative tasks; pool_submit_chain for multi-step workflows to keep conversations \
-             responsive; pool_fan_out for parallel tasks; Agent tool for research requiring MCP \
-             tools. Pool slots have CLI tools (git, cargo, gh) but not MCP access. Default to \
-             inline when uncertain; user can say \"slotize it.\" \
+            "The pool is a system for parallelizing work across Claude CLI slots. \
              \
-             Task sizing: Single task (pool_run) = one clear action with one clear output; if using \
-             \"and\" more than once, use a chain instead. Chain = workflow where steps feed into each \
-             other; natural unit is a deliverable (e.g. a PR, report, or resolved issue); each step \
-             should be independently verifiable (can't describe success of step N without referencing \
-             N+1 = steps too coupled). Fan-out = N independent instances of same work; use if items \
-             don't depend on each other; use chain if they do. \
+             Vocabulary — use these verbs consistently: \
+             \"run\" = pool_run (sync single task), \
+             \"fire\" = pool_submit (async single task, check with pool_result), \
+             \"chain\" = pool_chain (sync pipeline), \
+             \"fire a chain\" = pool_submit_chain (async pipeline, check with pool_chain_result), \
+             \"fan out\" = pool_fan_out (parallel independent tasks), \
+             \"run skill\" = pool_skill_run (execute a registered skill), \
+             \"cancel\" = pool_cancel / pool_cancel_chain, \
+             \"check\" = pool_result / pool_chain_result, \
+             \"inline\" = do the work yourself without the pool. \
              \
-             Tools: pool_run (synchronous), pool_submit/pool_result (async), pool_fan_out (parallel), \
-             pool_chain (synchronous pipeline), pool_submit_chain/pool_chain_result (async pipeline \
-             with per-step progress), context_set/get/list (shared state), pool_configure_slot. \
-             Both effort and model can be overridden per-task (pool_run config) and per-chain-step \
-             (step config) to fine-tune cost and quality. \
+             When to use what: Default to inline when uncertain; user can say \"slotize it.\" \
+             Run: one clear action with one clear output. If using \"and\" more than once, chain \
+             instead. Chain: workflow where steps feed into each other; natural unit is a \
+             deliverable (e.g. a PR, report, or resolved issue); each step should be independently \
+             verifiable. Fan out: N independent instances of same work; use chain if they depend \
+             on each other. Pool slots have CLI tools (git, cargo, gh) but not MCP access; use \
+             the Agent tool for research requiring MCP tools. \
+             \
+             Tools: pool_run (run), pool_submit/pool_result (fire/check), pool_fan_out (fan out), \
+             pool_chain (chain), pool_submit_chain/pool_chain_result (fire a chain/check), \
+             context_set/get/list (shared state), pool_configure_slot, pool_send_message/ \
+             pool_read_messages/pool_peek_messages (inter-slot messaging). \
+             Both effort and model can be overridden per-task and per-chain-step. \
              \
              Model guidance: default to the pool's configured model; override per-task/step with \
              the model field when needed. Haiku: bounded single tasks (file a ticket, run checks, \
@@ -310,15 +318,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              compilation, complex architectural reasoning, tasks where you would want a senior \
              engineer. Rule of thumb: how much does the task benefit from deeper thinking? \
              \
-             Skills available as prompts: code_review, implement, write_tests, refactor, summarize. \
-             Skills management: pool_skill_list (discover), pool_skill_get (inspect), \
-             pool_skill_add (register ephemeral), pool_skill_remove (unregister), \
-             pool_skill_save (persist to disk). \
+             Skills: use pool_skill_list to discover available skills (SKILL.md format), \
+             pool_skill_get to inspect, pool_skill_run to run, pool_skill_eject to customize \
+             a builtin, pool_skill_save to persist. Skills are loaded from builtins, \
+             ~/.claude-pool/skills/ (global), and .claude-pool/skills/ (project, highest priority). \
              \
-             Scheduling: use Claude Code's /loop to run tasks on a recurring interval \
-             (e.g. `/loop 30m check pool status`). /loop fires while idle (session-only). For \
+             Monitoring: use /loop to watch or check things on a recurring interval \
+             (e.g. `/loop 5m check on the chain`). /loop fires while idle (session-only). For \
              unattended scheduling, use cron or systemd timers calling `claude -p` directly. \
-             The pool server is stateless and reactive; scheduling is handled by the client.",
+             The pool is stateless and reactive; scheduling is handled by the client.",
         )
         .tools(tool_list)
         .resources(resource_list)
