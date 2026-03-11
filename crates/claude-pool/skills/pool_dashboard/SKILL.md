@@ -8,7 +8,9 @@ metadata:
   scope: coordinator
 ---
 
-Generate a pool health dashboard. Compare against previous state and report changes.
+Execute the following monitoring steps and report the results.
+
+**GUARDRAIL: Do NOT create files, scripts, or skills. Do NOT modify any code. Only query status and report.**
 
 ## Step 1: Gather Current State
 
