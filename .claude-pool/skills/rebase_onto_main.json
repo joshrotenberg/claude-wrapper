@@ -1,8 +1,0 @@
-{
-  "name": "rebase_onto_main",
-  "description": "Rebase the current branch onto main, resolving conflicts if needed.",
-  "prompt": "Rebase the current branch onto the latest main:\n\n1. `git fetch origin main`\n2. `git rebase origin/main`\n3. If conflicts occur:\n   a. Identify conflicting files\n   b. Resolve conflicts intelligently (keep both sides where appropriate)\n   c. `git add` resolved files\n   d. `git rebase --continue`\n   e. Repeat until rebase completes\n4. Run `cargo check --all-features` to verify compilation\n5. If cargo check fails, fix the issue and amend the relevant commit\n\nReport:\n- Starting commit and branch\n- Number of commits rebased\n- Conflicts resolved (if any), with brief description of each\n- Final cargo check result\n- Final commit SHA",
-  "arguments": [],
-  "config": null,
-  "scope": "task"
-}
