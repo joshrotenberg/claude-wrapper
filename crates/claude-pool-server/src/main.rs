@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config = PoolConfig {
-        model: cli.model,
+        model: cli.model.clone(),
         effort: cli.effort.and_then(|e| parse_effort(&e)),
         budget_microdollars: cli.budget_usd.map(|b| (b * 1_000_000.0) as u64),
         system_prompt: cli.system_prompt,
@@ -245,11 +245,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let workflows = WorkflowRegistry::with_builtins();
 
+    let server_info = claude_pool_server::ServerInfo::new(
+        cli.model.clone(),
+        cli.permission_mode.clone(),
+        cli.slots,
+    );
+
     let state = Arc::new(State {
         pool,
         skills: Arc::new(RwLock::new(skills)),
         workflows,
         skills_dir: cli.skills_dir,
+        server_info,
     });
 
     let tool_list = tools::all_tools(&state);

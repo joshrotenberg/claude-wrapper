@@ -565,25 +565,43 @@ impl<S: PoolStore + 'static> Pool<S> {
             self.inner.store.put_task(task).await?;
         }
 
-        // Create chain worktree if isolation is requested.
-        let chain_working_dir = if isolation == crate::chain::ChainIsolation::Worktree {
-            if let Some(ref mgr) = self.inner.worktree_manager {
-                match mgr.create_for_chain(&task_id).await {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_id.0,
-                            error = %e,
-                            "failed to create chain worktree, falling back to slot dir"
-                        );
-                        None
+        // Create chain working directory based on isolation mode.
+        let chain_working_dir = match isolation {
+            crate::chain::ChainIsolation::Worktree => {
+                if let Some(ref mgr) = self.inner.worktree_manager {
+                    match mgr.create_for_chain(&task_id).await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id.0,
+                                error = %e,
+                                "failed to create chain worktree, falling back to slot dir"
+                            );
+                            None
+                        }
                     }
+                } else {
+                    None
                 }
-            } else {
-                None
             }
-        } else {
-            None
+            crate::chain::ChainIsolation::Clone => {
+                if let Some(ref mgr) = self.inner.worktree_manager {
+                    match mgr.create_clone_for_chain(&task_id).await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id.0,
+                                error = %e,
+                                "failed to create chain clone, falling back to slot dir"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            crate::chain::ChainIsolation::None => None,
         };
 
         let pool = self.clone();
@@ -599,16 +617,31 @@ impl<S: PoolStore + 'static> Pool<S> {
             )
             .await;
 
-            // Clean up chain worktree if we created one.
+            // Clean up chain isolation based on the mode used.
             if chain_working_dir.is_some()
                 && let Some(ref mgr) = pool.inner.worktree_manager
-                && let Err(e) = mgr.remove_chain(&tid).await
             {
-                tracing::warn!(
-                    task_id = %tid.0,
-                    error = %e,
-                    "failed to clean up chain worktree"
-                );
+                match isolation {
+                    crate::chain::ChainIsolation::Worktree => {
+                        if let Err(e) = mgr.remove_chain(&tid).await {
+                            tracing::warn!(
+                                task_id = %tid.0,
+                                error = %e,
+                                "failed to clean up chain worktree"
+                            );
+                        }
+                    }
+                    crate::chain::ChainIsolation::Clone => {
+                        if let Err(e) = mgr.remove_clone(&tid).await {
+                            tracing::warn!(
+                                task_id = %tid.0,
+                                error = %e,
+                                "failed to clean up chain clone"
+                            );
+                        }
+                    }
+                    crate::chain::ChainIsolation::None => {}
+                }
             }
 
             // Store the chain result as the task result.
