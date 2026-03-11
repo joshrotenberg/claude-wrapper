@@ -84,10 +84,10 @@ pub struct StepFailurePolicy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChainIsolation {
-    /// Use the slot's working directory (default behavior).
-    #[default]
+    /// Use the slot's working directory (no isolation).
     None,
-    /// Create a temporary git worktree shared by all steps in the chain.
+    /// Create a temporary git worktree shared by all steps in the chain (default).
+    #[default]
     Worktree,
 }
 
@@ -608,7 +608,7 @@ mod tests {
     fn chain_options_defaults() {
         let opts = ChainOptions::default();
         assert!(opts.tags.is_empty());
-        assert_eq!(opts.isolation, ChainIsolation::None);
+        assert_eq!(opts.isolation, ChainIsolation::Worktree);
     }
 
     #[test]

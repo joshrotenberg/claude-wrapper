@@ -207,8 +207,8 @@ fn parse_scope(s: &str) -> SkillScope {
 
 fn parse_isolation(s: Option<&str>) -> claude_pool::chain::ChainIsolation {
     match s {
-        Some("worktree") => claude_pool::chain::ChainIsolation::Worktree,
-        _ => claude_pool::chain::ChainIsolation::None,
+        Some("none") => claude_pool::chain::ChainIsolation::None,
+        _ => claude_pool::chain::ChainIsolation::Worktree,
     }
 }
 
