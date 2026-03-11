@@ -23,6 +23,7 @@ tempfile = "3"
 tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
