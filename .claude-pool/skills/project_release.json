@@ -1,8 +1,0 @@
-{
-  "name": "project_release",
-  "description": "Release readiness checks for all 3 crates in dependency order.",
-  "prompt": "Check release readiness for all 3 crates. Test in dependency order:\n\n1. claude-pool (core crate)\n2. claude-pool-server (depends on claude-pool)\n3. claude-wrapper (leaf crate)\n\nFor EACH crate in order:\n\na) Run all pre-commit checks:\n   - `cargo fmt --all -- --check`\n   - `cargo clippy --all-targets --all-features -- -D warnings`\n   - `cargo test --lib --all-features`\n   - `cargo test --test '*' --all-features`\n\nb) Run release-specific checks:\n   - `cargo doc --no-deps --all-features` (docs build without warnings)\n   - `cargo test --doc --all-features` (doc tests pass)\n   - `cargo publish --dry-run -p {crate}` (package builds)\n\nStop on first failure. Fix and re-run that crate, then continue.\n\nReport:\n- Crate-by-crate status\n- Any failures with fixes applied\n- Final readiness verdict (ready / blocked)",
-  "arguments": [],
-  "config": null,
-  "scope": "task"
-}
