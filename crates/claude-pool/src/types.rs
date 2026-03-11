@@ -297,6 +297,18 @@ pub struct TaskResult {
 
     /// Session ID from the execution.
     pub session_id: Option<String>,
+
+    /// On failure: the CLI command that was run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_command: Option<String>,
+
+    /// On failure: the exit code from the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+
+    /// On failure: stderr output from the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
 }
 
 /// Filter criteria for listing tasks.

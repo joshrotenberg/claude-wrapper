@@ -393,6 +393,7 @@ impl<S: PoolStore + 'static> Pool<S> {
                             updated.result = Some(task_result);
                         }
                         Err(e) => {
+                            let details = extract_failure_details(&e);
                             updated.state = TaskState::Failed;
                             updated.result = Some(TaskResult {
                                 output: e.to_string(),
@@ -400,6 +401,9 @@ impl<S: PoolStore + 'static> Pool<S> {
                                 cost_microdollars: 0,
                                 turns_used: 0,
                                 session_id: None,
+                                failed_command: details.failed_command,
+                                exit_code: details.exit_code,
+                                stderr: details.stderr,
                             });
                         }
                     }
@@ -414,6 +418,9 @@ impl<S: PoolStore + 'static> Pool<S> {
                         cost_microdollars: 0,
                         turns_used: 0,
                         session_id: None,
+                        failed_command: None,
+                        exit_code: None,
+                        stderr: None,
                     });
                     let _ = pool.inner.store.put_task(updated).await;
                 }
@@ -664,9 +671,13 @@ impl<S: PoolStore + 'static> Pool<S> {
                             cost_microdollars: chain_result.total_cost_microdollars,
                             turns_used: 0,
                             session_id: None,
+                            failed_command: None,
+                            exit_code: None,
+                            stderr: None,
                         });
                     }
                     Err(e) => {
+                        let details = extract_failure_details(&e);
                         task.state = TaskState::Failed;
                         task.result = Some(TaskResult {
                             output: e.to_string(),
@@ -674,6 +685,9 @@ impl<S: PoolStore + 'static> Pool<S> {
                             cost_microdollars: 0,
                             turns_used: 0,
                             session_id: None,
+                            failed_command: details.failed_command,
+                            exit_code: details.exit_code,
+                            stderr: details.stderr,
                         });
                     }
                 }
@@ -1356,6 +1370,9 @@ impl<S: PoolStore + 'static> Pool<S> {
             cost_microdollars,
             turns_used: query_result.num_turns.unwrap_or(0),
             session_id: Some(query_result.session_id),
+            failed_command: None,
+            exit_code: None,
+            stderr: None,
         })
     }
 
@@ -1523,6 +1540,9 @@ impl<S: PoolStore + 'static> Pool<S> {
             cost_microdollars,
             turns_used: 0,
             session_id: Some(session_id),
+            failed_command: None,
+            exit_code: None,
+            stderr: None,
         })
     }
 
@@ -1644,6 +1664,41 @@ const PERMISSION_PATTERNS: &[&str] = &[
     "Y/n",
     "(yes/no)",
 ];
+
+/// Structured failure details extracted from an error.
+struct FailureDetails {
+    failed_command: Option<String>,
+    exit_code: Option<i32>,
+    stderr: Option<String>,
+}
+
+/// Extract structured failure details from a pool error.
+///
+/// When the error wraps a `CommandFailed`, we capture the command, exit code,
+/// and stderr so callers get actionable diagnostics.
+fn extract_failure_details(err: &Error) -> FailureDetails {
+    match err {
+        Error::Wrapper(claude_wrapper::Error::CommandFailed {
+            command,
+            exit_code,
+            stderr,
+            ..
+        }) => FailureDetails {
+            failed_command: Some(command.clone()),
+            exit_code: Some(*exit_code),
+            stderr: if stderr.is_empty() {
+                None
+            } else {
+                Some(stderr.clone())
+            },
+        },
+        _ => FailureDetails {
+            failed_command: None,
+            exit_code: None,
+            stderr: None,
+        },
+    }
+}
 
 /// Inspect a claude-wrapper error for signs of a permission prompt.
 ///
@@ -2136,6 +2191,53 @@ mod tests {
         );
     }
 
+    // ── Failure detail extraction tests ─────────────────────────────
+
+    #[test]
+    fn extract_details_from_command_failed() {
+        let err = Error::Wrapper(claude_wrapper::Error::CommandFailed {
+            command: "claude --print -p test".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "error: something went wrong".into(),
+            working_dir: None,
+        });
+        let details = extract_failure_details(&err);
+        assert_eq!(
+            details.failed_command.as_deref(),
+            Some("claude --print -p test")
+        );
+        assert_eq!(details.exit_code, Some(1));
+        assert_eq!(
+            details.stderr.as_deref(),
+            Some("error: something went wrong")
+        );
+    }
+
+    #[test]
+    fn extract_details_from_non_command_error() {
+        let err = Error::TaskNotFound("task-123".into());
+        let details = extract_failure_details(&err);
+        assert!(details.failed_command.is_none());
+        assert!(details.exit_code.is_none());
+        assert!(details.stderr.is_none());
+    }
+
+    #[test]
+    fn extract_details_empty_stderr_is_none() {
+        let err = Error::Wrapper(claude_wrapper::Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: String::new(),
+            working_dir: None,
+        });
+        let details = extract_failure_details(&err);
+        assert_eq!(details.failed_command.as_deref(), Some("claude --print"));
+        assert_eq!(details.exit_code, Some(2));
+        assert!(details.stderr.is_none());
+    }
+
     // ── Chain cancellation tests ────────────────────────────────────
 
     #[tokio::test]
@@ -2198,6 +2300,9 @@ mod tests {
                 cost_microdollars: 100,
                 turns_used: 0,
                 session_id: None,
+                failed_command: None,
+                exit_code: None,
+                stderr: None,
             }),
             tags: vec![],
             config: None,
