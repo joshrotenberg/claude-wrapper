@@ -19,8 +19,10 @@
 //! One server. N slots. Nothing else.
 
 pub mod chain;
+pub(crate) mod cli_parsing;
 pub mod config;
 pub mod error;
+pub(crate) mod executor;
 pub mod messaging;
 pub mod pool;
 pub mod skill;
