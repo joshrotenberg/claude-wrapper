@@ -8,7 +8,7 @@ pub enum Error {
     NotFound,
 
     /// A claude command failed with a non-zero exit code.
-    #[error("claude command failed: {command} (exit code {exit_code}){}{}", working_dir.as_ref().map(|d| format!(" (in {})", d.display())).unwrap_or_default(), if stderr.is_empty() { String::new() } else { format!("\nstderr: {stderr}") })]
+    #[error("claude command failed: {command} (exit code {exit_code}){}{}{}", working_dir.as_ref().map(|d| format!(" (in {})", d.display())).unwrap_or_default(), if stdout.is_empty() { String::new() } else { format!("\nstdout: {stdout}") }, if stderr.is_empty() { String::new() } else { format!("\nstderr: {stderr}") })]
     CommandFailed {
         command: String,
         exit_code: i32,
