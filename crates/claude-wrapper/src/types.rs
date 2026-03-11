@@ -186,12 +186,65 @@ pub struct QueryResult {
     pub result: String,
     #[serde(default)]
     pub session_id: String,
-    #[serde(default)]
+    #[serde(default, rename = "total_cost_usd", alias = "cost_usd")]
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
     #[serde(default)]
+    pub num_turns: Option<u32>,
+    #[serde(default)]
     pub is_error: bool,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[cfg(all(test, feature = "json"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_result_deserializes_total_cost_usd() {
+        let json =
+            r#"{"result":"hello","session_id":"s1","total_cost_usd":0.042,"is_error":false}"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.cost_usd, Some(0.042));
+    }
+
+    #[test]
+    fn query_result_deserializes_cost_usd_alias() {
+        let json = r#"{"result":"hello","session_id":"s1","cost_usd":0.01,"is_error":false}"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.cost_usd, Some(0.01));
+    }
+
+    #[test]
+    fn query_result_missing_cost_defaults_to_none() {
+        let json = r#"{"result":"hello","session_id":"s1","is_error":false}"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.cost_usd, None);
+    }
+
+    #[test]
+    fn query_result_deserializes_num_turns() {
+        let json = r#"{"result":"done","session_id":"s2","total_cost_usd":0.1,"num_turns":5,"is_error":false}"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.num_turns, Some(5));
+        assert_eq!(qr.cost_usd, Some(0.1));
+    }
+
+    #[test]
+    fn query_result_serializes_as_total_cost_usd() {
+        let qr = QueryResult {
+            result: "ok".into(),
+            session_id: "s1".into(),
+            cost_usd: Some(0.05),
+            duration_ms: None,
+            num_turns: Some(3),
+            is_error: false,
+            extra: Default::default(),
+        };
+        let json = serde_json::to_string(&qr).unwrap();
+        assert!(json.contains("\"total_cost_usd\""));
+        assert!(json.contains("\"num_turns\""));
+    }
 }
