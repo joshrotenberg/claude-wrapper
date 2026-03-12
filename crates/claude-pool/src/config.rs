@@ -17,6 +17,7 @@ use crate::types::{PoolConfig, SlotConfig, TaskOverrides};
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub model: Option<String>,
+    pub fallback_model: Option<String>,
     pub permission_mode: PermissionMode,
     pub max_turns: Option<u32>,
     pub system_prompt: Option<String>,
@@ -46,6 +47,11 @@ impl ResolvedConfig {
             .and_then(|t| t.model.clone())
             .or_else(|| slot.model.clone())
             .or_else(|| global.model.clone());
+
+        let fallback_model = task
+            .and_then(|t| t.fallback_model.clone())
+            .or_else(|| slot.fallback_model.clone())
+            .or_else(|| global.fallback_model.clone());
 
         let permission_mode = task
             .and_then(|t| t.permission_mode)
@@ -112,6 +118,7 @@ impl ResolvedConfig {
 
         Self {
             model,
+            fallback_model,
             permission_mode,
             max_turns,
             system_prompt,
