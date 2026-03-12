@@ -35,6 +35,11 @@ pub struct SubmitTaskRequest {
     pub review_required: bool,
     /// Maximum rejections before auto-failing (only with review_required).
     pub max_rejections: Option<u32>,
+    /// JSON schema for structured output validation.
+    pub json_schema: Option<serde_json::Value>,
+    /// Additional MCP servers for this task (merged with global/slot servers).
+    /// Keys are server names, values are server config objects.
+    pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Response body for task submission.
@@ -102,6 +107,16 @@ pub struct PaginationQuery {
 
 fn default_limit() -> usize {
     50
+}
+
+fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
+    match s {
+        "low" => Some(claude_pool::Effort::Low),
+        "medium" => Some(claude_pool::Effort::Medium),
+        "high" => Some(claude_pool::Effort::High),
+        "max" => Some(claude_pool::Effort::Max),
+        _ => None,
+    }
 }
 
 /// Paginated response wrapper.
@@ -207,23 +222,35 @@ pub async fn submit_task<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     Json(req): Json<SubmitTaskRequest>,
 ) -> Result<(axum::http::StatusCode, Json<SubmitTaskResponse>), ProblemDetails> {
+    // Build task config if any overrides are provided.
+    let config = if req.model.is_some()
+        || req.effort.is_some()
+        || req.mcp_servers.is_some()
+        || req.json_schema.is_some()
+    {
+        Some(claude_pool::TaskOverrides {
+            model: req.model,
+            effort: req.effort.and_then(|e| parse_effort(&e)),
+            mcp_servers: req.mcp_servers,
+            json_schema: req.json_schema,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     let task_id = if req.review_required {
         state
             .state
             .pool
-            .submit_with_review(
-                &req.prompt,
-                None, // TODO: pass config once TaskOverrides lands
-                req.tags,
-                req.max_rejections,
-            )
+            .submit_with_review(&req.prompt, config, req.tags, req.max_rejections)
             .await
             .map_err(ProblemDetails::from)?
     } else {
         state
             .state
             .pool
-            .submit(&req.prompt)
+            .submit_with_config(&req.prompt, config, req.tags)
             .await
             .map_err(ProblemDetails::from)?
     };
