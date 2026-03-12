@@ -103,6 +103,9 @@ pub struct McpAddCommand {
     scope: Option<Scope>,
     env: Vec<(String, String)>,
     headers: Vec<String>,
+    callback_port: Option<u16>,
+    client_id: Option<String>,
+    client_secret: bool,
 }
 
 impl McpAddCommand {
@@ -117,6 +120,9 @@ impl McpAddCommand {
             scope: None,
             env: Vec::new(),
             headers: Vec::new(),
+            callback_port: None,
+            client_id: None,
+            client_secret: false,
         }
     }
 
@@ -154,6 +160,27 @@ impl McpAddCommand {
         self.server_args.extend(args.into_iter().map(Into::into));
         self
     }
+
+    /// Set a fixed port for OAuth callback.
+    #[must_use]
+    pub fn callback_port(mut self, port: u16) -> Self {
+        self.callback_port = Some(port);
+        self
+    }
+
+    /// Set the OAuth client ID for HTTP/SSE servers.
+    #[must_use]
+    pub fn client_id(mut self, id: impl Into<String>) -> Self {
+        self.client_id = Some(id.into());
+        self
+    }
+
+    /// Enable prompting for OAuth client secret.
+    #[must_use]
+    pub fn client_secret(mut self) -> Self {
+        self.client_secret = true;
+        self
+    }
 }
 
 impl ClaudeCommand for McpAddCommand {
@@ -180,6 +207,20 @@ impl ClaudeCommand for McpAddCommand {
         for header in &self.headers {
             args.push("-H".to_string());
             args.push(header.clone());
+        }
+
+        if let Some(port) = self.callback_port {
+            args.push("--callback-port".to_string());
+            args.push(port.to_string());
+        }
+
+        if let Some(ref id) = self.client_id {
+            args.push("--client-id".to_string());
+            args.push(id.clone());
+        }
+
+        if self.client_secret {
+            args.push("--client-secret".to_string());
         }
 
         args.push(self.name.clone());
@@ -331,6 +372,69 @@ impl ClaudeCommand for McpAddFromDesktopCommand {
     }
 }
 
+/// Start the Claude Code MCP server.
+///
+/// # Example
+///
+/// ```no_run
+/// use claude_wrapper::{Claude, ClaudeCommand, McpServeCommand};
+///
+/// # async fn example() -> claude_wrapper::Result<()> {
+/// let claude = Claude::builder().build()?;
+/// McpServeCommand::new()
+///     .verbose()
+///     .execute(&claude)
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct McpServeCommand {
+    debug: bool,
+    verbose: bool,
+}
+
+impl McpServeCommand {
+    /// Create a new MCP serve command.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable debug output.
+    #[must_use]
+    pub fn debug(mut self) -> Self {
+        self.debug = true;
+        self
+    }
+
+    /// Enable verbose output.
+    #[must_use]
+    pub fn verbose(mut self) -> Self {
+        self.verbose = true;
+        self
+    }
+}
+
+impl ClaudeCommand for McpServeCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["mcp".to_string(), "serve".to_string()];
+        if self.debug {
+            args.push("--debug".to_string());
+        }
+        if self.verbose {
+            args.push("--verbose".to_string());
+        }
+        args
+    }
+
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
 /// Reset all approved and rejected project-scoped MCP servers.
 #[derive(Debug, Clone, Default)]
 pub struct McpResetProjectChoicesCommand;
@@ -415,6 +519,33 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_add_oauth_flags() {
+        let cmd = McpAddCommand::new("my-server", "https://example.com/mcp")
+            .transport("http")
+            .callback_port(8080)
+            .client_id("my-app-id")
+            .client_secret();
+
+        let args = cmd.args();
+        assert_eq!(
+            args,
+            vec![
+                "mcp",
+                "add",
+                "--transport",
+                "http",
+                "--callback-port",
+                "8080",
+                "--client-id",
+                "my-app-id",
+                "--client-secret",
+                "my-server",
+                "https://example.com/mcp"
+            ]
+        );
+    }
+
+    #[test]
     fn test_mcp_remove_args() {
         let cmd = McpRemoveCommand::new("old-server").scope(Scope::Project);
         assert_eq!(
@@ -436,5 +567,17 @@ mod tests {
     fn test_mcp_reset_project_choices() {
         let cmd = McpResetProjectChoicesCommand::new();
         assert_eq!(cmd.args(), vec!["mcp", "reset-project-choices"]);
+    }
+
+    #[test]
+    fn test_mcp_serve_default() {
+        let cmd = McpServeCommand::new();
+        assert_eq!(cmd.args(), vec!["mcp", "serve"]);
+    }
+
+    #[test]
+    fn test_mcp_serve_with_flags() {
+        let cmd = McpServeCommand::new().debug().verbose();
+        assert_eq!(cmd.args(), vec!["mcp", "serve", "--debug", "--verbose"]);
     }
 }

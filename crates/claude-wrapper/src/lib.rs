@@ -181,7 +181,9 @@ use std::time::Duration;
 
 pub use command::ClaudeCommand;
 pub use command::agents::AgentsCommand;
-pub use command::auth::AuthStatusCommand;
+pub use command::auth::{
+    AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, SetupTokenCommand,
+};
 pub use command::doctor::DoctorCommand;
 pub use command::marketplace::{
     MarketplaceAddCommand, MarketplaceListCommand, MarketplaceRemoveCommand,
@@ -189,7 +191,7 @@ pub use command::marketplace::{
 };
 pub use command::mcp::{
     McpAddCommand, McpAddFromDesktopCommand, McpAddJsonCommand, McpGetCommand, McpListCommand,
-    McpRemoveCommand, McpResetProjectChoicesCommand,
+    McpRemoveCommand, McpResetProjectChoicesCommand, McpServeCommand,
 };
 pub use command::plugin::{
     PluginDisableCommand, PluginEnableCommand, PluginInstallCommand, PluginListCommand,
