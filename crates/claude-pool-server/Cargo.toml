@@ -53,3 +53,6 @@ tower-mcp = { workspace = true, features = ["testing"] }
 default = []
 http = ["tower-mcp/http", "dep:axum"]
 rest = ["dep:axum", "dep:tower-http"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("rest"))'] }
