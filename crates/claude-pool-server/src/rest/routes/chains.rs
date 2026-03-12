@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use claude_pool::{ChainOptions, ChainStep, PoolStore, StepAction, TaskId};
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ pub struct ChainProgressResponse {
 }
 
 /// Summary entry for chain listing.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ChainSummary {
     pub chain_id: String,
     pub status: String,
@@ -76,10 +76,39 @@ pub struct ChainSummary {
     pub completed_steps: usize,
 }
 
-/// `GET /v1/chains` — list all tracked chains.
+/// Pagination query parameters for `GET /v1/chains`.
+#[derive(Debug, Deserialize)]
+pub struct ListChainsQuery {
+    /// Maximum number of items per page (default: 50).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default: 0).
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+/// Paginated response wrapper.
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T> {
+    /// Items in this page.
+    pub items: Vec<T>,
+    /// Total number of items available.
+    pub total: usize,
+    /// Items per page.
+    pub limit: usize,
+    /// Offset of this page.
+    pub offset: usize,
+}
+
+/// `GET /v1/chains` — list all tracked chains with pagination.
 pub async fn list_chains<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
-) -> Json<Vec<ChainSummary>> {
+    Query(query): Query<ListChainsQuery>,
+) -> Json<PaginatedResponse<ChainSummary>> {
     let entries = state.state.pool.list_chain_progress();
     let summaries: Vec<ChainSummary> = entries
         .into_iter()
@@ -90,7 +119,18 @@ pub async fn list_chains<S: PoolStore + 'static>(
             completed_steps: progress.completed_steps.len(),
         })
         .collect();
-    Json(summaries)
+
+    let total = summaries.len();
+    let start = query.offset.min(total);
+    let end = (query.offset + query.limit).min(total);
+    let items = summaries[start..end].to_vec();
+
+    Json(PaginatedResponse {
+        items,
+        total,
+        limit: query.limit,
+        offset: query.offset,
+    })
 }
 
 /// `POST /v1/chains` — submit a chain for async execution.

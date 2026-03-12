@@ -186,7 +186,10 @@ async fn list_tasks_empty() {
     let app = test_router(1).await;
     let (status, body) = send(app, get("/v1/tasks")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!([]));
+    assert_eq!(body["items"], json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["limit"], 50);
+    assert_eq!(body["offset"], 0);
 }
 
 #[tokio::test]
@@ -240,6 +243,94 @@ async fn fan_out_empty_prompts_rejected() {
     assert!(body["type"].as_str().unwrap().contains("bad-request"));
 }
 
+#[tokio::test]
+async fn list_tasks_default_pagination() {
+    let app = test_router(1).await;
+
+    // Submit 3 tasks.
+    for i in 0..3 {
+        send(
+            app.clone(),
+            post_json("/v1/tasks", json!({"prompt": format!("task {i}")})),
+        )
+        .await;
+    }
+
+    // List with defaults: limit=50, offset=0.
+    let (status, body) = send(app, get("/v1/tasks")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["limit"], 50);
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn list_tasks_custom_limit() {
+    let app = test_router(1).await;
+
+    // Submit 10 tasks.
+    for i in 0..10 {
+        send(
+            app.clone(),
+            post_json("/v1/tasks", json!({"prompt": format!("task {i}")})),
+        )
+        .await;
+    }
+
+    // List with limit=3, offset=0.
+    let (status, body) = send(app, get("/v1/tasks?limit=3&offset=0")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 10);
+    assert_eq!(body["limit"], 3);
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn list_tasks_custom_offset() {
+    let app = test_router(1).await;
+
+    // Submit 5 tasks.
+    for i in 0..5 {
+        send(
+            app.clone(),
+            post_json("/v1/tasks", json!({"prompt": format!("task {i}")})),
+        )
+        .await;
+    }
+
+    // List with limit=2, offset=2.
+    let (status, body) = send(app, get("/v1/tasks?limit=2&offset=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["limit"], 2);
+    assert_eq!(body["offset"], 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn list_tasks_offset_beyond_results() {
+    let app = test_router(1).await;
+
+    // Submit 3 tasks.
+    for i in 0..3 {
+        send(
+            app.clone(),
+            post_json("/v1/tasks", json!({"prompt": format!("task {i}")})),
+        )
+        .await;
+    }
+
+    // List with offset=10 (beyond total).
+    let (status, body) = send(app, get("/v1/tasks?limit=10&offset=10")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["limit"], 10);
+    assert_eq!(body["offset"], 10);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
 // ── Chains ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -247,7 +338,10 @@ async fn list_chains_empty() {
     let app = test_router(1).await;
     let (status, body) = send(app, get("/v1/chains")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!([]));
+    assert_eq!(body["items"], json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["limit"], 50);
+    assert_eq!(body["offset"], 0);
 }
 
 #[tokio::test]
@@ -283,6 +377,122 @@ async fn submit_and_get_chain() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["chain_id"], chain_id);
     assert_eq!(body["total_steps"], 2);
+}
+
+#[tokio::test]
+async fn list_chains_default_pagination() {
+    let app = test_router(1).await;
+
+    // Submit 3 chains.
+    for i in 0..3 {
+        send(
+            app.clone(),
+            post_json(
+                "/v1/chains",
+                json!({
+                    "steps": [
+                        {"name": format!("step_{i}_1"), "prompt": "do thing"},
+                    ]
+                }),
+            ),
+        )
+        .await;
+    }
+
+    // List with defaults: limit=50, offset=0.
+    let (status, body) = send(app, get("/v1/chains")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["limit"], 50);
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn list_chains_custom_limit() {
+    let app = test_router(1).await;
+
+    // Submit 5 chains.
+    for i in 0..5 {
+        send(
+            app.clone(),
+            post_json(
+                "/v1/chains",
+                json!({
+                    "steps": [
+                        {"name": format!("step_{i}_1"), "prompt": "do thing"},
+                    ]
+                }),
+            ),
+        )
+        .await;
+    }
+
+    // List with limit=2, offset=0.
+    let (status, body) = send(app, get("/v1/chains?limit=2&offset=0")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["limit"], 2);
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn list_chains_custom_offset() {
+    let app = test_router(1).await;
+
+    // Submit 5 chains.
+    for i in 0..5 {
+        send(
+            app.clone(),
+            post_json(
+                "/v1/chains",
+                json!({
+                    "steps": [
+                        {"name": format!("step_{i}_1"), "prompt": "do thing"},
+                    ]
+                }),
+            ),
+        )
+        .await;
+    }
+
+    // List with limit=2, offset=3.
+    let (status, body) = send(app, get("/v1/chains?limit=2&offset=3")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["limit"], 2);
+    assert_eq!(body["offset"], 3);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn list_chains_offset_beyond_results() {
+    let app = test_router(1).await;
+
+    // Submit 2 chains.
+    for i in 0..2 {
+        send(
+            app.clone(),
+            post_json(
+                "/v1/chains",
+                json!({
+                    "steps": [
+                        {"name": format!("step_{i}_1"), "prompt": "do thing"},
+                    ]
+                }),
+            ),
+        )
+        .await;
+    }
+
+    // List with offset=10 (beyond total).
+    let (status, body) = send(app, get("/v1/chains?limit=10&offset=10")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["limit"], 10);
+    assert_eq!(body["offset"], 10);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
 // ── Skills ───────────────────────────────────────────────────────────────────

@@ -89,6 +89,34 @@ pub struct RejectRequest {
     pub feedback: String,
 }
 
+/// Pagination query parameters.
+#[derive(Debug, Deserialize)]
+pub struct PaginationQuery {
+    /// Maximum number of items per page (default: 50).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default: 0).
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+/// Paginated response wrapper.
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T> {
+    /// Items in this page.
+    pub items: Vec<T>,
+    /// Total number of items available.
+    pub total: usize,
+    /// Items per page.
+    pub limit: usize,
+    /// Offset of this page.
+    pub offset: usize,
+}
+
 /// Query parameters for `GET /v1/tasks`.
 #[derive(Debug, Deserialize)]
 pub struct ListTasksQuery {
@@ -96,13 +124,19 @@ pub struct ListTasksQuery {
     pub state: Option<String>,
     /// Filter by tag (any match).
     pub tag: Option<String>,
+    /// Maximum number of items per page (default: 50).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default: 0).
+    #[serde(default)]
+    pub offset: usize,
 }
 
-/// `GET /v1/tasks` — list tasks with optional filtering.
+/// `GET /v1/tasks` — list tasks with optional filtering and pagination.
 pub async fn list_tasks<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     Query(query): Query<ListTasksQuery>,
-) -> Result<Json<Vec<TaskResponse>>, ProblemDetails> {
+) -> Result<Json<PaginatedResponse<TaskResponse>>, ProblemDetails> {
     let task_state = query.state.as_deref().and_then(parse_task_state);
     let tags = query.tag.map(|t| vec![t]);
 
@@ -120,7 +154,11 @@ pub async fn list_tasks<S: PoolStore + 'static>(
         .await
         .map_err(ProblemDetails::from)?;
 
-    let tasks: Vec<TaskResponse> = records
+    let total = records.len();
+    let start = query.offset.min(total);
+    let end = (query.offset + query.limit).min(total);
+
+    let tasks: Vec<TaskResponse> = records[start..end]
         .iter()
         .map(|record| {
             let state_str = format!("{:?}", record.state).to_lowercase();
@@ -144,7 +182,12 @@ pub async fn list_tasks<S: PoolStore + 'static>(
         })
         .collect();
 
-    Ok(Json(tasks))
+    Ok(Json(PaginatedResponse {
+        items: tasks,
+        total,
+        limit: query.limit,
+        offset: query.offset,
+    }))
 }
 
 fn parse_task_state(s: &str) -> Option<TaskState> {
