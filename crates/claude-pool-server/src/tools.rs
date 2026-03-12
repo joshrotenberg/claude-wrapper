@@ -81,7 +81,7 @@ use std::sync::Arc;
 
 use claude_pool::PoolStore;
 use claude_pool::skill::{SkillScope, SkillSource};
-use claude_pool::types::SlotConfig;
+use claude_pool::types::TaskOverrides;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tower_mcp::ToolBuilder;
@@ -362,11 +362,11 @@ fn task_config_from(
     model: Option<String>,
     effort: Option<String>,
     mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
-) -> Option<SlotConfig> {
+) -> Option<TaskOverrides> {
     if model.is_none() && effort.is_none() && mcp_servers.is_none() {
         return None;
     }
-    Some(SlotConfig {
+    Some(TaskOverrides {
         model,
         effort: effort.and_then(|e| parse_effort(&e)),
         mcp_servers,
@@ -507,7 +507,11 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
             let state = Arc::clone(&state);
             async move {
                 let config = task_config_from(input.model, input.effort, input.mcp_servers);
-                match state.pool.run_with_config(&input.prompt, config).await {
+                let mut builder = state.pool.run(&input.prompt);
+                if let Some(cfg) = config {
+                    builder = builder.config(cfg);
+                }
+                match builder.await {
                     Ok(result) => Ok(CallToolResult::json(serde_json::to_value(&result).unwrap())),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
@@ -1222,7 +1226,7 @@ pub fn pool_skill_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                     config.effort = parse_effort(&effort);
                 }
 
-                match state.pool.run_with_config(&prompt, Some(config)).await {
+                match state.pool.run(&prompt).config(config).await {
                     Ok(result) => Ok(CallToolResult::json(serde_json::to_value(&result).unwrap())),
                     Err(e) => Ok(CallToolResult::error(e.to_string())),
                 }
@@ -1688,7 +1692,7 @@ pub fn pool_skill_add_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool
                         required: a.required,
                     })
                     .collect();
-                let config: Option<SlotConfig> =
+                let config: Option<TaskOverrides> =
                     input.config.and_then(|v| serde_json::from_value(v).ok());
                 let skill = claude_pool::Skill {
                     name: input.name.clone(),

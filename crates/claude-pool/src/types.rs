@@ -185,6 +185,35 @@ pub struct SlotConfig {
     pub slot_assignment_timeout_secs: Option<u64>,
 }
 
+/// Per-task configuration overrides.
+///
+/// Applied on top of the slot config for a single task execution. Unlike
+/// [`SlotConfig`], this struct contains only execution parameters — it has
+/// no identity fields (name, role, description) or slot lifecycle settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskOverrides {
+    /// Override model for this task.
+    pub model: Option<String>,
+
+    /// Override permission mode for this task.
+    pub permission_mode: Option<PermissionMode>,
+
+    /// Override max turns for this task.
+    pub max_turns: Option<u32>,
+
+    /// Override system prompt for this task.
+    pub system_prompt: Option<String>,
+
+    /// Additional allowed tools for this task (merged with global and slot).
+    pub allowed_tools: Option<Vec<String>>,
+
+    /// Additional MCP servers for this task (merged with global and slot).
+    pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
+
+    /// Override effort level for this task.
+    pub effort: Option<Effort>,
+}
+
 /// Current state of a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,7 +308,7 @@ pub struct TaskRecord {
     pub tags: Vec<String>,
 
     /// Per-task config overrides (takes precedence over slot and global config).
-    pub config: Option<SlotConfig>,
+    pub config: Option<TaskOverrides>,
 
     /// When true, completed tasks transition to `PendingReview` instead of `Completed`.
     #[serde(default)]

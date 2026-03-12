@@ -46,7 +46,7 @@ pub mod workflow;
 pub mod worktree;
 
 // Core pool types
-pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus};
+pub use pool::{DrainSummary, Pool, PoolBuilder, PoolStatus, RunOptions};
 
 // Error handling
 pub use error::{Error, Result};

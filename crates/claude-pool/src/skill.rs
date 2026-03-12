@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::SlotConfig;
+use crate::types::TaskOverrides;
 
 /// How a skill was registered in the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +123,7 @@ pub struct Skill {
     pub arguments: Vec<SkillArgument>,
 
     /// Per-skill config overrides (model, effort, etc.).
-    pub config: Option<SlotConfig>,
+    pub config: Option<TaskOverrides>,
 
     /// Where this skill is intended to run (advisory).
     #[serde(default)]
@@ -187,7 +187,7 @@ struct SkillMetadata {
     #[serde(default)]
     arguments: Vec<SkillArgument>,
     #[serde(default)]
-    config: Option<SlotConfig>,
+    config: Option<TaskOverrides>,
 }
 
 /// Parse a SKILL.md file into a [`Skill`].
