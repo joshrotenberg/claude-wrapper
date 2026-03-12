@@ -1,5 +1,6 @@
 //! Chain management REST endpoints.
 //!
+//! - `GET /v1/chains` — list all chains
 //! - `POST /v1/chains` — submit a chain
 //! - `GET /v1/chains/:id` — get chain progress
 //! - `DELETE /v1/chains/:id` — cancel a chain
@@ -64,6 +65,32 @@ pub struct ChainProgressResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_step_name: Option<String>,
     pub completed_steps: Vec<CompletedStepResponse>,
+}
+
+/// Summary entry for chain listing.
+#[derive(Debug, Serialize)]
+pub struct ChainSummary {
+    pub chain_id: String,
+    pub status: String,
+    pub total_steps: usize,
+    pub completed_steps: usize,
+}
+
+/// `GET /v1/chains` — list all tracked chains.
+pub async fn list_chains<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+) -> Json<Vec<ChainSummary>> {
+    let entries = state.state.pool.list_chain_progress();
+    let summaries: Vec<ChainSummary> = entries
+        .into_iter()
+        .map(|(id, progress)| ChainSummary {
+            chain_id: id.0,
+            status: format!("{:?}", progress.status).to_lowercase(),
+            total_steps: progress.total_steps,
+            completed_steps: progress.completed_steps.len(),
+        })
+        .collect();
+    Json(summaries)
 }
 
 /// `POST /v1/chains` — submit a chain for async execution.

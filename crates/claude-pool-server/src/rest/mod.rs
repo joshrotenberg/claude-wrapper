@@ -16,6 +16,7 @@
 //! - `POST /v1/tasks/:id/reject` — reject with feedback
 //!
 //! ## Chains
+//! - `GET /v1/chains` — list all chains
 //! - `POST /v1/chains` — submit a chain
 //! - `GET /v1/chains/:id` — get chain progress
 //! - `GET /v1/chains/:id/stream` — SSE stream of chain progress
@@ -81,6 +82,7 @@ pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>) -> Router {
         .route("/{id}/stream", get(routes::tasks::stream_task::<S>));
 
     let chains = Router::new()
+        .route("/", get(routes::chains::list_chains::<S>))
         .route("/", post(routes::chains::submit_chain::<S>))
         .route("/{id}", get(routes::chains::get_chain::<S>))
         .route("/{id}", delete(routes::chains::cancel_chain::<S>))

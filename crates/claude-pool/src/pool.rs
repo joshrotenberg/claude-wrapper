@@ -1219,6 +1219,18 @@ impl<S: PoolStore + 'static> Pool<S> {
             .map(|v| v.value().clone())
     }
 
+    /// List all tracked chain progress entries.
+    ///
+    /// Returns `(chain_id, progress)` pairs for every chain the pool is tracking,
+    /// including completed and failed chains that haven't been cleaned up yet.
+    pub fn list_chain_progress(&self) -> Vec<(TaskId, crate::chain::ChainProgress)> {
+        self.inner
+            .chain_progress
+            .iter()
+            .map(|entry| (TaskId(entry.key().clone()), entry.value().clone()))
+            .collect()
+    }
+
     /// Store chain progress (called internally by `execute_chain_with_progress`).
     pub(crate) async fn set_chain_progress(
         &self,
