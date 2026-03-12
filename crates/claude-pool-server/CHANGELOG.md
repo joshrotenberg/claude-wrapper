@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-server-v0.3.0...claude-pool-server-v0.3.1) - 2026-03-12
+
+### Added
+
+- task execution metrics, session aggregation, and REST/MCP endpoints ([#216](https://github.com/joshrotenberg/claude-wrapper/pull/216))
+- REST API Phase 4 — auth, concurrency limiting, webhooks, tests ([#214](https://github.com/joshrotenberg/claude-wrapper/pull/214))
+- SSE streaming endpoints for REST API (Phase 2) ([#213](https://github.com/joshrotenberg/claude-wrapper/pull/213))
+- REST API scaffold (Phase 1) ([#211](https://github.com/joshrotenberg/claude-wrapper/pull/211))
+
+### Fixed
+
+- suppress unexpected_cfgs warnings for rest feature ([#212](https://github.com/joshrotenberg/claude-wrapper/pull/212))
+
+### Other
+
+- TaskOverrides + RunOptions builder ([#209](https://github.com/joshrotenberg/claude-wrapper/pull/209))
+- add comprehensive rustdoc to pool server tools ([#205](https://github.com/joshrotenberg/claude-wrapper/pull/205))
+
 ## [0.3.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-server-v0.2.0...claude-pool-server-v0.3.0) - 2026-03-11
 
 ### Added

@@ -281,7 +281,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "claude-pool"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "claude-pool-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -306,6 +306,7 @@ dependencies = [
  "claude-pool",
  "claude-wrapper",
  "dirs",
+ "http-body-util",
  "schemars",
  "serde",
  "serde_json",
@@ -321,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "claude-wrapper"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",

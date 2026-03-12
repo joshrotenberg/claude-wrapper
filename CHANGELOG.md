@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+## [0.3.2](https://github.com/joshrotenberg/claude-wrapper/compare/v0.3.1...v0.3.2) - 2026-03-12
+
+### Fixed
+
+- streaming timeout + gitignore .claude-pool ([#202](https://github.com/joshrotenberg/claude-wrapper/pull/202))
+
 ## [0.3.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.3.0...v0.3.1) - 2026-03-11
 
 ### Added
