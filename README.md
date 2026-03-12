@@ -1,24 +1,34 @@
 # claude-wrapper
 
-A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, slot pool orchestration, and MCP server.
+Rust tooling suite for the Claude Code CLI built around the coordinator/worker model.
 
 [![Crates.io](https://img.shields.io/crates/v/claude-wrapper.svg)](https://crates.io/crates/claude-wrapper)
 [![Documentation](https://docs.rs/claude-wrapper/badge.svg)](https://docs.rs/claude-wrapper)
 [![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/claude-wrapper.svg)](LICENSE-MIT)
 
-## What is claude-pool?
+## Coordinator/Worker Model
 
-**claude-pool** is measured parallelism for Claude Code: selective, human-in-the-loop slot coordination. Run multiple Claude CLI instances simultaneously without orchestration overhead. Sit between solo Claude sessions and full automation platforms.
+**claude-pool** implements coordinator/worker orchestration for Claude Code. A
+**coordinator** — an interactive Claude session with the pool in its MCP config —
+schedules work, dispatches tasks to **worker** slots, monitors results, reviews
+outputs, and decides what merges. Workers are isolated Claude instances that
+execute one task at a time and return.
 
-**Not** a full orchestration framework or a leave-it-running daemon. This is for applications, scripts, and interactive sessions that need occasional parallel execution under human control—submit tasks, get results, stay in the loop.
+This is measured parallelism under human control. The human sits at the
+coordinator level and decides what offloads, when, and how. Not a
+leave-it-running daemon or full automation platform.
 
-### Key Differentiators
+The coordinator follows a repeating rhythm: **dispatch** tasks, **monitor**
+results (tick loop), **review** output, **merge** what passes. Chains compress
+this into one dispatch/monitor cycle. Fan-outs run monitor in parallel.
 
-- **Session-scoped**: Slots live only as long as your application. No external state.
-- **Conversation-first**: Inject shared context across slots. Slots inherit your session state.
-- **Selective**: Choose what offloads—chains, parallel tasks, or isolated execution. Human decides when to parallelize.
-- **MCP-native**: Expose the pool as an MCP server for use directly from Claude Code.
+### Key Properties
+
+- **Session-scoped**: Slots live only as long as your process. No external state.
+- **Human-in-the-loop**: The coordinator reviews and approves worker output.
+- **Selective**: Choose what offloads — chains, fan-outs, or single tasks.
+- **MCP-native**: Expose the pool as an MCP server and use it directly from Claude Code.
 
 ## The Three Crates
 
@@ -48,9 +58,9 @@ A comprehensive Rust tooling suite for the Claude Code CLI: type-safe wrapper, s
 
 | Crate | Purpose | Docs |
 |-------|---------|------|
-| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe CLI wrapper with builder pattern | [README](crates/claude-wrapper/README.md) ⟡ [docs.rs](https://docs.rs/claude-wrapper) |
-| **[claude-pool](crates/claude-pool/)** | Slot pool, orchestration, budget control | [README](crates/claude-pool/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool) |
-| **[claude-pool-server](crates/claude-pool-server/)** | MCP server exposing the pool | [README](crates/claude-pool-server/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool-server) |
+| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe Rust interface to Claude Code CLI | [README](crates/claude-wrapper/README.md) ⟡ [docs.rs](https://docs.rs/claude-wrapper) |
+| **[claude-pool](crates/claude-pool/)** | Coordinator/worker orchestration | [README](crates/claude-pool/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool) |
+| **[claude-pool-server](crates/claude-pool-server/)** | MCP + REST server | [README](crates/claude-pool-server/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool-server) |
 
 ## Quick Start
 
