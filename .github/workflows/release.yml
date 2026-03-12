@@ -223,6 +223,12 @@ jobs:
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
+          # Check if release already exists and delete it if so
+          if gh release view "${{ needs.plan.outputs.tag }}" 2>/dev/null; then
+            echo "Release already exists, deleting stale release and tag..."
+            gh release delete "${{ needs.plan.outputs.tag }}" --cleanup-tag --yes
+          fi
+
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
