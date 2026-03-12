@@ -82,9 +82,7 @@ pub async fn submit_chain<S: PoolStore + 'static>(
         .into_iter()
         .map(|s| ChainStep {
             name: s.name,
-            action: StepAction::Prompt {
-                prompt: s.prompt,
-            },
+            action: StepAction::Prompt { prompt: s.prompt },
             config: None, // TODO: pass config once TaskOverrides lands
             failure_policy: Default::default(),
             output_vars: HashMap::new(),

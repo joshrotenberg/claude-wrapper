@@ -182,7 +182,9 @@ pub async fn fan_out<S: PoolStore + 'static>(
     Json(req): Json<FanOutRequest>,
 ) -> Result<Json<FanOutResponse>, ProblemDetails> {
     if req.prompts.is_empty() {
-        return Err(ProblemDetails::bad_request("prompts array must not be empty"));
+        return Err(ProblemDetails::bad_request(
+            "prompts array must not be empty",
+        ));
     }
 
     let prompt_refs: Vec<&str> = req.prompts.iter().map(|s| s.as_str()).collect();

@@ -49,7 +49,12 @@ pub struct ScaleResponse {
 pub async fn get_status<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
 ) -> Result<Json<PoolStatusResponse>, ProblemDetails> {
-    let status = state.state.pool.status().await.map_err(ProblemDetails::from)?;
+    let status = state
+        .state
+        .pool
+        .status()
+        .await
+        .map_err(ProblemDetails::from)?;
 
     Ok(Json(PoolStatusResponse {
         total_slots: status.total_slots,
@@ -88,7 +93,12 @@ pub async fn scale<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     Json(req): Json<ScaleRequest>,
 ) -> Result<Json<ScaleResponse>, ProblemDetails> {
-    let current_status = state.state.pool.status().await.map_err(ProblemDetails::from)?;
+    let current_status = state
+        .state
+        .pool
+        .status()
+        .await
+        .map_err(ProblemDetails::from)?;
     let previous = current_status.total_slots;
 
     match (req.target, req.delta) {
@@ -129,7 +139,12 @@ pub async fn scale<S: PoolStore + 'static>(
         }
     }
 
-    let new_status = state.state.pool.status().await.map_err(ProblemDetails::from)?;
+    let new_status = state
+        .state
+        .pool
+        .status()
+        .await
+        .map_err(ProblemDetails::from)?;
 
     Ok(Json(ScaleResponse {
         previous_slots: previous,

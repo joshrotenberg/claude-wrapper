@@ -23,8 +23,7 @@ pub struct ProblemDetails {
 
 impl IntoResponse for ProblemDetails {
     fn into_response(self) -> Response {
-        let status =
-            StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut response = axum::Json(self).into_response();
         *response.status_mut() = status;
         response
@@ -41,7 +40,10 @@ impl ProblemDetails {
             problem_type: format!("urn:claude-pool:error:{resource}-not-found"),
             title: format!("{} not found", capitalize(resource)),
             status: 404,
-            detail: format!("{} {id} does not exist or has been cleaned up", capitalize(resource)),
+            detail: format!(
+                "{} {id} does not exist or has been cleaned up",
+                capitalize(resource)
+            ),
             instance: None,
         }
     }
