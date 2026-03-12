@@ -21,6 +21,8 @@ pub struct ResolvedConfig {
     pub max_turns: Option<u32>,
     pub system_prompt: Option<String>,
     pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+    pub tools: Vec<String>,
     pub effort: Option<Effort>,
     /// Merged MCP servers from global + slot + task layers.
     /// Later layers override earlier layers by server name.
@@ -75,6 +77,18 @@ impl ResolvedConfig {
             allowed_tools.extend(tt.iter().cloned());
         }
 
+        // Task-level disallowed tools
+        let disallowed_tools = task
+            .and_then(|t| t.disallowed_tools.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        // Task-level tools selection
+        let tools = task
+            .and_then(|t| t.tools.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
         // Merge MCP servers: global base, slot overrides/adds, task overrides/adds.
         // Same-named servers in later layers replace earlier ones.
         let mut mcp_servers = global.mcp_servers.clone();
@@ -97,6 +111,8 @@ impl ResolvedConfig {
             max_turns,
             system_prompt,
             allowed_tools,
+            disallowed_tools,
+            tools,
             effort,
             mcp_servers,
             strict_mcp_config,

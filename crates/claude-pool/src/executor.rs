@@ -209,6 +209,12 @@ pub(crate) async fn execute_task<S: PoolStore + 'static>(
     if !resolved.allowed_tools.is_empty() {
         cmd = cmd.allowed_tools(&resolved.allowed_tools);
     }
+    if !resolved.disallowed_tools.is_empty() {
+        cmd = cmd.disallowed_tools(&resolved.disallowed_tools);
+    }
+    if !resolved.tools.is_empty() {
+        cmd = cmd.tools(&resolved.tools);
+    }
 
     // Write per-slot MCP config if servers are configured.
     // Reuses an existing temp file if the slot already has one; otherwise
@@ -351,6 +357,12 @@ pub(crate) async fn execute_task_streaming<S: PoolStore + 'static>(
     }
     if !resolved.allowed_tools.is_empty() {
         cmd = cmd.allowed_tools(&resolved.allowed_tools);
+    }
+    if !resolved.disallowed_tools.is_empty() {
+        cmd = cmd.disallowed_tools(&resolved.disallowed_tools);
+    }
+    if !resolved.tools.is_empty() {
+        cmd = cmd.tools(&resolved.tools);
     }
 
     if !resolved.mcp_servers.is_empty() {
