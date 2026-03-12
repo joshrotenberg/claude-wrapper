@@ -3,62 +3,109 @@
 //! Provides an axum-based HTTP API as an alternative transport to MCP.
 //! Both transports share the same [`claude_pool::Pool`] backend.
 //!
+//! Base URL: `http://localhost:{port}/v1` (port configured via `--rest-port`).
+//! All request/response bodies are `application/json`.
+//!
 //! # Endpoints
 //!
-//! ## Tasks
-//! - `GET /v1/tasks` — list tasks with filtering
-//! - `POST /v1/tasks` — submit a task
-//! - `GET /v1/tasks/:id` — get task result
+//! ## Health
+//! - `GET /health` — liveness check, always returns `"ok"`, no auth required
+//!
+//! ## Tasks (8 endpoints)
+//! - `GET /v1/tasks` — list tasks (`?state=&tag=&limit=50&offset=0`)
+//! - `POST /v1/tasks` — submit a task (`{prompt, model?, effort?, tags?, review_required?}`)
+//! - `GET /v1/tasks/:id` — get task status and result
 //! - `GET /v1/tasks/:id/stream` — SSE stream of task output
-//! - `DELETE /v1/tasks/:id` — cancel a task
-//! - `POST /v1/tasks/fan-out` — parallel fan-out
-//! - `POST /v1/tasks/:id/approve` — approve pending review
-//! - `POST /v1/tasks/:id/reject` — reject with feedback
+//! - `DELETE /v1/tasks/:id` — cancel a pending/running task
+//! - `POST /v1/tasks/fan-out` — parallel fan-out (`{prompts[], model?, effort?}`)
+//! - `POST /v1/tasks/:id/approve` — approve a task pending review
+//! - `POST /v1/tasks/:id/reject` — reject with feedback (`{feedback}`)
 //!
-//! ## Chains
-//! - `GET /v1/chains` — list all chains
-//! - `POST /v1/chains` — submit a chain
-//! - `GET /v1/chains/:id` — get chain progress
+//! ## Chains (5 endpoints)
+//! - `GET /v1/chains` — list chains (`?limit=50&offset=0`)
+//! - `POST /v1/chains` — submit a chain (`{steps[], tags?, isolation?}`)
+//! - `GET /v1/chains/:id` — get chain progress and completed steps
 //! - `GET /v1/chains/:id/stream` — SSE stream of chain progress
-//! - `DELETE /v1/chains/:id` — cancel a chain
+//! - `DELETE /v1/chains/:id` — cancel a running chain
 //!
-//! ## Skills
-//! - `GET /v1/skills` — list skills
-//! - `GET /v1/skills/:name` — get skill details
-//! - `POST /v1/skills` — register a skill
-//! - `DELETE /v1/skills/:name` — remove a skill
-//!
-//! ## Context
-//! - `GET /v1/context` — list context entries
-//! - `GET /v1/context/:key` — get a value
-//! - `PUT /v1/context/:key` — set a value
-//! - `DELETE /v1/context/:key` — delete a key
-//!
-//! ## Slots
-//! - `GET /v1/slots` — list slots with filtering
+//! ## Slots (2 endpoints)
+//! - `GET /v1/slots` — list slots (`?name=&role=&state=`)
 //! - `GET /v1/slots/:id` — get slot details
 //!
-//! ## Webhooks
+//! ## Skills (4 endpoints)
+//! - `GET /v1/skills` — list all registered skills
+//! - `GET /v1/skills/:name` — get skill details
+//! - `POST /v1/skills` — register a skill (`{name, description, prompt, scope?, arguments?}`)
+//! - `DELETE /v1/skills/:name` — remove a skill
+//!
+//! ## Context (4 endpoints)
+//! - `GET /v1/context` — list all key-value entries
+//! - `GET /v1/context/:key` — get a value
+//! - `PUT /v1/context/:key` — set a value (`{value}`)
+//! - `DELETE /v1/context/:key` — delete a key
+//!
+//! ## Webhooks (3 endpoints)
 //! - `GET /v1/webhooks` — list registered webhooks
-//! - `POST /v1/webhooks` — register a webhook
+//! - `POST /v1/webhooks` — register a webhook (`{url, events?}`, HTTP only)
 //! - `DELETE /v1/webhooks/:id` — remove a webhook
 //!
-//! ## Pool
-//! - `GET /v1/pool/status` — pool health
-//! - `GET /v1/pool/metrics` — aggregated session metrics
-//! - `GET /v1/pool/events` — SSE stream of pool events
-//! - `POST /v1/pool/drain` — graceful shutdown
-//! - `POST /v1/pool/scale` — scale slots
+//! ## Pool (5 endpoints)
+//! - `GET /v1/pool/status` — pool health snapshot (slots, tasks, spend, budget)
+//! - `GET /v1/pool/metrics` — session metrics (`?since_ms=&until_ms=&tag=&model=`)
+//! - `GET /v1/pool/events` — SSE stream of pool status updates
+//! - `POST /v1/pool/drain` — graceful shutdown, waits for in-flight tasks
+//! - `POST /v1/pool/scale` — scale slots (`{target}` or `{delta}`, not both)
 //!
 //! # Authentication
 //!
 //! When bearer tokens are configured via `--http-token`, all endpoints except
 //! `/health` require a valid `Authorization: Bearer <token>` header.
+//! Multiple tokens can be configured. If no tokens are set, all endpoints are public.
+//!
+//! ```bash
+//! # Start with auth
+//! claude-pool-server --rest --rest-port 3200 --http-token sk-test-123
+//!
+//! # Use in requests
+//! curl -H "Authorization: Bearer sk-test-123" http://localhost:3200/v1/pool/status
+//! ```
+//!
+//! # Pagination
+//!
+//! List endpoints for tasks and chains support `?limit=N&offset=M` query parameters.
+//! Default: `limit=50, offset=0`. Response wraps items in:
+//!
+//! ```json
+//! {"items": [...], "total": 150, "limit": 50, "offset": 0}
+//! ```
+//!
+//! # Error Responses
+//!
+//! All errors use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) Problem Details
+//! with content type `application/problem+json`:
+//!
+//! ```json
+//! {
+//!   "type": "urn:claude-pool:error:not-found",
+//!   "title": "Task not found",
+//!   "status": 404,
+//!   "detail": "Task task_abc123 does not exist"
+//! }
+//! ```
+//!
+//! Common status codes: 400 (bad request), 404 (not found), 409 (conflict/no slots),
+//! 500 (internal error), 503 (concurrency limit exceeded).
 //!
 //! # Concurrency Limiting
 //!
 //! When configured via [`RestConfig`], a global concurrency limit caps the
 //! number of in-flight requests. Excess requests receive 503 Service Unavailable.
+//!
+//! # Server-Sent Events (SSE)
+//!
+//! Three endpoints stream events: task output (`/v1/tasks/:id/stream`),
+//! chain progress (`/v1/chains/:id/stream`), and pool status (`/v1/pool/events`).
+//! Connections close automatically on completion or shutdown.
 
 pub mod error;
 pub mod middleware;
