@@ -44,6 +44,8 @@ pub struct SubmitTaskRequest {
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Maximum budget cap for this task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 /// Response body for task submission.
@@ -227,6 +229,7 @@ pub async fn submit_task<S: PoolStore + 'static>(
         req.json_schema,
         req.disallowed_tools,
         req.tools,
+        req.max_budget_usd,
     );
 
     let task_id = if req.review_required {
@@ -416,6 +419,7 @@ fn build_task_config(
     json_schema: Option<serde_json::Value>,
     disallowed_tools: Option<Vec<String>>,
     tools: Option<Vec<String>>,
+    max_budget_usd: Option<f64>,
 ) -> Option<claude_pool::types::TaskOverrides> {
     if model.is_none()
         && effort.is_none()
@@ -423,6 +427,7 @@ fn build_task_config(
         && json_schema.is_none()
         && disallowed_tools.is_none()
         && tools.is_none()
+        && max_budget_usd.is_none()
     {
         return None;
     }
@@ -433,6 +438,7 @@ fn build_task_config(
         json_schema,
         disallowed_tools,
         tools,
+        max_budget_usd,
         ..Default::default()
     })
 }

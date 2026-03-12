@@ -31,6 +31,8 @@ pub struct ResolvedConfig {
     pub strict_mcp_config: bool,
     /// JSON schema for structured output validation (task overrides).
     pub json_schema: Option<serde_json::Value>,
+    /// Maximum budget cap for the task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 impl ResolvedConfig {
@@ -104,6 +106,9 @@ impl ResolvedConfig {
         let strict_mcp_config = global.strict_mcp_config;
 
         let json_schema = task.and_then(|t| t.json_schema.clone());
+        let max_budget_usd = task
+            .and_then(|t| t.max_budget_usd)
+            .or_else(|| global.budget_microdollars.map(|m| m as f64 / 1_000_000.0));
 
         Self {
             model,
@@ -117,6 +122,7 @@ impl ResolvedConfig {
             mcp_servers,
             strict_mcp_config,
             json_schema,
+            max_budget_usd,
         }
     }
 }

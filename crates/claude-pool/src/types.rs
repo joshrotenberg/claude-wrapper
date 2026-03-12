@@ -230,6 +230,9 @@ pub struct TaskOverrides {
 
     /// JSON schema for structured output validation.
     pub json_schema: Option<serde_json::Value>,
+
+    /// Maximum budget cap for this task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 /// Current state of a slot.

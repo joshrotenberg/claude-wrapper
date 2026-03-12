@@ -110,6 +110,8 @@ pub struct RunInput {
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// JSON schema for structured output validation.
     pub json_schema: Option<serde_json::Value>,
+    /// Maximum budget cap for this task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -131,6 +133,8 @@ pub struct SubmitInput {
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// JSON schema for structured output validation.
     pub json_schema: Option<serde_json::Value>,
+    /// Maximum budget cap for this task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -346,6 +350,8 @@ pub struct SubmitWithReviewInput {
     pub disallowed_tools: Option<Vec<String>>,
     /// Built-in tool selection for this task (Bash, Edit, Read, etc.).
     pub tools: Option<Vec<String>>,
+    /// Maximum budget cap for this task in USD.
+    pub max_budget_usd: Option<f64>,
 }
 
 /// Input for approving a task result.
@@ -384,6 +390,7 @@ fn task_config_from(
     json_schema: Option<serde_json::Value>,
     disallowed_tools: Option<Vec<String>>,
     tools: Option<Vec<String>>,
+    max_budget_usd: Option<f64>,
 ) -> Option<TaskOverrides> {
     if model.is_none()
         && effort.is_none()
@@ -391,6 +398,7 @@ fn task_config_from(
         && json_schema.is_none()
         && disallowed_tools.is_none()
         && tools.is_none()
+        && max_budget_usd.is_none()
     {
         return None;
     }
@@ -401,6 +409,7 @@ fn task_config_from(
         json_schema,
         disallowed_tools,
         tools,
+        max_budget_usd,
         ..Default::default()
     })
 }
@@ -544,6 +553,7 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
                     input.json_schema,
                     input.disallowed_tools,
                     input.tools,
+                    input.max_budget_usd,
                 );
                 let mut builder = state.pool.run(&input.prompt);
                 if let Some(cfg) = config {
@@ -605,6 +615,7 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
                     input.json_schema,
                     input.disallowed_tools,
                     input.tools,
+                    input.max_budget_usd,
                 );
                 let tags = input.tags.unwrap_or_default();
                 match state
@@ -1188,7 +1199,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
                 },
                 _ => claude_pool::StepAction::Prompt { prompt: s.value },
             };
-            let config = task_config_from(s.model, s.effort, None, None, None, None);
+            let config = task_config_from(s.model, s.effort, None, None, None, None, None);
             let failure_policy = claude_pool::StepFailurePolicy {
                 retries: s.retries.unwrap_or(0),
                 recovery_prompt: s.recovery_prompt,
@@ -2241,6 +2252,7 @@ pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>
                     input.json_schema,
                     input.disallowed_tools,
                     input.tools,
+                    input.max_budget_usd,
                 );
                 let tags = input.tags.unwrap_or_default();
                 match state
