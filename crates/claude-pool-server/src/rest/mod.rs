@@ -38,15 +38,32 @@
 //! - `GET /v1/slots` — list slots with filtering
 //! - `GET /v1/slots/:id` — get slot details
 //!
+//! ## Webhooks
+//! - `GET /v1/webhooks` — list registered webhooks
+//! - `POST /v1/webhooks` — register a webhook
+//! - `DELETE /v1/webhooks/:id` — remove a webhook
+//!
 //! ## Pool
 //! - `GET /v1/pool/status` — pool health
 //! - `GET /v1/pool/events` — SSE stream of pool events
 //! - `POST /v1/pool/drain` — graceful shutdown
 //! - `POST /v1/pool/scale` — scale slots
+//!
+//! # Authentication
+//!
+//! When bearer tokens are configured via `--http-token`, all endpoints except
+//! `/health` require a valid `Authorization: Bearer <token>` header.
+//!
+//! # Concurrency Limiting
+//!
+//! When configured via [`RestConfig`], a global concurrency limit caps the
+//! number of in-flight requests. Excess requests receive 503 Service Unavailable.
 
 pub mod error;
+pub mod middleware;
 pub mod routes;
 pub mod sse;
+pub mod webhooks;
 
 use std::sync::Arc;
 
@@ -57,19 +74,44 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::State;
+use crate::auth::BearerTokens;
+
+use self::webhooks::WebhookRegistry;
+
+/// Configuration for the REST API server.
+pub struct RestConfig {
+    /// Bearer tokens for authentication. Empty disables auth.
+    pub tokens: BearerTokens,
+    /// Maximum concurrent requests (0 = unlimited).
+    pub max_concurrent_requests: usize,
+}
+
+impl Default for RestConfig {
+    fn default() -> Self {
+        Self {
+            tokens: BearerTokens::new(vec![]),
+            max_concurrent_requests: 0,
+        }
+    }
+}
 
 /// Shared state for REST handlers.
 ///
 /// Wraps the existing MCP [`State`] so both transports share the same pool.
 pub struct AppState<S: PoolStore> {
     pub state: Arc<State<S>>,
+    pub webhooks: WebhookRegistry,
 }
 
 /// Build the REST API router.
 ///
-/// The returned router includes all v1 endpoints with CORS and tracing middleware.
-pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>) -> Router {
-    let app_state = Arc::new(AppState { state });
+/// The returned router includes all v1 endpoints with CORS, tracing,
+/// optional bearer auth, and optional rate limiting.
+pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>, config: RestConfig) -> Router {
+    let app_state = Arc::new(AppState {
+        state,
+        webhooks: WebhookRegistry::new(),
+    });
 
     let tasks = Router::new()
         .route("/", get(routes::tasks::list_tasks::<S>))
@@ -104,22 +146,44 @@ pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>) -> Router {
         .route("/", get(routes::slots::list_slots::<S>))
         .route("/{id}", get(routes::slots::get_slot::<S>));
 
+    let webhooks = Router::new()
+        .route("/", get(routes::webhooks::list_webhooks::<S>))
+        .route("/", post(routes::webhooks::register_webhook::<S>))
+        .route("/{id}", delete(routes::webhooks::remove_webhook::<S>));
+
     let pool = Router::new()
         .route("/status", get(routes::pool::get_status::<S>))
         .route("/events", get(routes::pool::events::<S>))
         .route("/drain", post(routes::pool::drain::<S>))
         .route("/scale", post(routes::pool::scale::<S>));
 
-    Router::new()
+    let mut app = Router::new()
         .nest("/v1/tasks", tasks)
         .nest("/v1/chains", chains)
         .nest("/v1/skills", skills)
         .nest("/v1/context", context)
         .nest("/v1/slots", slots)
+        .nest("/v1/webhooks", webhooks)
         .nest("/v1/pool", pool)
         .route("/health", get(health))
-        .with_state(app_state)
-        .layer(TraceLayer::new_for_http())
+        .with_state(app_state);
+
+    // Apply bearer auth middleware if tokens are configured.
+    if !config.tokens.is_empty() {
+        let tokens = config.tokens;
+        app = app.layer(axum::middleware::from_fn(move |req, next| {
+            middleware::bearer_auth(req, next, tokens.clone())
+        }));
+    }
+
+    // Apply concurrency limiting if configured.
+    if config.max_concurrent_requests > 0 {
+        app = app.layer(tower::limit::ConcurrencyLimitLayer::new(
+            config.max_concurrent_requests,
+        ));
+    }
+
+    app.layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
 }
 

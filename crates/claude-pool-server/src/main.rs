@@ -128,6 +128,10 @@ struct Cli {
     /// Port for the REST API server.
     #[arg(long, default_value = "3200")]
     rest_port: u16,
+
+    /// Maximum concurrent REST API requests (0 = unlimited).
+    #[arg(long, default_value = "0")]
+    rest_max_concurrent: usize,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -356,7 +360,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "rest")]
     let rest_handle = if cli.rest {
         let rest_addr = format!("{}:{}", cli.bind, cli.rest_port);
-        let rest_router = claude_pool_server::rest::router(state.clone());
+        let rest_config = claude_pool_server::rest::RestConfig {
+            tokens: claude_pool_server::auth::BearerTokens::new(cli.http_token.clone()),
+            max_concurrent_requests: cli.rest_max_concurrent,
+        };
+        let rest_router = claude_pool_server::rest::router(state.clone(), rest_config);
         let listener = tokio::net::TcpListener::bind(&rest_addr).await?;
         tracing::info!(%rest_addr, "REST API starting");
         Some(tokio::spawn(async move {
