@@ -402,26 +402,6 @@ impl ClaudeBuilder {
         self
     }
 
-    /// Suppress non-essential output for all commands (`--quiet`).
-    #[must_use]
-    pub fn quiet(mut self) -> Self {
-        self.global_args.push("--quiet".into());
-        self
-    }
-
-    /// Control color output for all commands.
-    ///
-    /// Passes `--color` when `enabled` is `true`, `--no-color` when `false`.
-    #[must_use]
-    pub fn color(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.global_args.push("--color".into());
-        } else {
-            self.global_args.push("--no-color".into());
-        }
-        self
-    }
-
     /// Set a default retry policy for all commands.
     ///
     /// Individual commands can override this via their own retry settings.
@@ -514,37 +494,5 @@ mod tests {
             .build()
             .unwrap();
         assert!(claude.global_args.contains(&"--debug".to_string()));
-    }
-
-    #[test]
-    fn test_builder_quiet() {
-        let claude = Claude::builder()
-            .binary("/usr/local/bin/claude")
-            .quiet()
-            .build()
-            .unwrap();
-        assert!(claude.global_args.contains(&"--quiet".to_string()));
-    }
-
-    #[test]
-    fn test_builder_color_enabled() {
-        let claude = Claude::builder()
-            .binary("/usr/local/bin/claude")
-            .color(true)
-            .build()
-            .unwrap();
-        assert!(claude.global_args.contains(&"--color".to_string()));
-        assert!(!claude.global_args.contains(&"--no-color".to_string()));
-    }
-
-    #[test]
-    fn test_builder_color_disabled() {
-        let claude = Claude::builder()
-            .binary("/usr/local/bin/claude")
-            .color(false)
-            .build()
-            .unwrap();
-        assert!(claude.global_args.contains(&"--no-color".to_string()));
-        assert!(!claude.global_args.contains(&"--color".to_string()));
     }
 }
