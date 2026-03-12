@@ -18,21 +18,12 @@ use crate::exec::{self, CommandOutput};
 /// # }
 /// ```
 #[derive(Debug, Clone, Default)]
-pub struct DoctorCommand {
-    json: bool,
-}
+pub struct DoctorCommand {}
 
 impl DoctorCommand {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Output as JSON.
-    #[must_use]
-    pub fn json(mut self) -> Self {
-        self.json = true;
-        self
     }
 }
 
@@ -40,11 +31,7 @@ impl ClaudeCommand for DoctorCommand {
     type Output = CommandOutput;
 
     fn args(&self) -> Vec<String> {
-        let mut args = vec!["doctor".to_string()];
-        if self.json {
-            args.push("--json".to_string());
-        }
-        args
+        vec!["doctor".to_string()]
     }
 
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
@@ -60,11 +47,5 @@ mod tests {
     fn test_doctor_args() {
         let cmd = DoctorCommand::new();
         assert_eq!(cmd.args(), vec!["doctor"]);
-    }
-
-    #[test]
-    fn test_doctor_json_flag() {
-        let cmd = DoctorCommand::new().json();
-        assert_eq!(cmd.args(), vec!["doctor", "--json"]);
     }
 }
