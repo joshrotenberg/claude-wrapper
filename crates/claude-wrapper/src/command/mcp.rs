@@ -2,7 +2,7 @@ use crate::Claude;
 use crate::command::ClaudeCommand;
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
-use crate::types::Scope;
+use crate::types::{Scope, Transport};
 
 /// List configured MCP servers.
 ///
@@ -97,7 +97,7 @@ pub struct McpAddCommand {
     name: String,
     command_or_url: String,
     server_args: Vec<String>,
-    transport: Option<String>,
+    transport: Option<Transport>,
     scope: Option<Scope>,
     env: Vec<(String, String)>,
     headers: Vec<String>,
@@ -118,9 +118,9 @@ impl McpAddCommand {
         }
     }
 
-    /// Set the transport type (stdio, sse, http).
+    /// Set the transport type.
     #[must_use]
-    pub fn transport(mut self, transport: impl Into<String>) -> Self {
+    pub fn transport(mut self, transport: impl Into<Transport>) -> Self {
         self.transport = Some(transport.into());
         self
     }
@@ -160,9 +160,9 @@ impl ClaudeCommand for McpAddCommand {
     fn args(&self) -> Vec<String> {
         let mut args = vec!["mcp".to_string(), "add".to_string()];
 
-        if let Some(ref transport) = self.transport {
+        if let Some(transport) = self.transport {
             args.push("--transport".to_string());
-            args.push(transport.clone());
+            args.push(transport.to_string());
         }
 
         if let Some(ref scope) = self.scope {
