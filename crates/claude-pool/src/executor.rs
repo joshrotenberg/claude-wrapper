@@ -248,6 +248,8 @@ pub(crate) async fn execute_task<S: PoolStore + 'static>(
         "executing task"
     );
 
+    let start = std::time::Instant::now();
+
     let query_result = match cmd.execute_json(&claude_instance).await {
         Ok(r) => r,
         Err(e) if inner.config.detect_permission_prompts => {
@@ -259,21 +261,30 @@ pub(crate) async fn execute_task<S: PoolStore + 'static>(
         Err(e) => return Err(e.into()),
     };
 
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
     let cost_microdollars = query_result
         .cost_usd
         .map(|c| (c * 1_000_000.0) as u64)
         .unwrap_or(0);
 
-    Ok(TaskResult {
-        output: query_result.result,
-        success: !query_result.is_error,
+    let mut result = TaskResult::success(
+        query_result.result,
         cost_microdollars,
-        turns_used: query_result.num_turns.unwrap_or(0),
-        session_id: Some(query_result.session_id),
-        failed_command: None,
-        exit_code: None,
-        stderr: None,
-    })
+        query_result.num_turns.unwrap_or(0),
+    )
+    .with_elapsed_ms(elapsed_ms)
+    .with_session_id(query_result.session_id);
+
+    if query_result.is_error {
+        result.success = false;
+    }
+
+    if let Some(ref model) = resolved.model {
+        result = result.with_model(model);
+    }
+
+    Ok(result)
 }
 
 /// Execute a task with optional streaming output.
@@ -375,6 +386,8 @@ pub(crate) async fn execute_task_streaming<S: PoolStore + 'static>(
         "executing task (streaming)"
     );
 
+    let start = std::time::Instant::now();
+
     // Collect the final result from stream events.
     let mut result_text = String::new();
     let mut session_id = String::new();
@@ -443,16 +456,25 @@ pub(crate) async fn execute_task_streaming<S: PoolStore + 'static>(
         Err(e) => return Err(e.into()),
     }
 
+    let elapsed_ms = start.elapsed().as_millis() as u64;
     let cost_microdollars = cost_usd.map(|c| (c * 1_000_000.0) as u64).unwrap_or(0);
 
-    Ok(TaskResult {
-        output: result_text,
-        success: !is_error,
-        cost_microdollars,
-        turns_used: 0,
-        session_id: Some(session_id),
-        failed_command: None,
-        exit_code: None,
-        stderr: None,
-    })
+    let mut result = if is_error {
+        TaskResult::failure(&result_text)
+    } else {
+        TaskResult::success(result_text, cost_microdollars, 0)
+    }
+    .with_elapsed_ms(elapsed_ms)
+    .with_session_id(session_id);
+
+    if is_error {
+        // failure() sets cost to 0; preserve the actual cost if known.
+        result.cost_microdollars = cost_microdollars;
+    }
+
+    if let Some(ref model) = resolved.model {
+        result = result.with_model(model);
+    }
+
+    Ok(result)
 }

@@ -138,6 +138,9 @@ mod tests {
             max_rejections: 3,
             rejection_count: 0,
             original_prompt: None,
+            created_at_ms: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         store.put_task(record).await.unwrap();
@@ -208,6 +211,9 @@ mod tests {
                     max_rejections: 3,
                     rejection_count: 0,
                     original_prompt: None,
+                    created_at_ms: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 })
                 .await
                 .unwrap();
