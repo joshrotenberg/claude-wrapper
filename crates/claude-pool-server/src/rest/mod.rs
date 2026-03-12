@@ -8,6 +8,7 @@
 //! ## Tasks
 //! - `POST /v1/tasks` — submit a task
 //! - `GET /v1/tasks/:id` — get task result
+//! - `GET /v1/tasks/:id/stream` — SSE stream of task output
 //! - `DELETE /v1/tasks/:id` — cancel a task
 //! - `POST /v1/tasks/fan-out` — parallel fan-out
 //! - `POST /v1/tasks/:id/approve` — approve pending review
@@ -16,15 +17,18 @@
 //! ## Chains
 //! - `POST /v1/chains` — submit a chain
 //! - `GET /v1/chains/:id` — get chain progress
+//! - `GET /v1/chains/:id/stream` — SSE stream of chain progress
 //! - `DELETE /v1/chains/:id` — cancel a chain
 //!
 //! ## Pool
 //! - `GET /v1/pool/status` — pool health
+//! - `GET /v1/pool/events` — SSE stream of pool events
 //! - `POST /v1/pool/drain` — graceful shutdown
 //! - `POST /v1/pool/scale` — scale slots
 
 pub mod error;
 pub mod routes;
+pub mod sse;
 
 use std::sync::Arc;
 
@@ -55,15 +59,18 @@ pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>) -> Router {
         .route("/{id}", get(routes::tasks::get_task::<S>))
         .route("/{id}", delete(routes::tasks::cancel_task::<S>))
         .route("/{id}/approve", post(routes::tasks::approve_task::<S>))
-        .route("/{id}/reject", post(routes::tasks::reject_task::<S>));
+        .route("/{id}/reject", post(routes::tasks::reject_task::<S>))
+        .route("/{id}/stream", get(routes::tasks::stream_task::<S>));
 
     let chains = Router::new()
         .route("/", post(routes::chains::submit_chain::<S>))
         .route("/{id}", get(routes::chains::get_chain::<S>))
-        .route("/{id}", delete(routes::chains::cancel_chain::<S>));
+        .route("/{id}", delete(routes::chains::cancel_chain::<S>))
+        .route("/{id}/stream", get(routes::chains::stream_chain::<S>));
 
     let pool = Router::new()
         .route("/status", get(routes::pool::get_status::<S>))
+        .route("/events", get(routes::pool::events::<S>))
         .route("/drain", post(routes::pool::drain::<S>))
         .route("/scale", post(routes::pool::scale::<S>));
 

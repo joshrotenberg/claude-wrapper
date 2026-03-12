@@ -159,3 +159,26 @@ pub async fn cancel_chain<S: PoolStore + 'static>(
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+/// `GET /v1/chains/:id/stream` — SSE stream of chain progress.
+pub async fn stream_chain<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(chain_id): Path<String>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ProblemDetails,
+> {
+    let id = TaskId(chain_id.clone());
+
+    // Verify chain exists before starting stream.
+    state
+        .state
+        .pool
+        .chain_progress(&id)
+        .ok_or_else(|| ProblemDetails::not_found("chain", &chain_id))?;
+
+    let stream = crate::rest::sse::chain_stream(state.state.clone(), id);
+    Ok(axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive()))
+}

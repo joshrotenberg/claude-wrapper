@@ -239,3 +239,29 @@ pub async fn reject_task<S: PoolStore + 'static>(
 
     Ok(axum::http::StatusCode::OK)
 }
+
+/// `GET /v1/tasks/:id/stream` — SSE stream of task output.
+pub async fn stream_task<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(task_id): Path<String>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ProblemDetails,
+> {
+    let id = TaskId(task_id.clone());
+
+    // Verify task exists before starting stream.
+    state
+        .state
+        .pool
+        .store()
+        .get_task(&id)
+        .await
+        .map_err(ProblemDetails::from)?
+        .ok_or_else(|| ProblemDetails::not_found("task", &task_id))?;
+
+    let stream = crate::rest::sse::task_stream(state.state.clone(), id);
+    Ok(axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive()))
+}
