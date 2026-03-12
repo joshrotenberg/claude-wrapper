@@ -117,6 +117,17 @@ struct Cli {
     /// Required for worktree isolation to function correctly.
     #[arg(long)]
     working_dir: Option<PathBuf>,
+
+    /// Enable REST API alongside the primary transport.
+    ///
+    /// Serves an HTTP REST API for non-MCP clients (CI/CD, dashboards, scripts).
+    /// The REST API runs concurrently with the primary MCP transport.
+    #[arg(long)]
+    rest: bool,
+
+    /// Port for the REST API server.
+    #[arg(long, default_value = "3200")]
+    rest_port: u16,
 }
 
 fn parse_permission_mode(s: &str) -> claude_pool::PermissionMode {
@@ -341,6 +352,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router = router.resource_template(template);
     }
 
+    // Optionally spawn the REST API server alongside the primary transport.
+    #[cfg(feature = "rest")]
+    let rest_handle = if cli.rest {
+        let rest_addr = format!("{}:{}", cli.bind, cli.rest_port);
+        let rest_router = claude_pool_server::rest::router(state.clone());
+        let listener = tokio::net::TcpListener::bind(&rest_addr).await?;
+        tracing::info!(%rest_addr, "REST API starting");
+        Some(tokio::spawn(async move {
+            axum::serve(listener, rest_router).await
+        }))
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "rest"))]
+    if cli.rest {
+        return Err("--rest requires the `rest` feature: install with `cargo install claude-pool-server --features rest`".into());
+    }
+
     if cli.http {
         #[cfg(not(feature = "http"))]
         {
@@ -369,6 +399,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(slots = cli.slots, "claude-pool-server starting (stdio)");
         let mut transport = StdioTransport::new(router);
         transport.run().await?;
+    }
+
+    // If the REST server was spawned, wait for it to finish.
+    #[cfg(feature = "rest")]
+    if let Some(handle) = rest_handle {
+        handle.await??;
     }
 
     Ok(())

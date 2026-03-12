@@ -1,0 +1,163 @@
+//! Chain management REST endpoints.
+//!
+//! - `POST /v1/chains` — submit a chain
+//! - `GET /v1/chains/:id` — get chain progress
+//! - `DELETE /v1/chains/:id` — cancel a chain
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use claude_pool::{ChainOptions, ChainStep, PoolStore, StepAction, TaskId};
+use serde::{Deserialize, Serialize};
+
+use crate::rest::AppState;
+use crate::rest::error::ProblemDetails;
+
+/// A single step in a chain submission.
+#[derive(Debug, Deserialize)]
+pub struct ChainStepRequest {
+    /// Step name.
+    pub name: String,
+    /// The prompt for this step.
+    pub prompt: String,
+    /// Optional model override for this step.
+    pub model: Option<String>,
+    /// Optional effort override for this step.
+    pub effort: Option<String>,
+}
+
+/// Request body for `POST /v1/chains`.
+#[derive(Debug, Deserialize)]
+pub struct SubmitChainRequest {
+    /// Ordered list of chain steps.
+    pub steps: Vec<ChainStepRequest>,
+    /// Tags for grouping/filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Response body for chain submission.
+#[derive(Debug, Serialize)]
+pub struct SubmitChainResponse {
+    pub chain_id: String,
+    pub total_steps: usize,
+}
+
+/// A completed step in a chain progress response.
+#[derive(Debug, Serialize)]
+pub struct CompletedStepResponse {
+    pub name: String,
+    pub success: bool,
+    pub output: String,
+    pub cost_microdollars: u64,
+}
+
+/// Response body for `GET /v1/chains/:id`.
+#[derive(Debug, Serialize)]
+pub struct ChainProgressResponse {
+    pub chain_id: String,
+    pub status: String,
+    pub total_steps: usize,
+    pub current_step: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_step_name: Option<String>,
+    pub completed_steps: Vec<CompletedStepResponse>,
+}
+
+/// `POST /v1/chains` — submit a chain for async execution.
+pub async fn submit_chain<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Json(req): Json<SubmitChainRequest>,
+) -> Result<(axum::http::StatusCode, Json<SubmitChainResponse>), ProblemDetails> {
+    if req.steps.is_empty() {
+        return Err(ProblemDetails::bad_request("steps array must not be empty"));
+    }
+
+    let total_steps = req.steps.len();
+
+    let steps: Vec<ChainStep> = req
+        .steps
+        .into_iter()
+        .map(|s| ChainStep {
+            name: s.name,
+            action: StepAction::Prompt {
+                prompt: s.prompt,
+            },
+            config: None, // TODO: pass config once TaskOverrides lands
+            failure_policy: Default::default(),
+            output_vars: HashMap::new(),
+        })
+        .collect();
+
+    let options = ChainOptions {
+        tags: req.tags,
+        ..Default::default()
+    };
+
+    let skills = state.state.skills.read().await;
+    let chain_id = state
+        .state
+        .pool
+        .submit_chain(steps, &skills, options)
+        .await
+        .map_err(ProblemDetails::from)?;
+
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(SubmitChainResponse {
+            chain_id: chain_id.0,
+            total_steps,
+        }),
+    ))
+}
+
+/// `GET /v1/chains/:id` — get chain progress.
+pub async fn get_chain<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(chain_id): Path<String>,
+) -> Result<Json<ChainProgressResponse>, ProblemDetails> {
+    let id = TaskId(chain_id.clone());
+    let progress = state
+        .state
+        .pool
+        .chain_progress(&id)
+        .ok_or_else(|| ProblemDetails::not_found("chain", &chain_id))?;
+
+    let completed_steps = progress
+        .completed_steps
+        .iter()
+        .map(|s| CompletedStepResponse {
+            name: s.name.clone(),
+            success: s.success,
+            output: s.output.clone(),
+            cost_microdollars: s.cost_microdollars,
+        })
+        .collect();
+
+    Ok(Json(ChainProgressResponse {
+        chain_id,
+        status: format!("{:?}", progress.status).to_lowercase(),
+        total_steps: progress.total_steps,
+        current_step: progress.current_step,
+        current_step_name: progress.current_step_name.clone(),
+        completed_steps,
+    }))
+}
+
+/// `DELETE /v1/chains/:id` — cancel a running chain.
+pub async fn cancel_chain<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(chain_id): Path<String>,
+) -> Result<axum::http::StatusCode, ProblemDetails> {
+    let id = TaskId(chain_id);
+    state
+        .state
+        .pool
+        .cancel_chain(&id)
+        .await
+        .map_err(ProblemDetails::from)?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}

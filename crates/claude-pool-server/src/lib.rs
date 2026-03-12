@@ -10,6 +10,9 @@ pub mod tools;
 
 pub mod auth;
 
+#[cfg(feature = "rest")]
+pub mod rest;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
