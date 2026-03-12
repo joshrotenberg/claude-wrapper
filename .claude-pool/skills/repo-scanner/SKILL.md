@@ -18,7 +18,7 @@ You are scanning a GitHub repo for issues with `pool:*` labels and acting on eac
 
 ## Step 1: Discover
 
-Use `search_issues` to find open issues with pool labels in this repo. Query: `repo:{owner/repo} is:issue is:open label:pool:discuss,pool:ready,pool:in-progress,pool:review,pool:needs-input`
+Use `search_issues` to find open issues with pool labels in this repo. Query: `repo:{owner/repo} is:issue is:open label:pool:discuss,pool:ready,pool:in-progress,pool:review,pool:needs-input` (comma-separated labels = OR in GitHub search)
 
 If no results, report "No pool-labeled issues found" and stop.
 
@@ -26,7 +26,7 @@ Group issues by label priority: `pool:ready` first (actionable), then `pool:in-p
 
 **Label exclusivity rule:** If an issue has BOTH `pool:discuss` and `pool:ready`, treat it as `pool:discuss` only — the human must remove `pool:discuss` before adding `pool:ready` to signal clear intent. Post a comment noting this: "Issue has both `pool:discuss` and `pool:ready`. Remove `pool:discuss` first to confirm you want this scheduled."
 
-## Step 1.5: Authorization check
+## Step 2: Authorization check
 
 For each issue, verify the **author** (who opened it) and the **label applier** (who added the pool label) are authorized:
 
@@ -41,7 +41,7 @@ This applies to ALL pool labels. A `pool:discuss` from a non-collaborator is ign
 
 If an issue was opened by an authorized user but the pool label was added by someone else, still skip it — the label is the trigger, so the label applier must be authorized.
 
-## Step 2: Act on each issue
+## Step 3: Act on each issue
 
 ### `pool:ready` — Schedule and dispatch
 
@@ -83,7 +83,7 @@ If an issue was opened by an authorized user but the pool label was added by som
 1. Read the issue to understand the blocker.
 2. Include in the tick summary but take no action (waiting for human).
 
-## Step 3: Report
+## Step 4: Report
 
 Output a tick summary:
 
