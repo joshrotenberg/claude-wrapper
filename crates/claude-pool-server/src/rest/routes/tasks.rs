@@ -1,5 +1,6 @@
 //! Task management REST endpoints.
 //!
+//! - `GET /v1/tasks` — list tasks with optional filtering
 //! - `POST /v1/tasks` — submit a task
 //! - `GET /v1/tasks/:id` — get task status/result
 //! - `DELETE /v1/tasks/:id` — cancel a task
@@ -10,8 +11,8 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use claude_pool::{PoolStore, TaskId};
+use axum::extract::{Path, Query, State};
+use claude_pool::{PoolStore, TaskFilter, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 
 use crate::rest::AppState;
@@ -86,6 +87,76 @@ pub struct FanOutTaskResult {
 pub struct RejectRequest {
     /// Feedback to append before re-queuing.
     pub feedback: String,
+}
+
+/// Query parameters for `GET /v1/tasks`.
+#[derive(Debug, Deserialize)]
+pub struct ListTasksQuery {
+    /// Filter by task state (pending, running, completed, failed, cancelled).
+    pub state: Option<String>,
+    /// Filter by tag (any match).
+    pub tag: Option<String>,
+}
+
+/// `GET /v1/tasks` — list tasks with optional filtering.
+pub async fn list_tasks<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Query(query): Query<ListTasksQuery>,
+) -> Result<Json<Vec<TaskResponse>>, ProblemDetails> {
+    let task_state = query.state.as_deref().and_then(parse_task_state);
+    let tags = query.tag.map(|t| vec![t]);
+
+    let filter = TaskFilter {
+        state: task_state,
+        slot_id: None,
+        tags,
+    };
+
+    let records = state
+        .state
+        .pool
+        .store()
+        .list_tasks(&filter)
+        .await
+        .map_err(ProblemDetails::from)?;
+
+    let tasks: Vec<TaskResponse> = records
+        .iter()
+        .map(|record| {
+            let state_str = format!("{:?}", record.state).to_lowercase();
+            let (output, success, cost, turns) = match record.result {
+                Some(ref r) => (
+                    Some(r.output.clone()),
+                    Some(r.success),
+                    r.cost_microdollars,
+                    r.turns_used,
+                ),
+                None => (None, None, 0, 0),
+            };
+            TaskResponse {
+                task_id: record.id.0.clone(),
+                state: state_str,
+                output,
+                success,
+                cost_microdollars: cost,
+                turns_used: turns,
+            }
+        })
+        .collect();
+
+    Ok(Json(tasks))
+}
+
+fn parse_task_state(s: &str) -> Option<TaskState> {
+    match s {
+        "pending" => Some(TaskState::Pending),
+        "running" => Some(TaskState::Running),
+        "completed" => Some(TaskState::Completed),
+        "failed" => Some(TaskState::Failed),
+        "cancelled" => Some(TaskState::Cancelled),
+        "pending_review" | "pendingreview" => Some(TaskState::PendingReview),
+        _ => None,
+    }
 }
 
 /// `POST /v1/tasks` — submit a task for async execution.
@@ -238,4 +309,30 @@ pub async fn reject_task<S: PoolStore + 'static>(
         .map_err(ProblemDetails::from)?;
 
     Ok(axum::http::StatusCode::OK)
+}
+
+/// `GET /v1/tasks/:id/stream` — SSE stream of task output.
+pub async fn stream_task<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(task_id): Path<String>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ProblemDetails,
+> {
+    let id = TaskId(task_id.clone());
+
+    // Verify task exists before starting stream.
+    state
+        .state
+        .pool
+        .store()
+        .get_task(&id)
+        .await
+        .map_err(ProblemDetails::from)?
+        .ok_or_else(|| ProblemDetails::not_found("task", &task_id))?;
+
+    let stream = crate::rest::sse::task_stream(state.state.clone(), id);
+    Ok(axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive()))
 }

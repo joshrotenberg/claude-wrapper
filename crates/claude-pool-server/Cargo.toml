@@ -43,6 +43,14 @@ version = "0.6"
 optional = true
 features = ["cors", "trace"]
 
+[dependencies.async-stream]
+version = "0.3"
+optional = true
+
+[dependencies.tokio-stream]
+version = "0.1"
+optional = true
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
@@ -52,7 +60,7 @@ tower-mcp = { workspace = true, features = ["testing"] }
 [features]
 default = []
 http = ["tower-mcp/http", "dep:axum"]
-rest = ["dep:axum", "dep:tower-http"]
+rest = ["dep:axum", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("rest"))'] }

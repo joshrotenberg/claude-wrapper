@@ -151,3 +151,60 @@ pub async fn scale<S: PoolStore + 'static>(
         current_slots: new_status.total_slots,
     }))
 }
+
+/// `GET /v1/pool/events` — SSE stream of pool-wide events.
+///
+/// Emits periodic status snapshots and task state changes.
+/// Useful for dashboards that want real-time pool visibility.
+pub async fn events<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+) -> axum::response::sse::Sse<
+    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    use axum::response::sse::Event;
+
+    let stream = async_stream::stream! {
+        let mut last_running = 0usize;
+        let mut last_completed = 0u64;
+
+        loop {
+            if let Ok(status) = state.state.pool.status().await {
+                let running = status.running_tasks;
+                let completed = status.total_spend_microdollars; // proxy for progress
+
+                // Emit status on every poll (dashboards want heartbeats).
+                yield Ok::<_, Infallible>(Event::default()
+                    .event("status")
+                    .data(serde_json::json!({
+                        "total_slots": status.total_slots,
+                        "idle_slots": status.idle_slots,
+                        "busy_slots": status.busy_slots,
+                        "running_tasks": status.running_tasks,
+                        "pending_tasks": status.pending_tasks,
+                        "total_spend_microdollars": status.total_spend_microdollars,
+                        "shutdown": status.shutdown,
+                    }).to_string()));
+
+                // Detect transitions.
+                if running != last_running || completed != last_completed {
+                    last_running = running;
+                    last_completed = completed;
+                }
+
+                if status.shutdown {
+                    yield Ok(Event::default()
+                        .event("shutdown")
+                        .data(r#"{"shutdown": true}"#));
+                    break;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    };
+
+    axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive())
+}

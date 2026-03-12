@@ -1,5 +1,6 @@
 //! Chain management REST endpoints.
 //!
+//! - `GET /v1/chains` — list all chains
 //! - `POST /v1/chains` — submit a chain
 //! - `GET /v1/chains/:id` — get chain progress
 //! - `DELETE /v1/chains/:id` — cancel a chain
@@ -64,6 +65,32 @@ pub struct ChainProgressResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_step_name: Option<String>,
     pub completed_steps: Vec<CompletedStepResponse>,
+}
+
+/// Summary entry for chain listing.
+#[derive(Debug, Serialize)]
+pub struct ChainSummary {
+    pub chain_id: String,
+    pub status: String,
+    pub total_steps: usize,
+    pub completed_steps: usize,
+}
+
+/// `GET /v1/chains` — list all tracked chains.
+pub async fn list_chains<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+) -> Json<Vec<ChainSummary>> {
+    let entries = state.state.pool.list_chain_progress();
+    let summaries: Vec<ChainSummary> = entries
+        .into_iter()
+        .map(|(id, progress)| ChainSummary {
+            chain_id: id.0,
+            status: format!("{:?}", progress.status).to_lowercase(),
+            total_steps: progress.total_steps,
+            completed_steps: progress.completed_steps.len(),
+        })
+        .collect();
+    Json(summaries)
 }
 
 /// `POST /v1/chains` — submit a chain for async execution.
@@ -158,4 +185,27 @@ pub async fn cancel_chain<S: PoolStore + 'static>(
         .map_err(ProblemDetails::from)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/chains/:id/stream` — SSE stream of chain progress.
+pub async fn stream_chain<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    Path(chain_id): Path<String>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ProblemDetails,
+> {
+    let id = TaskId(chain_id.clone());
+
+    // Verify chain exists before starting stream.
+    state
+        .state
+        .pool
+        .chain_progress(&id)
+        .ok_or_else(|| ProblemDetails::not_found("chain", &chain_id))?;
+
+    let stream = crate::rest::sse::chain_stream(state.state.clone(), id);
+    Ok(axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive()))
 }
