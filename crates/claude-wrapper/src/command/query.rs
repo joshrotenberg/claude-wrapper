@@ -58,6 +58,14 @@ pub struct QueryCommand {
     settings: Option<String>,
     fork_session: bool,
     retry_policy: Option<crate::retry::RetryPolicy>,
+    worktree: bool,
+    brief: bool,
+    debug_filter: Option<String>,
+    debug_file: Option<String>,
+    betas: Option<String>,
+    plugin_dirs: Vec<String>,
+    setting_sources: Option<String>,
+    tmux: bool,
 }
 
 impl QueryCommand {
@@ -95,6 +103,14 @@ impl QueryCommand {
             settings: None,
             fork_session: false,
             retry_policy: None,
+            worktree: false,
+            brief: false,
+            debug_filter: None,
+            debug_file: None,
+            betas: None,
+            plugin_dirs: Vec::new(),
+            setting_sources: None,
+            tmux: false,
         }
     }
 
@@ -309,6 +325,62 @@ impl QueryCommand {
     #[must_use]
     pub fn fork_session(mut self) -> Self {
         self.fork_session = true;
+        self
+    }
+
+    /// Create a new git worktree for this session, providing an isolated working directory.
+    #[must_use]
+    pub fn worktree(mut self) -> Self {
+        self.worktree = true;
+        self
+    }
+
+    /// Enable brief mode, which activates the SendUserMessage tool for agent-to-user communication.
+    #[must_use]
+    pub fn brief(mut self) -> Self {
+        self.brief = true;
+        self
+    }
+
+    /// Enable debug logging with an optional filter (e.g., "api,hooks").
+    #[must_use]
+    pub fn debug_filter(mut self, filter: impl Into<String>) -> Self {
+        self.debug_filter = Some(filter.into());
+        self
+    }
+
+    /// Write debug logs to the specified file path.
+    #[must_use]
+    pub fn debug_file(mut self, path: impl Into<String>) -> Self {
+        self.debug_file = Some(path.into());
+        self
+    }
+
+    /// Beta feature headers for API key authentication.
+    #[must_use]
+    pub fn betas(mut self, betas: impl Into<String>) -> Self {
+        self.betas = Some(betas.into());
+        self
+    }
+
+    /// Load plugins from the specified directory for this session.
+    #[must_use]
+    pub fn plugin_dir(mut self, dir: impl Into<String>) -> Self {
+        self.plugin_dirs.push(dir.into());
+        self
+    }
+
+    /// Comma-separated list of setting sources to load (e.g., "user,project,local").
+    #[must_use]
+    pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
+        self.setting_sources = Some(sources.into());
+        self
+    }
+
+    /// Create a tmux session for the worktree.
+    #[must_use]
+    pub fn tmux(mut self) -> Self {
+        self.tmux = true;
         self
     }
 
@@ -532,6 +604,43 @@ impl QueryCommand {
             args.push("--fork-session".to_string());
         }
 
+        if self.worktree {
+            args.push("--worktree".to_string());
+        }
+
+        if self.brief {
+            args.push("--brief".to_string());
+        }
+
+        if let Some(ref filter) = self.debug_filter {
+            args.push("--debug".to_string());
+            args.push(filter.clone());
+        }
+
+        if let Some(ref path) = self.debug_file {
+            args.push("--debug-file".to_string());
+            args.push(path.clone());
+        }
+
+        if let Some(ref betas) = self.betas {
+            args.push("--betas".to_string());
+            args.push(betas.clone());
+        }
+
+        for dir in &self.plugin_dirs {
+            args.push("--plugin-dir".to_string());
+            args.push(dir.clone());
+        }
+
+        if let Some(ref sources) = self.setting_sources {
+            args.push("--setting-sources".to_string());
+            args.push(sources.clone());
+        }
+
+        if self.tmux {
+            args.push("--tmux".to_string());
+        }
+
         // Prompt is the positional argument at the end
         args.push(self.prompt.clone());
 
@@ -677,5 +786,78 @@ mod tests {
 
         // Single quotes should be escaped in shell
         assert!(command_str.contains("'it'\\''s'"));
+    }
+
+    #[test]
+    fn test_worktree_flag() {
+        let cmd = QueryCommand::new("test").worktree();
+        let args = cmd.args();
+        assert!(args.contains(&"--worktree".to_string()));
+    }
+
+    #[test]
+    fn test_brief_flag() {
+        let cmd = QueryCommand::new("test").brief();
+        let args = cmd.args();
+        assert!(args.contains(&"--brief".to_string()));
+    }
+
+    #[test]
+    fn test_debug_filter() {
+        let cmd = QueryCommand::new("test").debug_filter("api,hooks");
+        let args = cmd.args();
+        assert!(args.contains(&"--debug".to_string()));
+        assert!(args.contains(&"api,hooks".to_string()));
+    }
+
+    #[test]
+    fn test_debug_file() {
+        let cmd = QueryCommand::new("test").debug_file("/tmp/debug.log");
+        let args = cmd.args();
+        assert!(args.contains(&"--debug-file".to_string()));
+        assert!(args.contains(&"/tmp/debug.log".to_string()));
+    }
+
+    #[test]
+    fn test_betas() {
+        let cmd = QueryCommand::new("test").betas("feature-x");
+        let args = cmd.args();
+        assert!(args.contains(&"--betas".to_string()));
+        assert!(args.contains(&"feature-x".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_dir_single() {
+        let cmd = QueryCommand::new("test").plugin_dir("/plugins/foo");
+        let args = cmd.args();
+        assert!(args.contains(&"--plugin-dir".to_string()));
+        assert!(args.contains(&"/plugins/foo".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_dir_multiple() {
+        let cmd = QueryCommand::new("test")
+            .plugin_dir("/plugins/foo")
+            .plugin_dir("/plugins/bar");
+        let args = cmd.args();
+        let plugin_dir_count = args.iter().filter(|a| *a == "--plugin-dir").count();
+        assert_eq!(plugin_dir_count, 2);
+        assert!(args.contains(&"/plugins/foo".to_string()));
+        assert!(args.contains(&"/plugins/bar".to_string()));
+    }
+
+    #[test]
+    fn test_setting_sources() {
+        let cmd = QueryCommand::new("test").setting_sources("user,project,local");
+        let args = cmd.args();
+        assert!(args.contains(&"--setting-sources".to_string()));
+        assert!(args.contains(&"user,project,local".to_string()));
+    }
+
+    #[test]
+    fn test_tmux_flag() {
+        let cmd = QueryCommand::new("test").tmux();
+        let args = cmd.args();
+        assert!(args.contains(&"--tmux".to_string()));
     }
 }
