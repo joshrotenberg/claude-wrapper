@@ -1,4 +1,73 @@
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+
+/// Transport type for MCP server connections.
+///
+/// # Example
+///
+/// ```
+/// use claude_wrapper::Transport;
+/// use std::str::FromStr;
+///
+/// let t = Transport::from_str("stdio").unwrap();
+/// assert_eq!(t, Transport::Stdio);
+/// assert_eq!(t.to_string(), "stdio");
+///
+/// let t: Transport = "http".parse().unwrap();
+/// assert_eq!(t, Transport::Http);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// Standard I/O transport — server runs as a subprocess.
+    Stdio,
+    /// HTTP transport — server accessible via URL.
+    Http,
+    /// Server-Sent Events transport — server accessible via URL with SSE.
+    Sse,
+}
+
+impl fmt::Display for Transport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdio => write!(f, "stdio"),
+            Self::Http => write!(f, "http"),
+            Self::Sse => write!(f, "sse"),
+        }
+    }
+}
+
+/// Error returned when parsing an unknown transport string.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("unknown transport: {0}")]
+pub struct TransportParseError(pub String);
+
+impl FromStr for Transport {
+    type Err = TransportParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "stdio" => Ok(Self::Stdio),
+            "http" => Ok(Self::Http),
+            "sse" => Ok(Self::Sse),
+            other => Err(TransportParseError(other.to_string())),
+        }
+    }
+}
+
+impl From<&str> for Transport {
+    /// Convert a string slice to a `Transport`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the string is not a recognized transport type.
+    /// Valid values are: `"stdio"`, `"http"`, `"sse"`.
+    fn from(s: &str) -> Self {
+        s.parse().unwrap_or_else(|e| panic!("{e}"))
+    }
+}
 
 /// Output format for `--output-format`.
 #[derive(Debug, Clone, Copy, Default)]
