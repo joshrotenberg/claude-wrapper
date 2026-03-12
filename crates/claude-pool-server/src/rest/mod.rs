@@ -45,6 +45,7 @@
 //!
 //! ## Pool
 //! - `GET /v1/pool/status` — pool health
+//! - `GET /v1/pool/metrics` — aggregated session metrics
 //! - `GET /v1/pool/events` — SSE stream of pool events
 //! - `POST /v1/pool/drain` — graceful shutdown
 //! - `POST /v1/pool/scale` — scale slots
@@ -153,6 +154,7 @@ pub fn router<S: PoolStore + 'static>(state: Arc<State<S>>, config: RestConfig) 
 
     let pool = Router::new()
         .route("/status", get(routes::pool::get_status::<S>))
+        .route("/metrics", get(routes::pool::get_metrics::<S>))
         .route("/events", get(routes::pool::events::<S>))
         .route("/drain", post(routes::pool::drain::<S>))
         .route("/scale", post(routes::pool::scale::<S>));

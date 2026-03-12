@@ -22,6 +22,9 @@ pub struct PoolStatusResponse {
     pub busy_slots: usize,
     pub pending_tasks: usize,
     pub running_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+    pub cancelled_tasks: usize,
     pub total_spend_microdollars: u64,
     pub budget_microdollars: Option<u64>,
     pub shutdown: bool,
@@ -62,6 +65,9 @@ pub async fn get_status<S: PoolStore + 'static>(
         busy_slots: status.busy_slots,
         pending_tasks: status.pending_tasks,
         running_tasks: status.running_tasks,
+        completed_tasks: status.completed_tasks,
+        failed_tasks: status.failed_tasks,
+        cancelled_tasks: status.cancelled_tasks,
         total_spend_microdollars: status.total_spend_microdollars,
         budget_microdollars: status.budget_microdollars,
         shutdown: status.shutdown,
@@ -150,6 +156,44 @@ pub async fn scale<S: PoolStore + 'static>(
         previous_slots: previous,
         current_slots: new_status.total_slots,
     }))
+}
+
+/// Query parameters for `GET /v1/pool/metrics`.
+#[derive(Debug, Deserialize, Default)]
+pub struct MetricsQuery {
+    /// Only include tasks created after this time (millis since epoch).
+    pub since_ms: Option<u64>,
+    /// Only include tasks created before this time (millis since epoch).
+    pub until_ms: Option<u64>,
+    /// Only include tasks with this tag.
+    pub tag: Option<String>,
+    /// Only include tasks that ran on this model.
+    pub model: Option<String>,
+}
+
+/// `GET /v1/pool/metrics` — aggregated session metrics.
+///
+/// Returns cost, timing, and model breakdowns for the current session.
+/// Supports optional query filters: `?since_ms=&until_ms=&tag=&model=`.
+pub async fn get_metrics<S: PoolStore + 'static>(
+    State(state): State<Arc<AppState<S>>>,
+    axum::extract::Query(query): axum::extract::Query<MetricsQuery>,
+) -> Result<Json<claude_pool::types::SessionMetrics>, ProblemDetails> {
+    let filter = claude_pool::types::MetricsFilter {
+        since_ms: query.since_ms,
+        until_ms: query.until_ms,
+        tags: query.tag.map(|t| vec![t]),
+        model: query.model,
+    };
+
+    let metrics = state
+        .state
+        .pool
+        .session_metrics(&filter)
+        .await
+        .map_err(ProblemDetails::from)?;
+
+    Ok(Json(metrics))
 }
 
 /// `GET /v1/pool/events` — SSE stream of pool-wide events.

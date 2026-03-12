@@ -2,6 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Current time in milliseconds since epoch.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 // Re-export shared types from claude-wrapper so consumers don't need
 // to depend on both crates for basic config.
@@ -325,6 +334,18 @@ pub struct TaskRecord {
     /// The original prompt before any rejection feedback was appended.
     #[serde(default)]
     pub original_prompt: Option<String>,
+
+    /// When this task was submitted (millis since epoch).
+    #[serde(default)]
+    pub created_at_ms: Option<u64>,
+
+    /// When this task started executing (millis since epoch).
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+
+    /// When this task completed/failed/was cancelled (millis since epoch).
+    #[serde(default)]
+    pub completed_at_ms: Option<u64>,
 }
 
 fn default_max_rejections() -> u32 {
@@ -346,6 +367,14 @@ pub struct TaskResult {
     /// Number of turns used.
     pub turns_used: u32,
 
+    /// Wall-clock execution time in milliseconds.
+    #[serde(default)]
+    pub elapsed_ms: u64,
+
+    /// Model that executed this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
     /// Session ID from the execution.
     pub session_id: Option<String>,
 
@@ -362,6 +391,134 @@ pub struct TaskResult {
     pub stderr: Option<String>,
 }
 
+impl TaskResult {
+    /// Create a successful task result.
+    pub fn success(output: impl Into<String>, cost_microdollars: u64, turns_used: u32) -> Self {
+        Self {
+            output: output.into(),
+            success: true,
+            cost_microdollars,
+            turns_used,
+            elapsed_ms: 0,
+            model: None,
+            session_id: None,
+            failed_command: None,
+            exit_code: None,
+            stderr: None,
+        }
+    }
+
+    /// Create a failed task result.
+    pub fn failure(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            success: false,
+            cost_microdollars: 0,
+            turns_used: 0,
+            elapsed_ms: 0,
+            model: None,
+            session_id: None,
+            failed_command: None,
+            exit_code: None,
+            stderr: None,
+        }
+    }
+
+    /// Set the model that executed this task.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Set the elapsed execution time in milliseconds.
+    pub fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+
+    /// Set the session ID.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Set failure details (command, exit code, stderr).
+    pub fn with_failure_details(
+        mut self,
+        command: Option<String>,
+        exit_code: Option<i32>,
+        stderr: Option<String>,
+    ) -> Self {
+        self.failed_command = command;
+        self.exit_code = exit_code;
+        self.stderr = stderr;
+        self
+    }
+}
+
+impl TaskRecord {
+    /// Create a new pending task record with timestamps.
+    pub fn new_pending(id: TaskId, prompt: impl Into<String>) -> Self {
+        Self {
+            id,
+            prompt: prompt.into(),
+            state: TaskState::Pending,
+            slot_id: None,
+            result: None,
+            tags: vec![],
+            config: None,
+            review_required: false,
+            max_rejections: 3,
+            rejection_count: 0,
+            original_prompt: None,
+            created_at_ms: Some(now_ms()),
+            started_at_ms: None,
+            completed_at_ms: None,
+        }
+    }
+
+    /// Set tags.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Set per-task config overrides.
+    pub fn with_config(mut self, config: Option<TaskOverrides>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Enable review-required mode.
+    pub fn with_review(mut self, max_rejections: u32) -> Self {
+        self.review_required = true;
+        self.max_rejections = max_rejections;
+        self.original_prompt = Some(self.prompt.clone());
+        self
+    }
+
+    /// Transition the task to a new state, setting timestamps automatically.
+    ///
+    /// - `Running`: sets `started_at_ms`
+    /// - `Completed`, `Failed`, `Cancelled`, `PendingReview`: sets `completed_at_ms`
+    pub fn transition_to(&mut self, state: TaskState) {
+        self.state = state;
+        let now = now_ms();
+        match state {
+            TaskState::Running => {
+                self.started_at_ms = Some(now);
+            }
+            TaskState::Completed
+            | TaskState::Failed
+            | TaskState::Cancelled
+            | TaskState::PendingReview => {
+                self.completed_at_ms = Some(now);
+            }
+            TaskState::Pending => {}
+        }
+    }
+}
+
 /// Filter criteria for listing tasks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskFilter {
@@ -373,4 +530,84 @@ pub struct TaskFilter {
 
     /// Filter by tags (any match).
     pub tags: Option<Vec<String>>,
+}
+
+/// Aggregated metrics for the current pool session.
+///
+/// Provides developer-focused insights: spend tracking, task timing,
+/// and sizing data useful for optimizing pool usage patterns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMetrics {
+    /// Total number of tasks submitted this session.
+    pub total_tasks: u64,
+    /// Number of completed tasks.
+    pub completed_tasks: u64,
+    /// Number of failed tasks.
+    pub failed_tasks: u64,
+    /// Number of cancelled tasks.
+    pub cancelled_tasks: u64,
+    /// Number of currently running tasks.
+    pub running_tasks: u64,
+    /// Number of pending tasks.
+    pub pending_tasks: u64,
+
+    /// Total spend across all tasks in microdollars.
+    pub total_spend_microdollars: u64,
+    /// Average cost per completed task in microdollars.
+    pub avg_cost_microdollars: u64,
+    /// Highest single-task cost in microdollars.
+    pub max_cost_microdollars: u64,
+
+    /// Average execution time for completed tasks in milliseconds.
+    pub avg_elapsed_ms: u64,
+    /// Median execution time for completed tasks in milliseconds.
+    pub median_elapsed_ms: u64,
+    /// Maximum execution time for completed tasks in milliseconds.
+    pub max_elapsed_ms: u64,
+    /// Minimum execution time for completed tasks in milliseconds.
+    pub min_elapsed_ms: u64,
+
+    /// Average number of turns per completed task.
+    pub avg_turns: f64,
+
+    /// Breakdown of tasks by model (count only).
+    pub tasks_by_model: HashMap<String, u64>,
+
+    /// Detailed per-model metrics.
+    pub model_breakdown: Vec<ModelMetrics>,
+
+    /// Session start time (millis since epoch).
+    pub session_start_ms: u64,
+    /// Session duration so far in milliseconds.
+    pub session_duration_ms: u64,
+}
+
+/// Per-model aggregated metrics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelMetrics {
+    /// Model identifier.
+    pub model: String,
+    /// Number of tasks run on this model.
+    pub task_count: u64,
+    /// Total spend for this model in microdollars.
+    pub total_cost_microdollars: u64,
+    /// Average cost per task in microdollars.
+    pub avg_cost_microdollars: u64,
+    /// Average execution time in milliseconds.
+    pub avg_elapsed_ms: u64,
+    /// Total turns used by this model.
+    pub total_turns: u64,
+}
+
+/// Filter criteria for session metrics queries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricsFilter {
+    /// Only include tasks created after this time (millis since epoch).
+    pub since_ms: Option<u64>,
+    /// Only include tasks created before this time (millis since epoch).
+    pub until_ms: Option<u64>,
+    /// Only include tasks with these tags (any match).
+    pub tags: Option<Vec<String>>,
+    /// Only include tasks that ran on this model.
+    pub model: Option<String>,
 }

@@ -32,9 +32,10 @@
 //! - `pool_scale_up` — Add N new slots to the pool
 //! - `pool_scale_down` — Remove N slots from pool
 //!
-//! ### Pool Control (2 tools)
+//! ### Pool Control (3 tools)
 //! - `pool_drain` — Gracefully shut down pool, wait for in-flight tasks
 //! - `pool_set_target_slots` — Set pool to specific number of slots
+//! - `pool_session_metrics` — Get aggregated session metrics: spend, timing, model breakdown
 //!
 //! ### Skill Management (7 tools)
 //! - `pool_skill_run` — Run a registered skill by name with arguments (blocks)
@@ -2299,9 +2300,57 @@ pub fn pool_reject_result_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> 
         .build()
 }
 
+/// **pool_session_metrics** — Get aggregated session metrics: cost, timing, model breakdown
+///
+/// Returns developer-focused insights for the current pool session including
+/// spend tracking, task timing distributions, and per-model breakdowns.
+/// Useful for answering questions like "how much did I spend today?" and
+/// "how long are my tasks taking on average?".
+/// Input for `pool_session_metrics`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionMetricsInput {
+    /// Only include tasks created after this time (millis since epoch).
+    since_ms: Option<u64>,
+    /// Only include tasks created before this time (millis since epoch).
+    until_ms: Option<u64>,
+    /// Only include tasks that ran on this model.
+    model: Option<String>,
+    /// Only include tasks with this tag.
+    tag: Option<String>,
+}
+
+pub fn pool_session_metrics_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
+    ToolBuilder::new("pool_session_metrics")
+        .title("Session Metrics")
+        .description(
+            "Get aggregated session metrics: spend, timing, model breakdown, task counts. \
+             All parameters are optional filters.",
+        )
+        .read_only()
+        .handler(move |input: SessionMetricsInput| {
+            let state = Arc::clone(&state);
+            async move {
+                let filter = claude_pool::types::MetricsFilter {
+                    since_ms: input.since_ms,
+                    until_ms: input.until_ms,
+                    model: input.model,
+                    tags: input.tag.map(|t| vec![t]),
+                };
+                match state.pool.session_metrics(&filter).await {
+                    Ok(metrics) => Ok(CallToolResult::text(
+                        serde_json::to_string_pretty(&metrics).unwrap(),
+                    )),
+                    Err(e) => Ok(CallToolResult::error(e.to_string())),
+                }
+            }
+        })
+        .build()
+}
+
 pub fn all_tools<S: PoolStore + 'static>(state: &Arc<State<S>>) -> Vec<Tool> {
     vec![
         pool_status_tool(Arc::clone(state)),
+        pool_session_metrics_tool(Arc::clone(state)),
         pool_run_tool(Arc::clone(state)),
         pool_submit_tool(Arc::clone(state)),
         pool_result_tool(Arc::clone(state)),

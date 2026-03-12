@@ -166,6 +166,19 @@ async fn pool_status_returns_slot_info() {
     assert!(body["server_version"].is_string());
 }
 
+#[tokio::test]
+async fn pool_metrics_returns_session_data() {
+    let app = test_router(2).await;
+    let (status, body) = send(app, get("/v1/pool/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total_tasks"], 0);
+    assert_eq!(body["completed_tasks"], 0);
+    assert_eq!(body["total_spend_microdollars"], 0);
+    assert!(body["session_start_ms"].is_number());
+    assert!(body["session_duration_ms"].is_number());
+    assert!(body["tasks_by_model"].is_object());
+}
+
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

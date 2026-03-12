@@ -23,6 +23,7 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -57,6 +58,8 @@ pub(crate) struct PoolInner<S: PoolStore> {
     pub(crate) chain_progress: dashmap::DashMap<String, crate::chain::ChainProgress>,
     /// Message bus for inter-slot communication.
     pub(crate) message_bus: MessageBus,
+    /// When this pool was created (millis since epoch).
+    pub(crate) created_at_ms: u64,
 }
 
 /// A pool of Claude CLI slots.
@@ -150,6 +153,7 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             worktree_manager,
             chain_progress: dashmap::DashMap::new(),
             message_bus: MessageBus::default(),
+            created_at_ms: now_ms(),
         });
 
         // Register slots in the store.
@@ -383,19 +387,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let task_id = TaskId(format!("task-{}", new_id()));
 
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: prompt.to_string(),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags: vec![],
-            config: task_config,
-            review_required: false,
-            max_rejections: 3,
-            rejection_count: 0,
-            original_prompt: None,
-        };
+        let record = TaskRecord::new_pending(task_id.clone(), prompt).with_config(task_config);
         self.inner.store.put_task(record).await?;
 
         let (slot_id, slot_config) = self.assign_slot(&task_id).await?;
@@ -419,7 +411,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             .get_task(&task_id)
             .await?
             .ok_or_else(|| Error::TaskNotFound(task_id.0.clone()))?;
-        task.state = TaskState::Completed;
+        task.transition_to(TaskState::Completed);
         task.result = Some(task_result.clone());
         self.inner.store.put_task(task).await?;
 
@@ -446,19 +438,9 @@ impl<S: PoolStore + 'static> Pool<S> {
         let task_id = TaskId(format!("task-{}", new_id()));
         let prompt = prompt.to_string();
 
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: prompt.clone(),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags,
-            config: task_config,
-            review_required: false,
-            max_rejections: 3,
-            rejection_count: 0,
-            original_prompt: None,
-        };
+        let record = TaskRecord::new_pending(task_id.clone(), prompt.clone())
+            .with_tags(tags)
+            .with_config(task_config);
         self.inner.store.put_task(record).await?;
 
         // Spawn the task execution in the background.
@@ -487,39 +469,26 @@ impl<S: PoolStore + 'static> Pool<S> {
                     let mut updated = task;
                     match result {
                         Ok(task_result) => {
-                            updated.state = TaskState::Completed;
+                            updated.transition_to(TaskState::Completed);
                             updated.result = Some(task_result);
                         }
                         Err(e) => {
                             let details = extract_failure_details(&e);
-                            updated.state = TaskState::Failed;
-                            updated.result = Some(TaskResult {
-                                output: e.to_string(),
-                                success: false,
-                                cost_microdollars: 0,
-                                turns_used: 0,
-                                session_id: None,
-                                failed_command: details.failed_command,
-                                exit_code: details.exit_code,
-                                stderr: details.stderr,
-                            });
+                            updated.transition_to(TaskState::Failed);
+                            updated.result =
+                                Some(TaskResult::failure(e.to_string()).with_failure_details(
+                                    details.failed_command,
+                                    details.exit_code,
+                                    details.stderr,
+                                ));
                         }
                     }
                     let _ = pool.inner.store.put_task(updated).await;
                 }
                 Err(e) => {
                     let mut updated = task;
-                    updated.state = TaskState::Failed;
-                    updated.result = Some(TaskResult {
-                        output: e.to_string(),
-                        success: false,
-                        cost_microdollars: 0,
-                        turns_used: 0,
-                        session_id: None,
-                        failed_command: None,
-                        exit_code: None,
-                        stderr: None,
-                    });
+                    updated.transition_to(TaskState::Failed);
+                    updated.result = Some(TaskResult::failure(e.to_string()));
                     let _ = pool.inner.store.put_task(updated).await;
                 }
             }
@@ -547,19 +516,10 @@ impl<S: PoolStore + 'static> Pool<S> {
         let prompt = prompt.to_string();
         let max_rej = max_rejections.unwrap_or(3);
 
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: prompt.clone(),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags,
-            config: task_config,
-            review_required: true,
-            max_rejections: max_rej,
-            rejection_count: 0,
-            original_prompt: Some(prompt.clone()),
-        };
+        let record = TaskRecord::new_pending(task_id.clone(), prompt.clone())
+            .with_tags(tags)
+            .with_config(task_config)
+            .with_review(max_rej);
         self.inner.store.put_task(record).await?;
 
         // Spawn the task execution in the background.
@@ -590,42 +550,29 @@ impl<S: PoolStore + 'static> Pool<S> {
                         Ok(task_result) => {
                             // review_required: go to PendingReview instead of Completed
                             if updated.review_required {
-                                updated.state = TaskState::PendingReview;
+                                updated.transition_to(TaskState::PendingReview);
                             } else {
-                                updated.state = TaskState::Completed;
+                                updated.transition_to(TaskState::Completed);
                             }
                             updated.result = Some(task_result);
                         }
                         Err(e) => {
                             let details = extract_failure_details(&e);
-                            updated.state = TaskState::Failed;
-                            updated.result = Some(TaskResult {
-                                output: e.to_string(),
-                                success: false,
-                                cost_microdollars: 0,
-                                turns_used: 0,
-                                session_id: None,
-                                failed_command: details.failed_command,
-                                exit_code: details.exit_code,
-                                stderr: details.stderr,
-                            });
+                            updated.transition_to(TaskState::Failed);
+                            updated.result =
+                                Some(TaskResult::failure(e.to_string()).with_failure_details(
+                                    details.failed_command,
+                                    details.exit_code,
+                                    details.stderr,
+                                ));
                         }
                     }
                     let _ = pool.inner.store.put_task(updated).await;
                 }
                 Err(e) => {
                     let mut updated = task;
-                    updated.state = TaskState::Failed;
-                    updated.result = Some(TaskResult {
-                        output: e.to_string(),
-                        success: false,
-                        cost_microdollars: 0,
-                        turns_used: 0,
-                        session_id: None,
-                        failed_command: None,
-                        exit_code: None,
-                        stderr: None,
-                    });
+                    updated.transition_to(TaskState::Failed);
+                    updated.result = Some(TaskResult::failure(e.to_string()));
                     let _ = pool.inner.store.put_task(updated).await;
                 }
             }
@@ -650,7 +597,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             )));
         }
 
-        task.state = TaskState::Completed;
+        task.transition_to(TaskState::Completed);
         self.inner.store.put_task(task).await
     }
 
@@ -676,20 +623,11 @@ impl<S: PoolStore + 'static> Pool<S> {
         task.rejection_count += 1;
 
         if task.rejection_count >= task.max_rejections {
-            task.state = TaskState::Failed;
-            task.result = Some(TaskResult {
-                output: format!(
-                    "task rejected {} times (max: {}). Last feedback: {}",
-                    task.rejection_count, task.max_rejections, feedback
-                ),
-                success: false,
-                cost_microdollars: 0,
-                turns_used: 0,
-                session_id: None,
-                failed_command: None,
-                exit_code: None,
-                stderr: None,
-            });
+            task.transition_to(TaskState::Failed);
+            task.result = Some(TaskResult::failure(format!(
+                "task rejected {} times (max: {}). Last feedback: {}",
+                task.rejection_count, task.max_rejections, feedback
+            )));
             self.inner.store.put_task(task).await?;
             return Ok(());
         }
@@ -703,7 +641,7 @@ impl<S: PoolStore + 'static> Pool<S> {
             "{}\n\n--- Rejection feedback (attempt {}/{}) ---\n{}",
             original, task.rejection_count, task.max_rejections, feedback
         );
-        task.state = TaskState::Pending;
+        task.transition_to(TaskState::Pending);
         task.slot_id = None;
         task.result = None;
         self.inner.store.put_task(task.clone()).await?;
@@ -735,42 +673,29 @@ impl<S: PoolStore + 'static> Pool<S> {
                     match result {
                         Ok(task_result) => {
                             if updated.review_required {
-                                updated.state = TaskState::PendingReview;
+                                updated.transition_to(TaskState::PendingReview);
                             } else {
-                                updated.state = TaskState::Completed;
+                                updated.transition_to(TaskState::Completed);
                             }
                             updated.result = Some(task_result);
                         }
                         Err(e) => {
                             let details = extract_failure_details(&e);
-                            updated.state = TaskState::Failed;
-                            updated.result = Some(TaskResult {
-                                output: e.to_string(),
-                                success: false,
-                                cost_microdollars: 0,
-                                turns_used: 0,
-                                session_id: None,
-                                failed_command: details.failed_command,
-                                exit_code: details.exit_code,
-                                stderr: details.stderr,
-                            });
+                            updated.transition_to(TaskState::Failed);
+                            updated.result =
+                                Some(TaskResult::failure(e.to_string()).with_failure_details(
+                                    details.failed_command,
+                                    details.exit_code,
+                                    details.stderr,
+                                ));
                         }
                     }
                     let _ = pool.inner.store.put_task(updated).await;
                 }
                 Err(e) => {
                     let mut updated = task;
-                    updated.state = TaskState::Failed;
-                    updated.result = Some(TaskResult {
-                        output: e.to_string(),
-                        success: false,
-                        cost_microdollars: 0,
-                        turns_used: 0,
-                        session_id: None,
-                        failed_command: None,
-                        exit_code: None,
-                        stderr: None,
-                    });
+                    updated.transition_to(TaskState::Failed);
+                    updated.result = Some(TaskResult::failure(e.to_string()));
                     let _ = pool.inner.store.put_task(updated).await;
                 }
             }
@@ -807,13 +732,13 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         match task.state {
             TaskState::Pending | TaskState::PendingReview => {
-                task.state = TaskState::Cancelled;
+                task.transition_to(TaskState::Cancelled);
                 self.inner.store.put_task(task).await?;
                 Ok(())
             }
             TaskState::Running => {
                 // Mark as cancelled; the executing task will check on completion.
-                task.state = TaskState::Cancelled;
+                task.transition_to(TaskState::Cancelled);
                 self.inner.store.put_task(task).await?;
                 Ok(())
             }
@@ -862,7 +787,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         // Mark task as running and assign to slot.
         let mut updated_task = task;
-        updated_task.state = TaskState::Running;
+        updated_task.transition_to(TaskState::Running);
         updated_task.slot_id = Some(slot_id.clone());
         self.inner.store.put_task(updated_task.clone()).await?;
 
@@ -886,22 +811,18 @@ impl<S: PoolStore + 'static> Pool<S> {
             if let Ok(Some(mut task)) = pool.inner.store.get_task(&tid).await {
                 match result {
                     Ok(task_result) => {
-                        task.state = TaskState::Completed;
+                        task.transition_to(TaskState::Completed);
                         task.result = Some(task_result);
                     }
                     Err(e) => {
                         let details = extract_failure_details(&e);
-                        task.state = TaskState::Failed;
-                        task.result = Some(TaskResult {
-                            output: e.to_string(),
-                            success: false,
-                            cost_microdollars: 0,
-                            turns_used: 0,
-                            session_id: None,
-                            failed_command: details.failed_command,
-                            exit_code: details.exit_code,
-                            stderr: details.stderr,
-                        });
+                        task.transition_to(TaskState::Failed);
+                        task.result =
+                            Some(TaskResult::failure(e.to_string()).with_failure_details(
+                                details.failed_command,
+                                details.exit_code,
+                                details.stderr,
+                            ));
                     }
                 }
                 let _ = pool.inner.store.put_task(task).await;
@@ -926,7 +847,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         match task.state {
             TaskState::Running | TaskState::Pending => {
-                task.state = TaskState::Cancelled;
+                task.transition_to(TaskState::Cancelled);
                 self.inner.store.put_task(task).await?;
                 // Optimistically update in-flight progress status.
                 if let Some(mut progress) = self.inner.chain_progress.get_mut(&task_id.0) {
@@ -984,19 +905,9 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let isolation = options.isolation;
 
-        let record = TaskRecord {
-            id: task_id.clone(),
-            prompt: format!("chain: {} steps", steps.len()),
-            state: TaskState::Pending,
-            slot_id: None,
-            result: None,
-            tags: options.tags,
-            config: None,
-            review_required: false,
-            max_rejections: 3,
-            rejection_count: 0,
-            original_prompt: None,
-        };
+        let record =
+            TaskRecord::new_pending(task_id.clone(), format!("chain: {} steps", steps.len()))
+                .with_tags(options.tags);
         self.inner.store.put_task(record).await?;
 
         // Initialize progress.
@@ -1015,7 +926,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         // Mark as running.
         if let Some(mut task) = self.inner.store.get_task(&task_id).await? {
-            task.state = TaskState::Running;
+            task.transition_to(TaskState::Running);
             self.inner.store.put_task(task).await?;
         }
 
@@ -1103,35 +1014,29 @@ impl<S: PoolStore + 'static> Pool<S> {
                 match result {
                     Ok(chain_result) => {
                         let success = chain_result.success;
-                        task.state = if success {
-                            TaskState::Completed
+                        if success {
+                            task.transition_to(TaskState::Completed);
                         } else {
-                            TaskState::Failed
-                        };
-                        task.result = Some(TaskResult {
-                            output: serde_json::to_string(&chain_result).unwrap_or_default(),
-                            success,
-                            cost_microdollars: chain_result.total_cost_microdollars,
-                            turns_used: 0,
-                            session_id: None,
-                            failed_command: None,
-                            exit_code: None,
-                            stderr: None,
+                            task.transition_to(TaskState::Failed);
+                        }
+                        let output = serde_json::to_string(&chain_result).unwrap_or_default();
+                        task.result = Some(if success {
+                            TaskResult::success(output, chain_result.total_cost_microdollars, 0)
+                        } else {
+                            let mut r = TaskResult::failure(output);
+                            r.cost_microdollars = chain_result.total_cost_microdollars;
+                            r
                         });
                     }
                     Err(e) => {
                         let details = extract_failure_details(&e);
-                        task.state = TaskState::Failed;
-                        task.result = Some(TaskResult {
-                            output: e.to_string(),
-                            success: false,
-                            cost_microdollars: 0,
-                            turns_used: 0,
-                            session_id: None,
-                            failed_command: details.failed_command,
-                            exit_code: details.exit_code,
-                            stderr: details.stderr,
-                        });
+                        task.transition_to(TaskState::Failed);
+                        task.result =
+                            Some(TaskResult::failure(e.to_string()).with_failure_details(
+                                details.failed_command,
+                                details.exit_code,
+                                details.stderr,
+                            ));
                     }
                 }
                 let _ = pool.inner.store.put_task(task).await;
@@ -1416,35 +1321,32 @@ impl<S: PoolStore + 'static> Pool<S> {
         let idle = slots.iter().filter(|w| w.state == SlotState::Idle).count();
         let busy = slots.iter().filter(|w| w.state == SlotState::Busy).count();
 
-        let running_tasks = self
-            .inner
-            .store
-            .list_tasks(&TaskFilter {
-                state: Some(TaskState::Running),
-                ..Default::default()
-            })
-            .await?
-            .len();
+        let all_tasks = self.inner.store.list_tasks(&TaskFilter::default()).await?;
 
-        let pending_tasks = self
-            .inner
-            .store
-            .list_tasks(&TaskFilter {
-                state: Some(TaskState::Pending),
-                ..Default::default()
-            })
-            .await?
-            .len();
-
-        let pending_review_tasks = self
-            .inner
-            .store
-            .list_tasks(&TaskFilter {
-                state: Some(TaskState::PendingReview),
-                ..Default::default()
-            })
-            .await?
-            .len();
+        let running_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Running)
+            .count();
+        let pending_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Pending)
+            .count();
+        let pending_review_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::PendingReview)
+            .count();
+        let completed_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Completed)
+            .count();
+        let failed_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Failed)
+            .count();
+        let cancelled_tasks = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Cancelled)
+            .count();
 
         Ok(PoolStatus {
             total_slots: slots.len(),
@@ -1453,6 +1355,9 @@ impl<S: PoolStore + 'static> Pool<S> {
             running_tasks,
             pending_tasks,
             pending_review_tasks,
+            completed_tasks,
+            failed_tasks,
+            cancelled_tasks,
             total_spend_microdollars: self.inner.total_spend.load(Ordering::Relaxed),
             budget_microdollars: self.inner.config.budget_microdollars,
             shutdown: self.inner.shutdown.load(Ordering::Relaxed),
@@ -1467,6 +1372,136 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// Get a reference to the pool configuration.
     pub fn config(&self) -> &PoolConfig {
         &self.inner.config
+    }
+
+    /// Compute aggregated session metrics from all tasks.
+    ///
+    /// Scans all tasks in the store and computes cost, timing, and model
+    /// breakdowns useful for developer insights. Accepts an optional filter
+    /// to narrow results by time window, tags, or model.
+    pub async fn session_metrics(&self, filter: &MetricsFilter) -> Result<SessionMetrics> {
+        let all_tasks = self.inner.store.list_tasks(&TaskFilter::default()).await?;
+
+        // Apply time/tag/model filters.
+        let filtered: Vec<&TaskRecord> = all_tasks
+            .iter()
+            .filter(|t| {
+                if let Some(since) = filter.since_ms
+                    && t.created_at_ms.unwrap_or(0) < since
+                {
+                    return false;
+                }
+                if let Some(until) = filter.until_ms
+                    && t.created_at_ms.unwrap_or(0) > until
+                {
+                    return false;
+                }
+                if let Some(ref tags) = filter.tags
+                    && !tags.iter().any(|tag| t.tags.contains(tag))
+                {
+                    return false;
+                }
+                if let Some(ref model) = filter.model {
+                    match t.result {
+                        Some(ref result) if result.model.as_deref() == Some(model) => {}
+                        _ => return false,
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let mut metrics = SessionMetrics {
+            session_start_ms: self.inner.created_at_ms,
+            session_duration_ms: now_ms().saturating_sub(self.inner.created_at_ms),
+            total_tasks: filtered.len() as u64,
+            ..Default::default()
+        };
+
+        let mut elapsed_values: Vec<u64> = Vec::new();
+        let mut total_turns: u64 = 0;
+        let mut completed_count: u64 = 0;
+
+        // Per-model accumulators: (count, total_cost, total_elapsed, total_turns)
+        let mut model_accum: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
+
+        for task in &filtered {
+            match task.state {
+                TaskState::Pending => metrics.pending_tasks += 1,
+                TaskState::Running => metrics.running_tasks += 1,
+                TaskState::Completed | TaskState::PendingReview => metrics.completed_tasks += 1,
+                TaskState::Failed => metrics.failed_tasks += 1,
+                TaskState::Cancelled => metrics.cancelled_tasks += 1,
+            }
+
+            if let Some(ref result) = task.result {
+                metrics.total_spend_microdollars += result.cost_microdollars;
+
+                if result.cost_microdollars > metrics.max_cost_microdollars {
+                    metrics.max_cost_microdollars = result.cost_microdollars;
+                }
+
+                if task.state == TaskState::Completed || task.state == TaskState::PendingReview {
+                    completed_count += 1;
+                    total_turns += result.turns_used as u64;
+
+                    if result.elapsed_ms > 0 {
+                        elapsed_values.push(result.elapsed_ms);
+                    }
+                    if result.elapsed_ms > metrics.max_elapsed_ms {
+                        metrics.max_elapsed_ms = result.elapsed_ms;
+                    }
+                }
+
+                if let Some(ref model) = result.model {
+                    *metrics.tasks_by_model.entry(model.clone()).or_insert(0) += 1;
+                    let acc = model_accum.entry(model.clone()).or_default();
+                    acc.0 += 1;
+                    acc.1 += result.cost_microdollars;
+                    acc.2 += result.elapsed_ms;
+                    acc.3 += result.turns_used as u64;
+                }
+            }
+        }
+
+        if completed_count > 0 {
+            metrics.avg_cost_microdollars = metrics.total_spend_microdollars / completed_count;
+            metrics.avg_turns = total_turns as f64 / completed_count as f64;
+        }
+
+        if !elapsed_values.is_empty() {
+            let sum: u64 = elapsed_values.iter().sum();
+            metrics.avg_elapsed_ms = sum / elapsed_values.len() as u64;
+            metrics.min_elapsed_ms = elapsed_values.iter().copied().min().unwrap_or(0);
+
+            elapsed_values.sort_unstable();
+            let mid = elapsed_values.len() / 2;
+            metrics.median_elapsed_ms = if elapsed_values.len().is_multiple_of(2) && mid > 0 {
+                (elapsed_values[mid - 1] + elapsed_values[mid]) / 2
+            } else {
+                elapsed_values[mid]
+            };
+        }
+
+        // Build per-model breakdown.
+        metrics.model_breakdown = model_accum
+            .into_iter()
+            .map(|(model, (count, cost, elapsed, turns))| ModelMetrics {
+                model,
+                task_count: count,
+                total_cost_microdollars: cost,
+                avg_cost_microdollars: if count > 0 { cost / count } else { 0 },
+                avg_elapsed_ms: if count > 0 { elapsed / count } else { 0 },
+                total_turns: turns,
+            })
+            .collect();
+
+        // Sort breakdown by cost descending for easy reading.
+        metrics
+            .model_breakdown
+            .sort_by(|a, b| b.total_cost_microdollars.cmp(&a.total_cost_microdollars));
+
+        Ok(metrics)
     }
 
     /// Start the background supervisor loop.
@@ -1686,7 +1721,7 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         // Update task with assigned slot.
         if let Some(mut task) = self.inner.store.get_task(task_id).await? {
-            task.state = TaskState::Running;
+            task.transition_to(TaskState::Running);
             task.slot_id = Some(slot.id.clone());
             self.inner.store.put_task(task).await?;
         }
@@ -1746,6 +1781,12 @@ pub struct PoolStatus {
     pub pending_tasks: usize,
     /// Number of tasks awaiting coordinator review.
     pub pending_review_tasks: usize,
+    /// Number of completed tasks.
+    pub completed_tasks: usize,
+    /// Number of failed tasks.
+    pub failed_tasks: usize,
+    /// Number of cancelled tasks.
+    pub cancelled_tasks: usize,
     /// Total spend in microdollars.
     pub total_spend_microdollars: u64,
     /// Budget cap in microdollars, if set.
@@ -2337,6 +2378,9 @@ mod tests {
             max_rejections: 3,
             rejection_count: 0,
             original_prompt: None,
+            created_at_ms: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
         pool.store().put_task(record).await.unwrap();
 
@@ -2382,6 +2426,8 @@ mod tests {
                 success: true,
                 cost_microdollars: 100,
                 turns_used: 0,
+                elapsed_ms: 0,
+                model: None,
                 session_id: None,
                 failed_command: None,
                 exit_code: None,
@@ -2393,6 +2439,9 @@ mod tests {
             max_rejections: 3,
             rejection_count: 0,
             original_prompt: None,
+            created_at_ms: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
         pool.store().put_task(record).await.unwrap();
 
