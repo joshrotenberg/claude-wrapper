@@ -50,7 +50,7 @@ If an issue was opened by an authorized user but the pool label was added by som
 3. Create a 3-step chain using the draft-PR-first pattern:
    - **Step 1** `create-draft-pr`: Create branch `feat/{issue-slug}` or `fix/{issue-slug}`, push initial commit, open draft PR referencing the issue.
    - **Step 2** `implement`: Full implementation based on issue description. Push commits to branch.
-   - **Step 3** `finalize`: Run checks (`cargo fmt`, `cargo clippy`, `cargo test --lib`). Push final commits. Mark PR ready for review.
+   - **Step 3** `finalize`: Run checks (`cargo fmt`, `cargo clippy`, `cargo test --lib`). Push final commits. PR stays as **draft** — human marks ready for review.
 4. Submit the chain with `pool_submit_chain`.
 5. Relabel: remove `pool:ready`, add `pool:in-progress`. Post a comment with the chain ID and draft PR link.
 
@@ -64,16 +64,19 @@ If an issue was opened by an authorized user but the pool label was added by som
 
 1. Check if there's a chain ID in the issue comments (from the dispatch step).
 2. If found, check `pool_chain_result` for status.
-3. If chain completed successfully: relabel to `pool:review`, post summary comment.
+3. If chain completed successfully: relabel to `pool:review`, post summary comment. PR remains **draft** until human marks it ready for review.
 4. If chain failed: post error details, relabel to `pool:needs-input`.
 5. If still running: check the associated draft PR for recent commits. If no commits in 2+ ticks and chain is still "running", flag as potentially stalled.
 
-### `pool:review` — Check PR readiness
+### `pool:review` — Check PR readiness and dispatch review
 
 1. Find the PR associated with the issue (from comments or linked PRs).
-2. Check: CI status, merge conflicts, review status.
-3. If conflicts: attempt `git rebase origin/main` via pool. If clean, force-push with lease. If not, flag.
-4. Post a status summary comment: checks passing/failing, conflicts, ready for human review.
+2. Check `gh pr view --json isDraft,state,statusCheckRollup,mergeable`:
+   - **Still draft**: PR is waiting for human to mark ready for review. Report status but take no action beyond conflict/CI checks.
+   - **Marked ready for review** (isDraft=false): Human has approved this for review. Dispatch a review task via `pool_submit` that reads the full diff and posts review comments on the PR. Relabel to `pool:review` if not already.
+3. Check CI status and merge conflicts regardless of draft state.
+4. If conflicts: attempt `git rebase origin/main` via pool. If clean, force-push with lease. If not, flag.
+5. Post a status summary comment: draft/ready state, checks passing/failing, conflicts, review dispatched or pending.
 
 ### `pool:needs-input` — Report only
 
