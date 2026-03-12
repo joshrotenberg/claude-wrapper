@@ -221,6 +221,9 @@ pub struct TaskOverrides {
 
     /// Override effort level for this task.
     pub effort: Option<Effort>,
+
+    /// JSON schema for structured output validation.
+    pub json_schema: Option<serde_json::Value>,
 }
 
 /// Current state of a slot.

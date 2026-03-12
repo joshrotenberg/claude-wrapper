@@ -27,6 +27,8 @@ pub struct ResolvedConfig {
     pub mcp_servers: HashMap<String, serde_json::Value>,
     /// Whether to pass `--strict-mcp-config` to the CLI.
     pub strict_mcp_config: bool,
+    /// JSON schema for structured output validation (task overrides).
+    pub json_schema: Option<serde_json::Value>,
 }
 
 impl ResolvedConfig {
@@ -87,6 +89,8 @@ impl ResolvedConfig {
 
         let strict_mcp_config = global.strict_mcp_config;
 
+        let json_schema = task.and_then(|t| t.json_schema.clone());
+
         Self {
             model,
             permission_mode,
@@ -96,6 +100,7 @@ impl ResolvedConfig {
             effort,
             mcp_servers,
             strict_mcp_config,
+            json_schema,
         }
     }
 }

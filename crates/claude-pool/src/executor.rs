@@ -203,6 +203,9 @@ pub(crate) async fn execute_task<S: PoolStore + 'static>(
     if let Some(effort) = resolved.effort {
         cmd = cmd.effort(effort);
     }
+    if let Some(ref schema) = resolved.json_schema {
+        cmd = cmd.json_schema(schema.to_string());
+    }
     if !resolved.allowed_tools.is_empty() {
         cmd = cmd.allowed_tools(&resolved.allowed_tools);
     }

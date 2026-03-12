@@ -104,6 +104,8 @@ pub struct RunInput {
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// JSON schema for structured output validation.
+    pub json_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -119,6 +121,8 @@ pub struct SubmitInput {
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// JSON schema for structured output validation.
+    pub json_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -328,6 +332,8 @@ pub struct SubmitWithReviewInput {
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// JSON schema for structured output validation.
+    pub json_schema: Option<serde_json::Value>,
 }
 
 /// Input for approving a task result.
@@ -363,14 +369,16 @@ fn task_config_from(
     model: Option<String>,
     effort: Option<String>,
     mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    json_schema: Option<serde_json::Value>,
 ) -> Option<TaskOverrides> {
-    if model.is_none() && effort.is_none() && mcp_servers.is_none() {
+    if model.is_none() && effort.is_none() && mcp_servers.is_none() && json_schema.is_none() {
         return None;
     }
     Some(TaskOverrides {
         model,
         effort: effort.and_then(|e| parse_effort(&e)),
         mcp_servers,
+        json_schema,
         ..Default::default()
     })
 }
@@ -507,7 +515,12 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .handler(move |input: RunInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort, input.mcp_servers);
+                let config = task_config_from(
+                    input.model,
+                    input.effort,
+                    input.mcp_servers,
+                    input.json_schema,
+                );
                 let mut builder = state.pool.run(&input.prompt);
                 if let Some(cfg) = config {
                     builder = builder.config(cfg);
@@ -561,7 +574,7 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .handler(move |input: SubmitInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort, input.mcp_servers);
+                let config = task_config_from(input.model, input.effort, input.mcp_servers, input.json_schema);
                 let tags = input.tags.unwrap_or_default();
                 match state
                     .pool
@@ -1144,7 +1157,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
                 },
                 _ => claude_pool::StepAction::Prompt { prompt: s.value },
             };
-            let config = task_config_from(s.model, s.effort, None);
+            let config = task_config_from(s.model, s.effort, None, None);
             let failure_policy = claude_pool::StepFailurePolicy {
                 retries: s.retries.unwrap_or(0),
                 recovery_prompt: s.recovery_prompt,
@@ -2190,7 +2203,12 @@ pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>
         .handler(move |input: SubmitWithReviewInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort, input.mcp_servers);
+                let config = task_config_from(
+                    input.model,
+                    input.effort,
+                    input.mcp_servers,
+                    input.json_schema,
+                );
                 let tags = input.tags.unwrap_or_default();
                 match state
                     .pool
