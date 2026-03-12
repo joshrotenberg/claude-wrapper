@@ -30,6 +30,10 @@ pub struct SubmitTaskRequest {
     /// Tags for grouping/filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Tools to explicitly disallow for this task.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Built-in tool selection for this task (e.g. "Bash", "Edit", "Read").
+    pub tools: Option<Vec<String>>,
     /// Whether this task requires coordinator approval before completion.
     #[serde(default)]
     pub review_required: bool,
@@ -71,6 +75,10 @@ pub struct FanOutRequest {
     pub model: Option<String>,
     /// Optional effort override for all tasks.
     pub effort: Option<String>,
+    /// Tools to explicitly disallow for all tasks.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Built-in tool selection for all tasks (e.g. "Bash", "Edit", "Read").
+    pub tools: Option<Vec<String>>,
 }
 
 /// Response body for fan-out.
@@ -107,16 +115,6 @@ pub struct PaginationQuery {
 
 fn default_limit() -> usize {
     50
-}
-
-fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
-    match s {
-        "low" => Some(claude_pool::Effort::Low),
-        "medium" => Some(claude_pool::Effort::Medium),
-        "high" => Some(claude_pool::Effort::High),
-        "max" => Some(claude_pool::Effort::Max),
-        _ => None,
-    }
 }
 
 /// Paginated response wrapper.
@@ -222,22 +220,14 @@ pub async fn submit_task<S: PoolStore + 'static>(
     State(state): State<Arc<AppState<S>>>,
     Json(req): Json<SubmitTaskRequest>,
 ) -> Result<(axum::http::StatusCode, Json<SubmitTaskResponse>), ProblemDetails> {
-    // Build task config if any overrides are provided.
-    let config = if req.model.is_some()
-        || req.effort.is_some()
-        || req.mcp_servers.is_some()
-        || req.json_schema.is_some()
-    {
-        Some(claude_pool::TaskOverrides {
-            model: req.model,
-            effort: req.effort.and_then(|e| parse_effort(&e)),
-            mcp_servers: req.mcp_servers,
-            json_schema: req.json_schema,
-            ..Default::default()
-        })
-    } else {
-        None
-    };
+    let config = build_task_config(
+        req.model,
+        req.effort,
+        req.mcp_servers,
+        req.json_schema,
+        req.disallowed_tools,
+        req.tools,
+    );
 
     let task_id = if req.review_required {
         state
@@ -405,4 +395,44 @@ pub async fn stream_task<S: PoolStore + 'static>(
 
     let stream = crate::rest::sse::task_stream(state.state.clone(), id);
     Ok(axum::response::sse::Sse::new(stream).keep_alive(crate::rest::sse::keep_alive()))
+}
+
+// ── Helper functions ────────────────────────────────────────────────────
+
+fn parse_effort(s: &str) -> Option<claude_pool::Effort> {
+    match s.to_lowercase().as_str() {
+        "min" | "low" => Some(claude_pool::Effort::Low),
+        "medium" => Some(claude_pool::Effort::Medium),
+        "high" => Some(claude_pool::Effort::High),
+        "max" => Some(claude_pool::Effort::Max),
+        _ => None,
+    }
+}
+
+fn build_task_config(
+    model: Option<String>,
+    effort: Option<String>,
+    mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
+    json_schema: Option<serde_json::Value>,
+    disallowed_tools: Option<Vec<String>>,
+    tools: Option<Vec<String>>,
+) -> Option<claude_pool::types::TaskOverrides> {
+    if model.is_none()
+        && effort.is_none()
+        && mcp_servers.is_none()
+        && json_schema.is_none()
+        && disallowed_tools.is_none()
+        && tools.is_none()
+    {
+        return None;
+    }
+    Some(claude_pool::types::TaskOverrides {
+        model,
+        effort: effort.and_then(|e| parse_effort(&e)),
+        mcp_servers,
+        json_schema,
+        disallowed_tools,
+        tools,
+        ..Default::default()
+    })
 }

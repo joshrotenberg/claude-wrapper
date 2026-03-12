@@ -216,6 +216,12 @@ pub struct TaskOverrides {
     /// Additional allowed tools for this task (merged with global and slot).
     pub allowed_tools: Option<Vec<String>>,
 
+    /// Tools to explicitly disallow for this task.
+    pub disallowed_tools: Option<Vec<String>>,
+
+    /// Built-in tool selection for this task (e.g. "Bash", "Edit", "Read").
+    pub tools: Option<Vec<String>>,
+
     /// Additional MCP servers for this task (merged with global and slot).
     pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
 

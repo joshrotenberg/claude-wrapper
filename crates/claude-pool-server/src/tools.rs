@@ -101,6 +101,10 @@ pub struct RunInput {
     pub model: Option<String>,
     /// Effort override for this task (min, low, medium, high, max).
     pub effort: Option<String>,
+    /// Tools to explicitly disallow for this task.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Built-in tool selection for this task (e.g. "Bash", "Edit", "Read").
+    pub tools: Option<Vec<String>>,
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
@@ -118,6 +122,10 @@ pub struct SubmitInput {
     pub effort: Option<String>,
     /// Tags for grouping/filtering.
     pub tags: Option<Vec<String>>,
+    /// Tools to explicitly disallow for this task.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Built-in tool selection for this task (e.g. "Bash", "Edit", "Read").
+    pub tools: Option<Vec<String>>,
     /// Additional MCP servers for this task (merged with global/slot servers).
     /// Keys are server names, values are server config objects.
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
@@ -334,6 +342,10 @@ pub struct SubmitWithReviewInput {
     pub mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// JSON schema for structured output validation.
     pub json_schema: Option<serde_json::Value>,
+    /// Tools to explicitly deny for this task.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Built-in tool selection for this task (Bash, Edit, Read, etc.).
+    pub tools: Option<Vec<String>>,
 }
 
 /// Input for approving a task result.
@@ -370,8 +382,16 @@ fn task_config_from(
     effort: Option<String>,
     mcp_servers: Option<std::collections::HashMap<String, serde_json::Value>>,
     json_schema: Option<serde_json::Value>,
+    disallowed_tools: Option<Vec<String>>,
+    tools: Option<Vec<String>>,
 ) -> Option<TaskOverrides> {
-    if model.is_none() && effort.is_none() && mcp_servers.is_none() && json_schema.is_none() {
+    if model.is_none()
+        && effort.is_none()
+        && mcp_servers.is_none()
+        && json_schema.is_none()
+        && disallowed_tools.is_none()
+        && tools.is_none()
+    {
         return None;
     }
     Some(TaskOverrides {
@@ -379,6 +399,8 @@ fn task_config_from(
         effort: effort.and_then(|e| parse_effort(&e)),
         mcp_servers,
         json_schema,
+        disallowed_tools,
+        tools,
         ..Default::default()
     })
 }
@@ -520,6 +542,8 @@ pub fn pool_run_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
                     input.effort,
                     input.mcp_servers,
                     input.json_schema,
+                    input.disallowed_tools,
+                    input.tools,
                 );
                 let mut builder = state.pool.run(&input.prompt);
                 if let Some(cfg) = config {
@@ -574,7 +598,14 @@ pub fn pool_submit_tool<S: PoolStore + 'static>(state: Arc<State<S>>) -> Tool {
         .handler(move |input: SubmitInput| {
             let state = Arc::clone(&state);
             async move {
-                let config = task_config_from(input.model, input.effort, input.mcp_servers, input.json_schema);
+                let config = task_config_from(
+                    input.model,
+                    input.effort,
+                    input.mcp_servers,
+                    input.json_schema,
+                    input.disallowed_tools,
+                    input.tools,
+                );
                 let tags = input.tags.unwrap_or_default();
                 match state
                     .pool
@@ -1157,7 +1188,7 @@ fn convert_chain_steps(steps: Vec<ChainStepInput>) -> Vec<claude_pool::ChainStep
                 },
                 _ => claude_pool::StepAction::Prompt { prompt: s.value },
             };
-            let config = task_config_from(s.model, s.effort, None, None);
+            let config = task_config_from(s.model, s.effort, None, None, None, None);
             let failure_policy = claude_pool::StepFailurePolicy {
                 retries: s.retries.unwrap_or(0),
                 recovery_prompt: s.recovery_prompt,
@@ -2208,6 +2239,8 @@ pub fn pool_submit_with_review_tool<S: PoolStore + 'static>(state: Arc<State<S>>
                     input.effort,
                     input.mcp_servers,
                     input.json_schema,
+                    input.disallowed_tools,
+                    input.tools,
                 );
                 let tags = input.tags.unwrap_or_default();
                 match state
