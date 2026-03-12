@@ -83,6 +83,9 @@ pub struct PoolConfig {
     /// Default effort level for slots (maps to `--effort`).
     pub effort: Option<Effort>,
 
+    /// Fallback model to use if the primary model fails.
+    pub fallback_model: Option<String>,
+
     /// Total budget cap for the pool in microdollars.
     /// When cumulative spend across all slots reaches this limit,
     /// new tasks are rejected with [`crate::Error::BudgetExhausted`].
@@ -139,6 +142,7 @@ impl Default for PoolConfig {
             allowed_tools: Vec::new(),
             mcp_servers: HashMap::new(),
             effort: None,
+            fallback_model: None,
             budget_microdollars: None,
             slot_mode: SlotMode::default(),
             max_restarts: 3,
@@ -180,6 +184,9 @@ pub struct SlotConfig {
 
     /// Override effort level for this slot.
     pub effort: Option<Effort>,
+
+    /// Override fallback model for this slot.
+    pub fallback_model: Option<String>,
 
     /// Optional name/role for this slot (e.g. "reviewer", "coder").
     pub role: Option<String>,
@@ -227,6 +234,9 @@ pub struct TaskOverrides {
 
     /// Override effort level for this task.
     pub effort: Option<Effort>,
+
+    /// Override fallback model for this task.
+    pub fallback_model: Option<String>,
 
     /// JSON schema for structured output validation.
     pub json_schema: Option<serde_json::Value>,
