@@ -24,6 +24,7 @@ pub struct MarketplaceListCommand {
 }
 
 impl MarketplaceListCommand {
+    /// Creates a new marketplace list command.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -81,6 +82,7 @@ pub struct MarketplaceAddCommand {
 }
 
 impl MarketplaceAddCommand {
+    /// Creates a command to add a marketplace by URL, path, or GitHub repo.
     #[must_use]
     pub fn new(source: impl Into<String>) -> Self {
         Self {
@@ -138,6 +140,7 @@ pub struct MarketplaceRemoveCommand {
 }
 
 impl MarketplaceRemoveCommand {
+    /// Creates a command to remove a marketplace by name.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
@@ -174,7 +177,7 @@ impl MarketplaceUpdateCommand {
         Self { name: None }
     }
 
-    /// Update a specific marketplace.
+    /// Creates a command to update a specific marketplace catalog.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {

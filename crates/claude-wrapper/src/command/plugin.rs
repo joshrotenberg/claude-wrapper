@@ -25,6 +25,7 @@ pub struct PluginListCommand {
 }
 
 impl PluginListCommand {
+    /// Creates a new plugin list command.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -87,6 +88,7 @@ pub struct PluginInstallCommand {
 }
 
 impl PluginInstallCommand {
+    /// Creates a command to install a plugin by name.
     #[must_use]
     pub fn new(plugin: impl Into<String>) -> Self {
         Self {
@@ -129,6 +131,7 @@ pub struct PluginUninstallCommand {
 }
 
 impl PluginUninstallCommand {
+    /// Creates a command to uninstall a plugin by name.
     #[must_use]
     pub fn new(plugin: impl Into<String>) -> Self {
         Self {
@@ -171,6 +174,7 @@ pub struct PluginEnableCommand {
 }
 
 impl PluginEnableCommand {
+    /// Creates a command to enable a plugin by name.
     #[must_use]
     pub fn new(plugin: impl Into<String>) -> Self {
         Self {
@@ -214,7 +218,7 @@ pub struct PluginDisableCommand {
 }
 
 impl PluginDisableCommand {
-    /// Disable a specific plugin.
+    /// Creates a command to disable a plugin by name. To disable all plugins, use [`PluginDisableCommand::all`].
     #[must_use]
     pub fn new(plugin: impl Into<String>) -> Self {
         Self {
@@ -273,6 +277,7 @@ pub struct PluginUpdateCommand {
 }
 
 impl PluginUpdateCommand {
+    /// Creates a command to update a plugin to the latest version.
     #[must_use]
     pub fn new(plugin: impl Into<String>) -> Self {
         Self {
@@ -314,6 +319,7 @@ pub struct PluginValidateCommand {
 }
 
 impl PluginValidateCommand {
+    /// Creates a command to validate a plugin manifest at the given path.
     #[must_use]
     pub fn new(path: impl Into<String>) -> Self {
         Self { path: path.into() }

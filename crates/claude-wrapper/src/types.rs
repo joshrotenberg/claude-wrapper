@@ -235,14 +235,17 @@ pub struct AuthStatus {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// A message in the query JSON output.
+/// A message from a query result, representing one turn in the conversation.
 #[cfg(feature = "json")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryMessage {
+    /// The role of the message sender (e.g., "user", "assistant").
     #[serde(default)]
     pub role: String,
+    /// The text content of the message.
     #[serde(default)]
     pub content: serde_json::Value,
+    /// Additional fields returned by the CLI not captured in typed fields.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -251,18 +254,25 @@ pub struct QueryMessage {
 #[cfg(feature = "json")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QueryResult {
+    /// The text content of the query response.
     #[serde(default)]
     pub result: String,
+    /// The session ID for continuing conversations.
     #[serde(default)]
     pub session_id: String,
+    /// Total cost of the query in USD.
     #[serde(default, rename = "total_cost_usd", alias = "cost_usd")]
     pub cost_usd: Option<f64>,
+    /// Duration of the query in milliseconds.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// Number of conversation turns in the query.
     #[serde(default)]
     pub num_turns: Option<u32>,
+    /// Whether the query resulted in an error.
     #[serde(default)]
     pub is_error: bool,
+    /// Additional fields returned by the CLI not captured in typed fields.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }

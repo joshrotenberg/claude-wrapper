@@ -22,6 +22,7 @@ use crate::types::{Scope, Transport};
 pub struct McpListCommand;
 
 impl McpListCommand {
+    /// Creates a new MCP list command.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -47,6 +48,7 @@ pub struct McpGetCommand {
 }
 
 impl McpGetCommand {
+    /// Creates a command to get details for a named MCP server.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
@@ -253,6 +255,7 @@ pub struct McpRemoveCommand {
 }
 
 impl McpRemoveCommand {
+    /// Creates a command to remove a named MCP server.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -297,6 +300,7 @@ pub struct McpAddFromDesktopCommand {
 }
 
 impl McpAddFromDesktopCommand {
+    /// Creates a command to import MCP servers from the Claude Desktop config.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
