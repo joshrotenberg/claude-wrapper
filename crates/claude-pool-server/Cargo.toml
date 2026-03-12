@@ -43,11 +43,6 @@ version = "0.6"
 optional = true
 features = ["cors", "trace"]
 
-[dependencies.axum-extra]
-version = "0.10"
-optional = true
-features = ["typed-header"]
-
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
@@ -57,4 +52,4 @@ tower-mcp = { workspace = true, features = ["testing"] }
 [features]
 default = []
 http = ["tower-mcp/http", "dep:axum"]
-rest = ["dep:axum", "dep:tower-http", "dep:axum-extra"]
+rest = ["dep:axum", "dep:tower-http"]
