@@ -43,10 +43,15 @@ If an issue was opened by an authorized user but the pool label was added by som
 
 ## Step 3: Act on each issue
 
-### `pool:ready` — Schedule and dispatch
+### `pool:ready` — Pre-flight check, then schedule and dispatch
 
 1. Read the issue body and any comments for context.
-2. Analyze file overlap with any `pool:in-progress` issues. If significant overlap, flag and skip (label `pool:needs-input` with a comment explaining the conflict).
+2. **Pre-flight check** — before dispatching, verify the issue is actually ready:
+   - **Dependency scan**: Check for references to other issues (`#NNN`, "depends on", "blocked by", "requires", "after"). If any referenced issues are still open, downgrade to `pool:discuss` and comment: "This depends on #NNN which is still open. Resolve that first, or confirm this can proceed independently."
+   - **Spec clarity**: Is there enough detail to implement? If the issue body is vague (< 2 sentences, no acceptance criteria, no file references), downgrade to `pool:discuss` and ask clarifying questions.
+   - **Overlap check**: Analyze file overlap with any `pool:in-progress` issues. If significant overlap, flag and skip (label `pool:needs-input` with a comment explaining the conflict).
+   - **Open PR check**: Are there open PRs touching the same files? If so, note the risk of conflicts but proceed (the human chose `pool:ready` knowing the state).
+   - If any check fails, relabel to `pool:discuss` (not `pool:needs-input`), post a comment explaining what was found, and move on. The human can re-promote to `pool:ready` after addressing concerns.
 3. Create a 3-step chain using the draft-PR-first pattern:
    - **Step 1** `create-draft-pr`: Create branch `feat/{issue-slug}` or `fix/{issue-slug}`, push initial commit, open draft PR referencing the issue.
    - **Step 2** `implement`: Full implementation based on issue description. Push commits to branch.
