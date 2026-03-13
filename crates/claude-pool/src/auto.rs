@@ -99,12 +99,34 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// prompt. Examples: "this is a monorepo with independent crates",
     /// "prefer parallel when the task mentions multiple files",
     /// "keep chain steps under 3".
+    ///
+    /// # Decomposition boundary
+    ///
+    /// For parallel and chain routes, the router decomposes the task into
+    /// subtasks/steps. This works well when the decomposition is obvious from
+    /// the prompt (e.g. "review these 5 files" -> one task per file). For
+    /// ambiguous decompositions, prefer explicit [`Pool::fan_out`] or
+    /// [`Pool::submit_chain`] where the caller controls the split.
+    ///
+    /// # Fallback
+    ///
+    /// If the routing LLM returns unparseable output, the original prompt is
+    /// executed as a single task rather than returning an error. Wrong routing
+    /// is suboptimal, not catastrophic.
     pub async fn auto_with_context(
         &self,
         prompt: &str,
         context: Option<&str>,
     ) -> crate::Result<AutoResult> {
-        let route = self.route_with_context(prompt, context).await?;
+        let route = match self.route_with_context(prompt, context).await {
+            Ok(route) => route,
+            Err(e) => {
+                tracing::warn!(error = %e, "auto-route parse failed, falling back to single");
+                AutoRoute::Single {
+                    prompt: prompt.to_string(),
+                }
+            }
+        };
 
         tracing::info!(route = route.route_name(), "auto-route decided");
 
@@ -406,6 +428,20 @@ mod tests {
     fn parse_fails_on_garbage() {
         assert!(extract_json_route("this is not json at all").is_err());
         assert!(parse_route_from_output("garbage").is_err());
+    }
+
+    #[test]
+    fn fallback_to_single_on_parse_failure() {
+        // Simulates what auto_with_context does: if routing fails, wrap as single.
+        let original_prompt = "do the thing";
+        let route =
+            parse_route_from_output("unparseable garbage").unwrap_or_else(|_| AutoRoute::Single {
+                prompt: original_prompt.to_string(),
+            });
+        match route {
+            AutoRoute::Single { prompt } => assert_eq!(prompt, "do the thing"),
+            _ => panic!("expected fallback to Single"),
+        }
     }
 
     #[test]
