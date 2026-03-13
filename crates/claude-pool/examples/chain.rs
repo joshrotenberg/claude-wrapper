@@ -12,8 +12,8 @@
 //! ```
 
 use claude_pool::{
-    ChainOptions, ChainStep, Pool, PoolConfig, SkillRegistry, StepAction, StepFailurePolicy,
-    TaskOverrides,
+    ChainOptions, ChainResult, ChainStep, Pool, PoolConfig, SkillRegistry, StepAction,
+    StepFailurePolicy, TaskOverrides,
 };
 use claude_wrapper::Claude;
 
@@ -86,20 +86,29 @@ async fn main() -> anyhow::Result<()> {
     // Poll for the result.
     loop {
         if let Some(result) = pool.result(&task_id).await? {
-            if result.success {
-                println!("Chain output:\n{}", result.output);
+            // The chain result output is a serialized ChainResult JSON.
+            // Parse it to display step-by-step results cleanly.
+            if let Ok(chain) = serde_json::from_str::<ChainResult>(&result.output) {
+                for step in &chain.steps {
+                    let status = if step.success { "ok" } else { "FAILED" };
+                    println!("[{}] {}", step.name, status);
+                    println!("  {}\n", step.output.lines().next().unwrap_or("(empty)"));
+                }
+                println!("Final output:\n{}", chain.final_output);
+            } else if result.success {
+                println!("Output:\n{}", result.output);
             } else {
                 println!("Chain failed: {}", result.output);
             }
-            println!(
-                "\nCost: ${:.4}",
-                result.cost_microdollars as f64 / 1_000_000.0
-            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
-    pool.drain().await?;
+    let summary = pool.drain().await?;
+    println!(
+        "\nPool cost: ${:.4}",
+        summary.total_cost_microdollars as f64 / 1_000_000.0
+    );
     Ok(())
 }
