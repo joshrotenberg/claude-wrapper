@@ -85,7 +85,26 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// Sends `prompt` to a single routing call that classifies the work,
     /// then executes via the chosen pool method.
     pub async fn auto(&self, prompt: &str) -> crate::Result<AutoResult> {
-        let route = self.route(prompt).await?;
+        self.auto_with_context(prompt, None).await
+    }
+
+    /// Auto-route with optional user context.
+    ///
+    /// Three layers feed the routing decision:
+    /// 1. **Built-in** — the "three options only" system prompt (always present)
+    /// 2. **User context** — domain hints, constraints, preferences (optional)
+    /// 3. **Task** — the actual work
+    ///
+    /// The user context lets callers tune routing without modifying the core
+    /// prompt. Examples: "this is a monorepo with independent crates",
+    /// "prefer parallel when the task mentions multiple files",
+    /// "keep chain steps under 3".
+    pub async fn auto_with_context(
+        &self,
+        prompt: &str,
+        context: Option<&str>,
+    ) -> crate::Result<AutoResult> {
+        let route = self.route_with_context(prompt, context).await?;
 
         tracing::info!(route = route.route_name(), "auto-route decided");
 
@@ -96,7 +115,24 @@ impl<S: PoolStore + 'static> Pool<S> {
     ///
     /// Useful for debugging or logging what the router would choose.
     pub async fn route(&self, prompt: &str) -> crate::Result<AutoRoute> {
-        let routing_prompt = format!("{}\n\n## Task\n\n{}", ROUTING_SYSTEM_PROMPT, prompt);
+        self.route_with_context(prompt, None).await
+    }
+
+    /// Route with optional user context (no execution).
+    pub async fn route_with_context(
+        &self,
+        prompt: &str,
+        context: Option<&str>,
+    ) -> crate::Result<AutoRoute> {
+        let mut routing_prompt = ROUTING_SYSTEM_PROMPT.to_string();
+
+        if let Some(ctx) = context {
+            routing_prompt.push_str("\n\n## Context\n\n");
+            routing_prompt.push_str(ctx);
+        }
+
+        routing_prompt.push_str("\n\n## Task\n\n");
+        routing_prompt.push_str(prompt);
 
         let cmd = claude_wrapper::QueryCommand::new(&routing_prompt)
             .output_format(claude_wrapper::OutputFormat::Json)
