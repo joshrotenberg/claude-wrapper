@@ -518,6 +518,31 @@ impl Drop for WorktreeManager {
 mod tests {
     use super::*;
 
+    /// Initialize a git repo with a dummy user config and an initial commit.
+    /// This works in CI where no global git identity is configured.
+    fn init_test_repo(path: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn new_validated_rejects_non_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -533,6 +558,7 @@ mod tests {
     #[tokio::test]
     async fn new_validated_accepts_git_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
+        // Only needs git init, no commit required for validation.
         std::process::Command::new("git")
             .args(["init"])
             .current_dir(tmpdir.path())
@@ -560,19 +586,9 @@ mod tests {
     async fn clone_preserves_non_local_remote() {
         // Set up a source repo with a non-local origin.
         let src = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
+        init_test_repo(src.path());
         std::process::Command::new("git")
             .args(["remote", "add", "origin", "git@github.com:user/repo.git"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
-        // Need at least one commit for clone to work.
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(src.path())
             .output()
             .unwrap();
@@ -607,16 +623,7 @@ mod tests {
     #[tokio::test]
     async fn drop_cleans_up_slot_worktrees() {
         let src = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
+        init_test_repo(src.path());
 
         let base = tempfile::tempdir().unwrap();
         let slot_id = SlotId("drop-test-slot".into());
@@ -638,16 +645,7 @@ mod tests {
     #[tokio::test]
     async fn drop_cleans_up_chain_worktrees() {
         let src = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
+        init_test_repo(src.path());
 
         let base = tempfile::tempdir().unwrap();
         let task_id = TaskId("drop-test-chain".into());
@@ -672,16 +670,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_remove_prevents_double_cleanup() {
         let src = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
+        init_test_repo(src.path());
 
         let base = tempfile::tempdir().unwrap();
         let slot_id = SlotId("explicit-remove-test".into());
