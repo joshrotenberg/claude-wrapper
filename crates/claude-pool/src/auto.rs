@@ -3,6 +3,26 @@
 //! The [`AutoRoute`] enum represents the three execution paths the pool
 //! supports. [`Pool::auto`] sends the user's prompt to a routing LLM call
 //! that classifies the work into one of these three, then executes it.
+//!
+//! # Configuration layers
+//!
+//! The routing prompt is assembled from up to three layers:
+//!
+//! 1. **System prompt** — the built-in classification instructions
+//!    (loaded from `prompts/auto_route.md` via `include_str!`). Can be
+//!    overridden entirely via [`AutoConfig::custom_prompt`].
+//! 2. **Hints** — optional structured [`AutoHint`] that constrain or bias
+//!    the routing decision (max parallelism, preferred route, domain context,
+//!    decomposition boundaries).
+//! 3. **Task** — the actual work prompt.
+//!
+//! # Prompt iteration
+//!
+//! The system prompt lives in `src/prompts/auto_route.md`. You can test
+//! routing decisions without compiling by feeding the file to `claude`
+//! directly, or by using [`Pool::route`] which classifies without executing.
+
+use std::fmt;
 
 use claude_wrapper::ClaudeCommand;
 use serde::{Deserialize, Serialize};
@@ -12,6 +32,129 @@ use crate::pool::Pool;
 use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::TaskResult;
+
+/// The default routing system prompt, loaded from `prompts/auto_route.md`.
+const DEFAULT_ROUTING_PROMPT: &str = include_str!("prompts/auto_route.md");
+
+/// Soft routing preference. The router can still disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutePreference {
+    /// Prefer running as a single task.
+    PreferSingle,
+    /// Prefer splitting into parallel tasks.
+    PreferParallel,
+    /// Prefer an ordered chain of steps.
+    PreferChain,
+}
+
+impl fmt::Display for RoutePreference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PreferSingle => write!(f, "single"),
+            Self::PreferParallel => write!(f, "parallel"),
+            Self::PreferChain => write!(f, "chain"),
+        }
+    }
+}
+
+/// Structured hints that inform the routing decision without overriding it.
+///
+/// Hints are rendered into the prompt's context layer. They constrain or bias
+/// the router but do not force a specific route — for that, call
+/// [`Pool::run`], [`Pool::fan_out`], or [`Pool::submit_chain`] directly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoHint {
+    /// Cap on parallel tasks (e.g. "I only have 2 slots").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
+    /// Cap on chain depth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_chain_steps: Option<usize>,
+    /// Soft bias toward a route. The router can still disagree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefer: Option<RoutePreference>,
+    /// Domain description (not instructions).
+    /// e.g. "monorepo with independent crates", "microservices behind a gateway".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Pre-named boundaries for parallel/chain decomposition.
+    /// e.g. `["auth module", "api module", "db module"]`.
+    /// The router uses these if it picks parallel/chain, ignores them for single.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decomposition_hints: Option<Vec<String>>,
+}
+
+/// Full configuration for auto-routing.
+///
+/// For most callers, [`Pool::auto`] or [`Pool::auto_with_hints`] is sufficient.
+/// Use `AutoConfig` when you need the escape hatch of a custom prompt.
+#[derive(Debug, Clone, Default)]
+pub struct AutoConfig {
+    /// Override the built-in routing prompt entirely.
+    ///
+    /// You probably don't want this. The default prompt has been tuned to
+    /// produce reliable three-way classification. But we aren't your dad.
+    ///
+    /// If set, replaces layer 1 (the system prompt). Hints still render
+    /// into the context layer if present, and the task still appends.
+    pub custom_prompt: Option<String>,
+    /// Structured hints (rendered into the prompt's context layer).
+    pub hints: Option<AutoHint>,
+}
+
+/// Render hints into a context section for the routing prompt.
+fn render_hints(hints: &AutoHint) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(n) = hints.max_parallel {
+        parts.push(format!("- Maximum parallel tasks: {n}"));
+    }
+    if let Some(n) = hints.max_chain_steps {
+        parts.push(format!("- Maximum chain steps: {n}"));
+    }
+    if let Some(pref) = &hints.prefer {
+        parts.push(format!(
+            "- Preferred route: {pref} (but choose differently if the task clearly warrants it)"
+        ));
+    }
+    if let Some(domain) = &hints.domain {
+        parts.push(format!("- Domain: {domain}"));
+    }
+    if let Some(decomp) = &hints.decomposition_hints
+        && !decomp.is_empty()
+    {
+        parts.push(format!(
+            "- Suggested decomposition boundaries: {}",
+            decomp.join(", ")
+        ));
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("\n\n## Constraints\n\n");
+    section.push_str(&parts.join("\n"));
+    section
+}
+
+/// Assemble the full routing prompt from config and task.
+pub(crate) fn assemble_routing_prompt(task: &str, config: Option<&AutoConfig>) -> String {
+    let base = config
+        .and_then(|c| c.custom_prompt.as_deref())
+        .unwrap_or(DEFAULT_ROUTING_PROMPT);
+
+    let mut prompt = base.to_string();
+
+    if let Some(hints) = config.and_then(|c| c.hints.as_ref()) {
+        prompt.push_str(&render_hints(hints));
+    }
+
+    prompt.push_str("\n\n## Task\n\n");
+    prompt.push_str(task);
+    prompt
+}
 
 /// The routing decision made by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,21 +227,6 @@ impl<S: PoolStore + 'static> Pool<S> {
     ///
     /// Sends `prompt` to a single routing call that classifies the work,
     /// then executes via the chosen pool method.
-    pub async fn auto(&self, prompt: &str) -> crate::Result<AutoResult> {
-        self.auto_with_context(prompt, None).await
-    }
-
-    /// Auto-route with optional user context.
-    ///
-    /// Three layers feed the routing decision:
-    /// 1. **Built-in** — the "three options only" system prompt (always present)
-    /// 2. **User context** — domain hints, constraints, preferences (optional)
-    /// 3. **Task** — the actual work
-    ///
-    /// The user context lets callers tune routing without modifying the core
-    /// prompt. Examples: "this is a monorepo with independent crates",
-    /// "prefer parallel when the task mentions multiple files",
-    /// "keep chain steps under 3".
     ///
     /// # Decomposition boundary
     ///
@@ -113,12 +241,36 @@ impl<S: PoolStore + 'static> Pool<S> {
     /// If the routing LLM returns unparseable output, the original prompt is
     /// executed as a single task rather than returning an error. Wrong routing
     /// is suboptimal, not catastrophic.
-    pub async fn auto_with_context(
+    pub async fn auto(&self, prompt: &str) -> crate::Result<AutoResult> {
+        self.auto_with_config(prompt, None).await
+    }
+
+    /// Auto-route with structured hints.
+    ///
+    /// Hints inform the routing decision without overriding it. See
+    /// [`AutoHint`] for available fields.
+    pub async fn auto_with_hints(
         &self,
         prompt: &str,
-        context: Option<&str>,
+        hints: &AutoHint,
     ) -> crate::Result<AutoResult> {
-        let route = match self.route_with_context(prompt, context).await {
+        let config = AutoConfig {
+            custom_prompt: None,
+            hints: Some(hints.clone()),
+        };
+        self.auto_with_config(prompt, Some(&config)).await
+    }
+
+    /// Auto-route with full configuration.
+    ///
+    /// Use this when you need the escape hatch of a custom prompt or when
+    /// combining a custom prompt with hints.
+    pub async fn auto_with_config(
+        &self,
+        prompt: &str,
+        config: Option<&AutoConfig>,
+    ) -> crate::Result<AutoResult> {
+        let route = match self.route_with_config(prompt, config).await {
             Ok(route) => route,
             Err(e) => {
                 tracing::warn!(error = %e, "auto-route parse failed, falling back to single");
@@ -135,26 +287,32 @@ impl<S: PoolStore + 'static> Pool<S> {
 
     /// Route only: get the routing decision without executing.
     ///
-    /// Useful for debugging or logging what the router would choose.
+    /// Useful for debugging, logging, or prompt iteration — see what the
+    /// router would choose without spending slots on execution.
     pub async fn route(&self, prompt: &str) -> crate::Result<AutoRoute> {
-        self.route_with_context(prompt, None).await
+        self.route_with_config(prompt, None).await
     }
 
-    /// Route with optional user context (no execution).
-    pub async fn route_with_context(
+    /// Route with structured hints (no execution).
+    pub async fn route_with_hints(
         &self,
         prompt: &str,
-        context: Option<&str>,
+        hints: &AutoHint,
     ) -> crate::Result<AutoRoute> {
-        let mut routing_prompt = ROUTING_SYSTEM_PROMPT.to_string();
+        let config = AutoConfig {
+            custom_prompt: None,
+            hints: Some(hints.clone()),
+        };
+        self.route_with_config(prompt, Some(&config)).await
+    }
 
-        if let Some(ctx) = context {
-            routing_prompt.push_str("\n\n## Context\n\n");
-            routing_prompt.push_str(ctx);
-        }
-
-        routing_prompt.push_str("\n\n## Task\n\n");
-        routing_prompt.push_str(prompt);
+    /// Route with full configuration (no execution).
+    pub async fn route_with_config(
+        &self,
+        prompt: &str,
+        config: Option<&AutoConfig>,
+    ) -> crate::Result<AutoRoute> {
+        let routing_prompt = assemble_routing_prompt(prompt, config);
 
         let cmd = claude_wrapper::QueryCommand::new(&routing_prompt)
             .output_format(claude_wrapper::OutputFormat::Json)
@@ -317,35 +475,6 @@ pub(crate) fn extract_json_route(text: &str) -> crate::Result<AutoRoute> {
         "no valid JSON routing decision found in text".into(),
     ))
 }
-
-// --- Prompt ---
-
-const ROUTING_SYSTEM_PROMPT: &str = r#"You are a work router. Given a task, you decide how to execute it.
-
-You have exactly THREE options:
-
-1. SINGLE — one task, one result. Use when the work is one coherent unit.
-2. PARALLEL — N independent tasks that can run simultaneously. Use when there are clearly independent subtasks with no dependencies between them.
-3. CHAIN — ordered steps where each feeds the next. Use when later steps depend on earlier results.
-
-Rules:
-- Respond with ONLY a JSON object. No markdown fences, no explanation, no text before or after.
-- If in doubt, use SINGLE. Only split when the task is clearly multi-part.
-- PARALLEL tasks must be truly independent — no task should need another's output.
-- CHAIN steps should reference "{previous_output}" when they depend on prior work.
-- Keep prompts detailed and self-contained. Each prompt should make sense on its own.
-- Keep the number of parallel tasks or chain steps reasonable (2-6).
-
-Output format:
-
-For SINGLE:
-{"route": "single", "prompt": "the full task prompt"}
-
-For PARALLEL:
-{"route": "parallel", "prompts": ["task 1", "task 2", "task 3"]}
-
-For CHAIN:
-{"route": "chain", "steps": [{"name": "step-1", "prompt": "first step"}, {"name": "step-2", "prompt": "use {previous_output} to do the next thing"}]}"#;
 
 #[cfg(test)]
 mod tests {
@@ -510,5 +639,198 @@ mod tests {
         let json = serde_json::to_string(&route).unwrap();
         let parsed: AutoRoute = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, AutoRoute::Chain { .. }));
+    }
+
+    // --- Hint and prompt assembly tests ---
+
+    #[test]
+    fn render_empty_hints_produces_nothing() {
+        let hints = AutoHint::default();
+        assert_eq!(render_hints(&hints), "");
+    }
+
+    #[test]
+    fn render_hints_max_parallel() {
+        let hints = AutoHint {
+            max_parallel: Some(3),
+            ..Default::default()
+        };
+        let rendered = render_hints(&hints);
+        assert!(rendered.contains("Maximum parallel tasks: 3"));
+        assert!(rendered.contains("## Constraints"));
+    }
+
+    #[test]
+    fn render_hints_max_chain_steps() {
+        let hints = AutoHint {
+            max_chain_steps: Some(4),
+            ..Default::default()
+        };
+        let rendered = render_hints(&hints);
+        assert!(rendered.contains("Maximum chain steps: 4"));
+    }
+
+    #[test]
+    fn render_hints_preference() {
+        let hints = AutoHint {
+            prefer: Some(RoutePreference::PreferParallel),
+            ..Default::default()
+        };
+        let rendered = render_hints(&hints);
+        assert!(rendered.contains("Preferred route: parallel"));
+        assert!(rendered.contains("choose differently if the task clearly warrants it"));
+    }
+
+    #[test]
+    fn render_hints_domain() {
+        let hints = AutoHint {
+            domain: Some("monorepo with independent crates".into()),
+            ..Default::default()
+        };
+        let rendered = render_hints(&hints);
+        assert!(rendered.contains("Domain: monorepo with independent crates"));
+    }
+
+    #[test]
+    fn render_hints_decomposition() {
+        let hints = AutoHint {
+            decomposition_hints: Some(vec![
+                "auth module".into(),
+                "api module".into(),
+                "db module".into(),
+            ]),
+            ..Default::default()
+        };
+        let rendered = render_hints(&hints);
+        assert!(
+            rendered
+                .contains("Suggested decomposition boundaries: auth module, api module, db module")
+        );
+    }
+
+    #[test]
+    fn render_hints_empty_decomposition_skipped() {
+        let hints = AutoHint {
+            decomposition_hints: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(render_hints(&hints), "");
+    }
+
+    #[test]
+    fn render_hints_all_fields() {
+        let hints = AutoHint {
+            max_parallel: Some(2),
+            max_chain_steps: Some(3),
+            prefer: Some(RoutePreference::PreferChain),
+            domain: Some("microservices".into()),
+            decomposition_hints: Some(vec!["svc-a".into(), "svc-b".into()]),
+        };
+        let rendered = render_hints(&hints);
+        assert!(rendered.contains("Maximum parallel tasks: 2"));
+        assert!(rendered.contains("Maximum chain steps: 3"));
+        assert!(rendered.contains("Preferred route: chain"));
+        assert!(rendered.contains("Domain: microservices"));
+        assert!(rendered.contains("svc-a, svc-b"));
+    }
+
+    #[test]
+    fn assemble_prompt_no_config() {
+        let prompt = assemble_routing_prompt("do the thing", None);
+        assert!(prompt.starts_with("You are a work router."));
+        assert!(prompt.contains("## Task\n\ndo the thing"));
+        assert!(!prompt.contains("## Constraints"));
+    }
+
+    #[test]
+    fn assemble_prompt_with_hints() {
+        let config = AutoConfig {
+            custom_prompt: None,
+            hints: Some(AutoHint {
+                max_parallel: Some(2),
+                ..Default::default()
+            }),
+        };
+        let prompt = assemble_routing_prompt("review files", Some(&config));
+        assert!(prompt.starts_with("You are a work router."));
+        assert!(prompt.contains("## Constraints"));
+        assert!(prompt.contains("Maximum parallel tasks: 2"));
+        assert!(prompt.contains("## Task\n\nreview files"));
+    }
+
+    #[test]
+    fn assemble_prompt_with_custom_prompt() {
+        let config = AutoConfig {
+            custom_prompt: Some("You are a custom router.".into()),
+            hints: None,
+        };
+        let prompt = assemble_routing_prompt("my task", Some(&config));
+        assert!(prompt.starts_with("You are a custom router."));
+        assert!(!prompt.contains("You are a work router."));
+        assert!(prompt.contains("## Task\n\nmy task"));
+    }
+
+    #[test]
+    fn assemble_prompt_custom_prompt_with_hints() {
+        let config = AutoConfig {
+            custom_prompt: Some("Custom instructions.".into()),
+            hints: Some(AutoHint {
+                domain: Some("testing".into()),
+                ..Default::default()
+            }),
+        };
+        let prompt = assemble_routing_prompt("task", Some(&config));
+        assert!(prompt.starts_with("Custom instructions."));
+        assert!(prompt.contains("## Constraints"));
+        assert!(prompt.contains("Domain: testing"));
+        assert!(prompt.contains("## Task\n\ntask"));
+    }
+
+    #[test]
+    fn default_prompt_loaded_from_file() {
+        assert!(DEFAULT_ROUTING_PROMPT.contains("You are a work router."));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("THREE options"));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("SINGLE"));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("PARALLEL"));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("CHAIN"));
+    }
+
+    #[test]
+    fn route_preference_display() {
+        assert_eq!(RoutePreference::PreferSingle.to_string(), "single");
+        assert_eq!(RoutePreference::PreferParallel.to_string(), "parallel");
+        assert_eq!(RoutePreference::PreferChain.to_string(), "chain");
+    }
+
+    #[test]
+    fn route_preference_serde_roundtrip() {
+        let pref = RoutePreference::PreferParallel;
+        let json = serde_json::to_string(&pref).unwrap();
+        let parsed: RoutePreference = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, RoutePreference::PreferParallel);
+    }
+
+    #[test]
+    fn auto_hint_serde_skips_none_fields() {
+        let hints = AutoHint {
+            max_parallel: Some(3),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&hints).unwrap();
+        assert!(json.contains("max_parallel"));
+        assert!(!json.contains("max_chain_steps"));
+        assert!(!json.contains("prefer"));
+        assert!(!json.contains("domain"));
+        assert!(!json.contains("decomposition_hints"));
+    }
+
+    #[test]
+    fn auto_hint_default_is_empty() {
+        let hints = AutoHint::default();
+        assert!(hints.max_parallel.is_none());
+        assert!(hints.max_chain_steps.is_none());
+        assert!(hints.prefer.is_none());
+        assert!(hints.domain.is_none());
+        assert!(hints.decomposition_hints.is_none());
     }
 }
