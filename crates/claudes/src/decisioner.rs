@@ -27,6 +27,7 @@ pub enum ExecutionPlan {
 /// A single task within a parallel execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedTask {
+    #[serde(alias = "value")]
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -36,6 +37,7 @@ pub struct PlannedTask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedStep {
     pub name: String,
+    #[serde(alias = "value")]
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -177,7 +179,7 @@ impl Decisioner for ClaudeDecisioner<'_> {
             .output_format(OutputFormat::Json)
             .permission_mode(PermissionMode::Plan)
             .no_session_persistence()
-            .max_turns(1)
+            .max_turns(8)
             .execute(self.claude)
             .await
             .context("decisioner claude call failed")?;
@@ -317,7 +319,8 @@ Default to sonnet when unsure. Each task/step prompt should be self-contained an
 3. If the task is simple enough for one call, use "single". Don't over-split.
 4. Parallel tasks must be truly independent — no task should depend on another's output.
 5. Chain steps should reference "the output above" or "the previous step" when they depend on prior work.
-6. Keep the number of parallel tasks or chain steps reasonable (2-6 typically)."#;
+6. Keep the number of parallel tasks or chain steps reasonable (2-6 typically).
+7. DO NOT use any tools. You have all the context you need. Just analyze and respond with JSON."#;
 
 #[cfg(test)]
 mod tests {
