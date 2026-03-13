@@ -344,6 +344,20 @@ Optional Cargo features (all enabled by default):
 - `json` - JSON output parsing via serde_json
 - `tempfile` - Temporary file support for MCP config generation
 
+## Examples
+
+Runnable examples in `examples/`:
+
+```bash
+cargo run -p claude-wrapper --example oneshot          # Single query
+cargo run -p claude-wrapper --example stream_query     # Streaming NDJSON events
+cargo run -p claude-wrapper --example json_output      # Structured JSON response
+cargo run -p claude-wrapper --example mcp_config       # MCP config generation
+cargo run -p claude-wrapper --example health_check     # CLI diagnostics
+cargo run -p claude-wrapper --example agent_worker     # Agent worker setup
+cargo run -p claude-wrapper --example supervised_worker # Restart loop with budget tracking
+```
+
 ## Testing
 
 Requires the `claude` CLI binary to be installed:

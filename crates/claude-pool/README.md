@@ -508,6 +508,34 @@ Common errors:
 - `NoSlotsAvailable` - All slots busy/offline
 - `TaskNotFound` - Invalid task ID
 
+## Durable Storage
+
+By default the pool uses `InMemoryStore` (all state lost on exit). For persistence across restarts, use `JsonFileStore`:
+
+```rust
+use claude_pool::{Pool, JsonFileStore};
+
+let store = JsonFileStore::new("/tmp/my-pool-state").await?;
+let pool = Pool::builder_with_store(claude, store)
+    .slots(4)
+    .build()
+    .await?;
+
+// Tasks and slot state persist as JSON files under the directory.
+// A new Pool instance pointed at the same directory picks up where you left off.
+```
+
+## Examples
+
+Runnable examples in `examples/`:
+
+```bash
+cargo run -p claude-pool --example basic_pool     # Single task, status, drain
+cargo run -p claude-pool --example fan_out         # Parallel execution across slots
+cargo run -p claude-pool --example chain           # Sequential pipeline with per-step models
+cargo run -p claude-pool --example budget_batch    # Async submission with budget caps
+```
+
 ## Feature Flags
 
 Currently no optional features. The crate includes full functionality by default.
