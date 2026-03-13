@@ -19,13 +19,22 @@ pub enum Error {
     #[error("pool is shut down")]
     PoolShutdown,
 
-    /// Budget limit has been reached.
+    /// Pool-wide budget limit has been reached.
     #[error("budget exhausted: spent {spent_microdollars} of {limit_microdollars} microdollars")]
     BudgetExhausted {
         /// Microdollars spent so far.
         spent_microdollars: u64,
         /// Microdollars budget limit.
         limit_microdollars: u64,
+    },
+
+    /// A task's budget cap would exceed the remaining pool budget.
+    #[error("task budget ${task_budget_usd:.4} exceeds remaining pool budget ${remaining_usd:.4}")]
+    TaskBudgetExceedsRemaining {
+        /// The task's requested budget in USD.
+        task_budget_usd: f64,
+        /// Remaining pool budget in USD.
+        remaining_usd: f64,
     },
 
     /// An error from the underlying Claude CLI wrapper.

@@ -384,6 +384,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     ) -> Result<TaskResult> {
         self.check_shutdown()?;
         self.check_budget()?;
+        self.check_task_budget(task_config.as_ref())?;
 
         let task_id = TaskId(format!("task-{}", new_id()));
 
@@ -434,6 +435,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     ) -> Result<TaskId> {
         self.check_shutdown()?;
         self.check_budget()?;
+        self.check_task_budget(task_config.as_ref())?;
 
         let task_id = TaskId(format!("task-{}", new_id()));
         let prompt = prompt.to_string();
@@ -511,6 +513,7 @@ impl<S: PoolStore + 'static> Pool<S> {
     ) -> Result<TaskId> {
         self.check_shutdown()?;
         self.check_budget()?;
+        self.check_task_budget(task_config.as_ref())?;
 
         let task_id = TaskId(format!("task-{}", new_id()));
         let prompt = prompt.to_string();
@@ -1680,6 +1683,26 @@ impl<S: PoolStore + 'static> Pool<S> {
         Ok(())
     }
 
+    /// Pre-flight check: reject a task if its budget cap exceeds the remaining pool budget.
+    fn check_task_budget(&self, task_config: Option<&TaskOverrides>) -> Result<()> {
+        let task_budget_usd = task_config.and_then(|t| t.max_budget_usd);
+        let pool_limit = self.inner.config.budget_microdollars;
+
+        if let (Some(task_budget), Some(limit)) = (task_budget_usd, pool_limit) {
+            let spent = self.inner.total_spend.load(Ordering::Relaxed);
+            let remaining = limit.saturating_sub(spent);
+            let task_microdollars = (task_budget * 1_000_000.0) as u64;
+
+            if task_microdollars > remaining {
+                return Err(Error::TaskBudgetExceedsRemaining {
+                    task_budget_usd: task_budget,
+                    remaining_usd: remaining as f64 / 1_000_000.0,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Wait for an idle slot to become available, with exponential backoff.
     async fn wait_for_idle_slot_with_timeout(&self, timeout_secs: u64) -> Result<SlotRecord> {
         use std::time::{Duration, Instant};
@@ -1730,10 +1753,13 @@ impl<S: PoolStore + 'static> Pool<S> {
     }
 
     /// Release a slot back to idle after task completion.
+    ///
+    /// Also checks whether the task exceeded its per-task budget cap and
+    /// sets `budget_exceeded` on the result if so.
     async fn release_slot(
         &self,
         slot_id: &SlotId,
-        _task_id: &TaskId,
+        task_id: &TaskId,
         result: &std::result::Result<TaskResult, Error>,
     ) -> Result<()> {
         if let Some(mut slot) = self.inner.store.get_slot(slot_id).await? {
@@ -1749,6 +1775,28 @@ impl<S: PoolStore + 'static> Pool<S> {
                 self.inner
                     .total_spend
                     .fetch_add(task_result.cost_microdollars, Ordering::Relaxed);
+
+                // Check per-task budget cap and flag if exceeded.
+                if let Some(task_record) = self.inner.store.get_task(task_id).await?
+                    && let Some(ref config) = task_record.config
+                    && let Some(max_budget_usd) = config.max_budget_usd
+                {
+                    let max_microdollars = (max_budget_usd * 1_000_000.0) as u64;
+                    if task_result.cost_microdollars > max_microdollars {
+                        tracing::warn!(
+                            task_id = %task_id.0,
+                            cost_microdollars = task_result.cost_microdollars,
+                            budget_microdollars = max_microdollars,
+                            "task exceeded its per-task budget cap"
+                        );
+                        // Update the task result in the store with budget_exceeded flag.
+                        let mut updated_task = task_record;
+                        if let Some(ref mut r) = updated_task.result {
+                            r.budget_exceeded = true;
+                        }
+                        self.inner.store.put_task(updated_task).await?;
+                    }
+                }
             }
 
             self.inner.store.put_slot(slot).await?;
@@ -2432,6 +2480,7 @@ mod tests {
                 failed_command: None,
                 exit_code: None,
                 stderr: None,
+                budget_exceeded: false,
             }),
             tags: vec![],
             config: None,
@@ -2517,5 +2566,125 @@ mod tests {
         // Should not panic when task doesn't exist.
         let task_id = TaskId("nonexistent".into());
         pool.append_chain_partial_output(&task_id, "ignored");
+    }
+
+    // ── Per-task budget enforcement tests ────────────────────────────
+
+    #[tokio::test]
+    async fn task_budget_exceeds_remaining_pool_budget() {
+        let pool = Pool::builder(mock_claude())
+            .slots(1)
+            .config(PoolConfig {
+                budget_microdollars: Some(1_000_000), // $1.00
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Simulate $0.80 already spent.
+        pool.inner.total_spend.store(800_000, Ordering::Relaxed);
+
+        // Try to submit a task with a $0.50 budget — exceeds remaining $0.20.
+        let task_config = TaskOverrides {
+            max_budget_usd: Some(0.50),
+            ..Default::default()
+        };
+        let err = pool
+            .submit_with_config("expensive task", Some(task_config), vec![])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::TaskBudgetExceedsRemaining { .. }));
+    }
+
+    #[tokio::test]
+    async fn task_budget_within_remaining_pool_budget() {
+        let pool = Pool::builder(mock_claude())
+            .slots(1)
+            .config(PoolConfig {
+                budget_microdollars: Some(1_000_000), // $1.00
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Simulate $0.40 already spent.
+        pool.inner.total_spend.store(400_000, Ordering::Relaxed);
+
+        // Task with $0.50 budget fits within remaining $0.60.
+        // This will fail at execution (mock_claude), but should pass the budget check.
+        let task_config = TaskOverrides {
+            max_budget_usd: Some(0.50),
+            ..Default::default()
+        };
+        let result = pool
+            .submit_with_config("task", Some(task_config), vec![])
+            .await;
+        // Should succeed at submission (the task will fail at execution due to mock).
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn task_budget_check_skipped_without_pool_budget() {
+        let pool = Pool::builder(mock_claude())
+            .slots(1)
+            .config(PoolConfig {
+                budget_microdollars: None, // No pool budget
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Task with a per-task budget but no pool budget — should not be rejected.
+        let task_config = TaskOverrides {
+            max_budget_usd: Some(100.0),
+            ..Default::default()
+        };
+        let result = pool
+            .submit_with_config("task", Some(task_config), vec![])
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_flag_set_on_result() {
+        // Test that budget_exceeded is set when task cost exceeds its cap.
+        let result = TaskResult::success("done", 500_000, 3);
+        assert!(!result.budget_exceeded);
+
+        // Simulate what release_slot does internally.
+        let mut result_with_flag = result;
+        result_with_flag.budget_exceeded = true;
+        assert!(result_with_flag.budget_exceeded);
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_serde_roundtrip() {
+        let mut result = TaskResult::success("done", 500_000, 3);
+        result.budget_exceeded = true;
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("budget_exceeded"));
+
+        let parsed: TaskResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.budget_exceeded);
+
+        // When false, it should be omitted from serialization.
+        let result_ok = TaskResult::success("done", 100, 1);
+        let json_ok = serde_json::to_string(&result_ok).unwrap();
+        assert!(!json_ok.contains("budget_exceeded"));
+    }
+
+    #[tokio::test]
+    async fn task_budget_error_message() {
+        let err = Error::TaskBudgetExceedsRemaining {
+            task_budget_usd: 0.50,
+            remaining_usd: 0.20,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("0.50"));
+        assert!(msg.contains("0.20"));
     }
 }

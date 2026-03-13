@@ -411,6 +411,15 @@ pub struct TaskResult {
     /// On failure: stderr output from the CLI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
+
+    /// Whether this task exceeded its per-task budget cap.
+    ///
+    /// Set by the pool after execution if the task's actual cost exceeded
+    /// the `max_budget_usd` from its [`TaskOverrides`]. The CLI enforces
+    /// the cap during execution, so this primarily flags tasks that ran
+    /// up against their limit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_exceeded: bool,
 }
 
 impl TaskResult {
@@ -427,6 +436,7 @@ impl TaskResult {
             failed_command: None,
             exit_code: None,
             stderr: None,
+            budget_exceeded: false,
         }
     }
 
@@ -443,6 +453,7 @@ impl TaskResult {
             failed_command: None,
             exit_code: None,
             stderr: None,
+            budget_exceeded: false,
         }
     }
 
