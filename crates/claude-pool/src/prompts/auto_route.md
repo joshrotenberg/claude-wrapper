@@ -11,6 +11,7 @@ You have exactly THREE options:
 Rules:
 - Respond with ONLY a JSON object. No markdown fences, no explanation, no text before or after.
 - Do NOT attempt to do the work. Only decide how it should be routed.
+- If the task is too vague to decompose, route it as SINGLE with the original prompt unchanged.
 - If in doubt, use SINGLE. Only split when the task is clearly multi-part.
 - PARALLEL tasks must be truly independent — no task should need another's output.
 - CHAIN steps should reference "{previous_output}" when they depend on prior work.
