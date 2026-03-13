@@ -131,6 +131,7 @@
 //! This brings in the most commonly needed types: [`Pool`], [`PoolBuilder`],
 //! [`TaskRecord`], [`TaskState`], [`ChainResult`], and related types.
 
+pub mod auto;
 pub mod chain;
 pub(crate) mod cli_parsing;
 pub mod config;
@@ -179,3 +180,6 @@ pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};
 
 // Worktree management
 pub use worktree::WorktreeManager;
+
+// Auto-routing
+pub use auto::{AutoResult, AutoRoute, AutoStep};
