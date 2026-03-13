@@ -329,7 +329,14 @@ impl<S: PoolStore + 'static> Pool<S> {
     }
 
     /// Execute an already-decided route.
+    ///
+    /// Normalizes degenerate routes before execution:
+    /// - `Parallel` with 0-1 prompts becomes `Single`
+    /// - `Chain` with 0-1 steps becomes `Single`
+    /// - Empty prompts are rejected
     pub async fn execute_route(&self, route: AutoRoute) -> crate::Result<AutoResult> {
+        let route = normalize_route(route)?;
+
         match route {
             AutoRoute::Single { prompt } => {
                 let result = self.run(&prompt).await?;
@@ -357,7 +364,9 @@ impl<S: PoolStore + 'static> Pool<S> {
                     .submit_chain(chain_steps, &skills, ChainOptions::default())
                     .await?;
 
-                // Poll for result.
+                // Poll for result with timeout.
+                let deadline = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(CHAIN_POLL_TIMEOUT_SECS);
                 loop {
                     if let Some(result) = self.result(&task_id).await? {
                         // Chain results are serialized as JSON in the task output.
@@ -368,6 +377,11 @@ impl<S: PoolStore + 'static> Pool<S> {
                         }
                         // Fallback: wrap the raw output as a single result.
                         return Ok(AutoResult::Single(result));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(crate::Error::Store(format!(
+                            "auto-route chain timed out after {CHAIN_POLL_TIMEOUT_SECS}s"
+                        )));
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -383,6 +397,72 @@ impl AutoRoute {
             Self::Single { .. } => "single",
             Self::Parallel { .. } => "parallel",
             Self::Chain { .. } => "chain",
+        }
+    }
+}
+
+// --- Validation ---
+
+/// Maximum seconds to poll for a chain result before timing out.
+const CHAIN_POLL_TIMEOUT_SECS: u64 = 600;
+
+/// Normalize degenerate routes into sensible ones.
+///
+/// - `Parallel([])` or `Chain([])` -> error (nothing to do)
+/// - `Parallel([one])` -> `Single { prompt: one }`
+/// - `Chain([one])` -> `Single { prompt: one.prompt }`
+/// - All prompts trimmed; empty prompts rejected
+fn normalize_route(route: AutoRoute) -> crate::Result<AutoRoute> {
+    match route {
+        AutoRoute::Single { prompt } => {
+            let prompt = prompt.trim().to_string();
+            if prompt.is_empty() {
+                return Err(crate::Error::Store(
+                    "auto-route produced an empty prompt".into(),
+                ));
+            }
+            Ok(AutoRoute::Single { prompt })
+        }
+        AutoRoute::Parallel { prompts } => {
+            let prompts: Vec<String> = prompts
+                .into_iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            match prompts.len() {
+                0 => Err(crate::Error::Store(
+                    "auto-route produced parallel with no prompts".into(),
+                )),
+                1 => {
+                    tracing::info!("normalizing parallel(1) to single");
+                    Ok(AutoRoute::Single {
+                        prompt: prompts.into_iter().next().unwrap(),
+                    })
+                }
+                _ => Ok(AutoRoute::Parallel { prompts }),
+            }
+        }
+        AutoRoute::Chain { steps } => {
+            let steps: Vec<AutoStep> = steps
+                .into_iter()
+                .filter(|s| !s.prompt.trim().is_empty())
+                .map(|s| AutoStep {
+                    name: s.name,
+                    prompt: s.prompt.trim().to_string(),
+                })
+                .collect();
+            match steps.len() {
+                0 => Err(crate::Error::Store(
+                    "auto-route produced chain with no steps".into(),
+                )),
+                1 => {
+                    tracing::info!("normalizing chain(1) to single");
+                    Ok(AutoRoute::Single {
+                        prompt: steps.into_iter().next().unwrap().prompt,
+                    })
+                }
+                _ => Ok(AutoRoute::Chain { steps }),
+            }
         }
     }
 }
@@ -832,5 +912,146 @@ mod tests {
         assert!(hints.prefer.is_none());
         assert!(hints.domain.is_none());
         assert!(hints.decomposition_hints.is_none());
+    }
+
+    // --- Normalize tests ---
+
+    #[test]
+    fn normalize_single_trims_whitespace() {
+        let route = AutoRoute::Single {
+            prompt: "  hello  ".into(),
+        };
+        let normalized = normalize_route(route).unwrap();
+        match normalized {
+            AutoRoute::Single { prompt } => assert_eq!(prompt, "hello"),
+            _ => panic!("expected Single"),
+        }
+    }
+
+    #[test]
+    fn normalize_single_rejects_empty() {
+        let route = AutoRoute::Single {
+            prompt: "   ".into(),
+        };
+        assert!(normalize_route(route).is_err());
+    }
+
+    #[test]
+    fn normalize_parallel_one_becomes_single() {
+        let route = AutoRoute::Parallel {
+            prompts: vec!["only one".into()],
+        };
+        let normalized = normalize_route(route).unwrap();
+        match normalized {
+            AutoRoute::Single { prompt } => assert_eq!(prompt, "only one"),
+            _ => panic!("expected Single, got {:?}", normalized),
+        }
+    }
+
+    #[test]
+    fn normalize_parallel_empty_is_error() {
+        let route = AutoRoute::Parallel { prompts: vec![] };
+        assert!(normalize_route(route).is_err());
+    }
+
+    #[test]
+    fn normalize_parallel_filters_empty_prompts() {
+        let route = AutoRoute::Parallel {
+            prompts: vec!["good".into(), "  ".into(), "also good".into()],
+        };
+        let normalized = normalize_route(route).unwrap();
+        match normalized {
+            AutoRoute::Parallel { prompts } => {
+                assert_eq!(prompts.len(), 2);
+                assert_eq!(prompts[0], "good");
+                assert_eq!(prompts[1], "also good");
+            }
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[test]
+    fn normalize_parallel_all_empty_is_error() {
+        let route = AutoRoute::Parallel {
+            prompts: vec!["  ".into(), "".into()],
+        };
+        assert!(normalize_route(route).is_err());
+    }
+
+    #[test]
+    fn normalize_chain_one_becomes_single() {
+        let route = AutoRoute::Chain {
+            steps: vec![AutoStep {
+                name: "only".into(),
+                prompt: "do it".into(),
+            }],
+        };
+        let normalized = normalize_route(route).unwrap();
+        match normalized {
+            AutoRoute::Single { prompt } => assert_eq!(prompt, "do it"),
+            _ => panic!("expected Single"),
+        }
+    }
+
+    #[test]
+    fn normalize_chain_empty_is_error() {
+        let route = AutoRoute::Chain { steps: vec![] };
+        assert!(normalize_route(route).is_err());
+    }
+
+    #[test]
+    fn normalize_chain_filters_empty_prompts() {
+        let route = AutoRoute::Chain {
+            steps: vec![
+                AutoStep {
+                    name: "a".into(),
+                    prompt: "step one".into(),
+                },
+                AutoStep {
+                    name: "b".into(),
+                    prompt: "  ".into(),
+                },
+                AutoStep {
+                    name: "c".into(),
+                    prompt: "step three".into(),
+                },
+            ],
+        };
+        let normalized = normalize_route(route).unwrap();
+        match normalized {
+            AutoRoute::Chain { steps } => {
+                assert_eq!(steps.len(), 2);
+                assert_eq!(steps[0].name, "a");
+                assert_eq!(steps[1].name, "c");
+            }
+            _ => panic!("expected Chain"),
+        }
+    }
+
+    #[test]
+    fn normalize_valid_parallel_unchanged() {
+        let route = AutoRoute::Parallel {
+            prompts: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let normalized = normalize_route(route).unwrap();
+        assert!(matches!(normalized, AutoRoute::Parallel { prompts } if prompts.len() == 3));
+    }
+
+    #[test]
+    fn normalize_valid_chain_unchanged() {
+        let route = AutoRoute::Chain {
+            steps: vec![
+                AutoStep {
+                    name: "s1".into(),
+                    prompt: "first".into(),
+                },
+                AutoStep {
+                    name: "s2".into(),
+                    prompt: "second".into(),
+                },
+            ],
+        };
+        let normalized = normalize_route(route).unwrap();
+        assert!(matches!(normalized, AutoRoute::Chain { steps } if steps.len() == 2));
     }
 }
