@@ -10,12 +10,20 @@ use crate::error::{Error, Result};
 use crate::types::{SlotId, TaskId};
 
 /// Manages git worktrees for pool slots.
+///
+/// When dropped, the manager attempts best-effort cleanup of all worktrees
+/// under its base directory. This ensures stale worktrees are removed even
+/// if the pool panics or exits without calling [`cleanup_all`][Self::cleanup_all].
 #[derive(Debug)]
 pub struct WorktreeManager {
     /// Root directory for worktrees (e.g. `/tmp/claude-pool/worktrees`).
     base_dir: PathBuf,
     /// Source repository path.
     repo_dir: PathBuf,
+    /// Slot IDs currently tracked (for cleanup on drop).
+    tracked_slots: std::sync::Mutex<Vec<SlotId>>,
+    /// Chain task IDs currently tracked (for cleanup on drop).
+    tracked_chains: std::sync::Mutex<Vec<TaskId>>,
 }
 
 impl WorktreeManager {
@@ -28,7 +36,12 @@ impl WorktreeManager {
         let repo_dir = repo_dir.into();
         let base_dir =
             base_dir.unwrap_or_else(|| std::env::temp_dir().join("claude-pool").join("worktrees"));
-        Self { base_dir, repo_dir }
+        Self {
+            base_dir,
+            repo_dir,
+            tracked_slots: std::sync::Mutex::new(Vec::new()),
+            tracked_chains: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Create a worktree manager after verifying the repo directory is a git repository.
@@ -59,6 +72,38 @@ impl WorktreeManager {
         }
 
         Ok(Self::new(repo_dir, base_dir))
+    }
+
+    /// Track a slot ID for cleanup on drop.
+    fn track_slot(&self, slot_id: &SlotId) {
+        if let Ok(mut slots) = self.tracked_slots.lock()
+            && !slots.iter().any(|s| s.0 == slot_id.0)
+        {
+            slots.push(slot_id.clone());
+        }
+    }
+
+    /// Untrack a slot ID (after explicit removal).
+    fn untrack_slot(&self, slot_id: &SlotId) {
+        if let Ok(mut slots) = self.tracked_slots.lock() {
+            slots.retain(|s| s.0 != slot_id.0);
+        }
+    }
+
+    /// Track a chain task ID for cleanup on drop.
+    fn track_chain(&self, task_id: &TaskId) {
+        if let Ok(mut chains) = self.tracked_chains.lock()
+            && !chains.iter().any(|t| t.0 == task_id.0)
+        {
+            chains.push(task_id.clone());
+        }
+    }
+
+    /// Untrack a chain task ID (after explicit removal).
+    fn untrack_chain(&self, task_id: &TaskId) {
+        if let Ok(mut chains) = self.tracked_chains.lock() {
+            chains.retain(|t| t.0 != task_id.0);
+        }
     }
 
     /// Create a worktree for a slot.
@@ -97,6 +142,8 @@ impl WorktreeManager {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(Error::Store(format!("git worktree add failed: {stderr}")));
         }
+
+        self.track_slot(slot_id);
 
         tracing::info!(
             slot_id = %slot_id.0,
@@ -143,6 +190,8 @@ impl WorktreeManager {
             .current_dir(&self.repo_dir)
             .output()
             .await;
+
+        self.untrack_slot(slot_id);
 
         tracing::debug!(
             slot_id = %slot_id.0,
@@ -223,6 +272,8 @@ impl WorktreeManager {
             )));
         }
 
+        self.track_chain(task_id);
+
         tracing::info!(
             task_id = %task_id.0,
             path = %worktree_path.display(),
@@ -267,6 +318,8 @@ impl WorktreeManager {
             .current_dir(&self.repo_dir)
             .output()
             .await;
+
+        self.untrack_chain(task_id);
 
         tracing::debug!(
             task_id = %task_id.0,
@@ -380,9 +433,115 @@ impl WorktreeManager {
     }
 }
 
+impl Drop for WorktreeManager {
+    fn drop(&mut self) {
+        let slots: Vec<SlotId> = self
+            .tracked_slots
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let chains: Vec<TaskId> = self
+            .tracked_chains
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+
+        if slots.is_empty() && chains.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            slots = slots.len(),
+            chains = chains.len(),
+            "cleaning up worktrees on drop"
+        );
+
+        // Best-effort synchronous cleanup using blocking git commands.
+        for slot_id in &slots {
+            let worktree_path = self.base_dir.join(&slot_id.0);
+            if worktree_path.exists() {
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "worktree",
+                        "remove",
+                        "--force",
+                        worktree_path.to_str().unwrap_or_default(),
+                    ])
+                    .current_dir(&self.repo_dir)
+                    .output();
+
+                // Fall back to manual removal if git worktree remove fails.
+                if worktree_path.exists() {
+                    let _ = std::fs::remove_dir_all(&worktree_path);
+                }
+            }
+            let branch_name = format!("claude-pool/{}", slot_id.0);
+            let _ = std::process::Command::new("git")
+                .args(["branch", "-D", &branch_name])
+                .current_dir(&self.repo_dir)
+                .output();
+        }
+
+        for task_id in &chains {
+            let worktree_path = self.base_dir.join("chains").join(&task_id.0);
+            if worktree_path.exists() {
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "worktree",
+                        "remove",
+                        "--force",
+                        worktree_path.to_str().unwrap_or_default(),
+                    ])
+                    .current_dir(&self.repo_dir)
+                    .output();
+
+                if worktree_path.exists() {
+                    let _ = std::fs::remove_dir_all(&worktree_path);
+                }
+            }
+            let branch_name = format!("claude-pool/chain/{}", task_id.0);
+            let _ = std::process::Command::new("git")
+                .args(["branch", "-D", &branch_name])
+                .current_dir(&self.repo_dir)
+                .output();
+        }
+
+        // Prune stale worktree references.
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.repo_dir)
+            .output();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Initialize a git repo with a dummy user config and an initial commit.
+    /// This works in CI where no global git identity is configured.
+    fn init_test_repo(path: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn new_validated_rejects_non_repo() {
@@ -399,6 +558,7 @@ mod tests {
     #[tokio::test]
     async fn new_validated_accepts_git_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
+        // Only needs git init, no commit required for validation.
         std::process::Command::new("git")
             .args(["init"])
             .current_dir(tmpdir.path())
@@ -426,19 +586,9 @@ mod tests {
     async fn clone_preserves_non_local_remote() {
         // Set up a source repo with a non-local origin.
         let src = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
+        init_test_repo(src.path());
         std::process::Command::new("git")
             .args(["remote", "add", "origin", "git@github.com:user/repo.git"])
-            .current_dir(src.path())
-            .output()
-            .unwrap();
-        // Need at least one commit for clone to work.
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(src.path())
             .output()
             .unwrap();
@@ -468,5 +618,82 @@ mod tests {
             mgr.chain_worktree_path(&task_id),
             PathBuf::from("/tmp/wt/chains/chain-abc123")
         );
+    }
+
+    #[tokio::test]
+    async fn drop_cleans_up_slot_worktrees() {
+        let src = tempfile::tempdir().unwrap();
+        init_test_repo(src.path());
+
+        let base = tempfile::tempdir().unwrap();
+        let slot_id = SlotId("drop-test-slot".into());
+        let worktree_path;
+
+        {
+            let mgr = WorktreeManager::new(src.path(), Some(base.path().to_path_buf()));
+            worktree_path = mgr.create(&slot_id).await.unwrap();
+            assert!(worktree_path.exists(), "worktree should exist after create");
+            // mgr is dropped here, triggering cleanup
+        }
+
+        assert!(
+            !worktree_path.exists(),
+            "worktree should be cleaned up after drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_cleans_up_chain_worktrees() {
+        let src = tempfile::tempdir().unwrap();
+        init_test_repo(src.path());
+
+        let base = tempfile::tempdir().unwrap();
+        let task_id = TaskId("drop-test-chain".into());
+        let worktree_path;
+
+        {
+            let mgr = WorktreeManager::new(src.path(), Some(base.path().to_path_buf()));
+            worktree_path = mgr.create_for_chain(&task_id).await.unwrap();
+            assert!(
+                worktree_path.exists(),
+                "chain worktree should exist after create"
+            );
+            // mgr is dropped here
+        }
+
+        assert!(
+            !worktree_path.exists(),
+            "chain worktree should be cleaned up after drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_remove_prevents_double_cleanup() {
+        let src = tempfile::tempdir().unwrap();
+        init_test_repo(src.path());
+
+        let base = tempfile::tempdir().unwrap();
+        let slot_id = SlotId("explicit-remove-test".into());
+
+        let mgr = WorktreeManager::new(src.path(), Some(base.path().to_path_buf()));
+        let _path = mgr.create(&slot_id).await.unwrap();
+        mgr.remove(&slot_id).await.unwrap();
+
+        // After explicit remove, tracked_slots should be empty.
+        let tracked = mgr.tracked_slots.lock().unwrap();
+        assert!(
+            tracked.is_empty(),
+            "slot should be untracked after explicit remove"
+        );
+    }
+
+    #[test]
+    fn tracking_is_idempotent() {
+        let mgr = WorktreeManager::new("/repo", Some(PathBuf::from("/tmp/wt")));
+        let id = SlotId("dup-test".into());
+        mgr.track_slot(&id);
+        mgr.track_slot(&id);
+        let tracked = mgr.tracked_slots.lock().unwrap();
+        assert_eq!(tracked.len(), 1, "duplicate tracking should be prevented");
     }
 }
