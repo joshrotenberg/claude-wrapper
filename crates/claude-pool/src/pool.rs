@@ -1377,6 +1377,11 @@ impl<S: PoolStore + 'static> Pool<S> {
         &self.inner.config
     }
 
+    /// Get a reference to the underlying Claude client.
+    pub fn claude(&self) -> &Claude {
+        &self.inner.claude
+    }
+
     /// Compute aggregated session metrics from all tasks.
     ///
     /// Scans all tasks in the store and computes cost, timing, and model
