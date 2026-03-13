@@ -5,6 +5,7 @@
 //! without manually composing individual chain steps.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,28 @@ pub struct WorkflowArgument {
 }
 
 impl Workflow {
+    /// Validate this workflow definition.
+    ///
+    /// Checks that the workflow has a name, at least one step, and that all
+    /// steps have names.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.name.is_empty() {
+            return Err("workflow name cannot be empty".into());
+        }
+        if self.steps.is_empty() {
+            return Err(format!("workflow '{}' has no steps", self.name));
+        }
+        for (i, step) in self.steps.iter().enumerate() {
+            if step.name.is_empty() {
+                return Err(format!(
+                    "step {} in workflow '{}' has no name",
+                    i, self.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Instantiate this workflow by substituting placeholders with arguments.
     ///
     /// Validates that all required arguments are provided, then replaces
@@ -150,6 +173,64 @@ impl WorkflowRegistry {
     /// Remove a workflow by name.
     pub fn remove(&mut self, name: &str) -> Option<Workflow> {
         self.workflows.remove(name)
+    }
+
+    /// Load workflow definitions from a directory.
+    ///
+    /// Supports two formats:
+    /// - **YAML files** (`*.yml` / `*.yaml`): Each file defines one workflow.
+    /// - **JSON files** (`*.json`): Each file defines one workflow.
+    ///
+    /// Returns the number of workflows loaded. Silently returns 0 if the
+    /// directory does not exist.
+    pub fn load_from_dir(&mut self, dir: &Path) -> crate::Result<usize> {
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| crate::Error::Store(format!("failed to read workflow dir: {e}")))?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        let mut count = 0;
+        for entry in entries {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                crate::Error::Store(format!("failed to read {}: {e}", path.display()))
+            })?;
+
+            let workflow: Workflow = match ext {
+                "yml" | "yaml" => serde_yaml::from_str(&contents).map_err(|e| {
+                    crate::Error::Store(format!(
+                        "failed to parse YAML workflow {}: {e}",
+                        path.display()
+                    ))
+                })?,
+                "json" => serde_json::from_str(&contents).map_err(|e| {
+                    crate::Error::Store(format!(
+                        "failed to parse JSON workflow {}: {e}",
+                        path.display()
+                    ))
+                })?,
+                _ => continue,
+            };
+
+            workflow.validate().map_err(|e| {
+                crate::Error::Store(format!("invalid workflow in {}: {e}", path.display()))
+            })?;
+
+            self.register(workflow);
+            count += 1;
+        }
+
+        Ok(count)
     }
 }
 
@@ -339,6 +420,7 @@ pub fn builtin_workflows() -> Vec<Workflow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn workflow_instantiation() {
@@ -405,6 +487,153 @@ mod tests {
         assert!(registry.get("refactor_and_test").is_some());
         assert!(registry.get("review_and_fix").is_some());
         assert_eq!(registry.list().len(), 3);
+    }
+
+    #[test]
+    fn validate_empty_name() {
+        let wf = Workflow {
+            name: "".into(),
+            description: "test".into(),
+            steps: vec![],
+            arguments: vec![],
+        };
+        assert!(wf.validate().is_err());
+        assert!(wf.validate().unwrap_err().contains("name cannot be empty"));
+    }
+
+    #[test]
+    fn validate_no_steps() {
+        let wf = Workflow {
+            name: "test".into(),
+            description: "test".into(),
+            steps: vec![],
+            arguments: vec![],
+        };
+        assert!(wf.validate().is_err());
+        assert!(wf.validate().unwrap_err().contains("has no steps"));
+    }
+
+    #[test]
+    fn validate_step_without_name() {
+        let wf = Workflow {
+            name: "test".into(),
+            description: "test".into(),
+            steps: vec![WorkflowStep {
+                name: "".into(),
+                action: StepAction::Prompt {
+                    prompt: "do something".into(),
+                },
+                config: None,
+                failure_policy: StepFailurePolicy::default(),
+            }],
+            arguments: vec![],
+        };
+        assert!(wf.validate().is_err());
+        assert!(wf.validate().unwrap_err().contains("has no name"));
+    }
+
+    #[test]
+    fn validate_good_workflow() {
+        let wf = Workflow {
+            name: "test".into(),
+            description: "test".into(),
+            steps: vec![WorkflowStep {
+                name: "step1".into(),
+                action: StepAction::Prompt {
+                    prompt: "do something".into(),
+                },
+                config: None,
+                failure_policy: StepFailurePolicy::default(),
+            }],
+            arguments: vec![],
+        };
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn load_from_dir_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+name: test_yaml
+description: A test workflow loaded from YAML
+steps:
+  - name: step_one
+    action:
+      type: prompt
+      prompt: "do the thing"
+    failure_policy:
+      retries: 0
+arguments:
+  - name: target
+    description: What to process
+    required: true
+"#;
+        std::fs::write(dir.path().join("test.yml"), yaml).unwrap();
+
+        let mut registry = WorkflowRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 1);
+        let wf = registry.get("test_yaml").unwrap();
+        assert_eq!(wf.steps.len(), 1);
+        assert_eq!(wf.arguments.len(), 1);
+    }
+
+    #[test]
+    fn load_from_dir_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "name": "test_json",
+            "description": "A test workflow loaded from JSON",
+            "steps": [{
+                "name": "step_one",
+                "action": {"type": "prompt", "prompt": "do the thing"},
+                "failure_policy": {"retries": 0}
+            }],
+            "arguments": []
+        }"#;
+        std::fs::write(dir.path().join("test.json"), json).unwrap();
+
+        let mut registry = WorkflowRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 1);
+        assert!(registry.get("test_json").is_some());
+    }
+
+    #[test]
+    fn load_from_dir_ignores_non_workflow_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.md"), "# not a workflow").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "some notes").unwrap();
+
+        let mut registry = WorkflowRegistry::new();
+        let count = registry.load_from_dir(dir.path()).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_from_dir_nonexistent_returns_zero() {
+        let mut registry = WorkflowRegistry::new();
+        let count = registry
+            .load_from_dir(Path::new("/nonexistent/path"))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_from_dir_rejects_invalid_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+name: ""
+description: "invalid"
+steps: []
+arguments: []
+"#;
+        std::fs::write(dir.path().join("bad.yml"), yaml).unwrap();
+
+        let mut registry = WorkflowRegistry::new();
+        let result = registry.load_from_dir(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid workflow"));
     }
 
     #[test]

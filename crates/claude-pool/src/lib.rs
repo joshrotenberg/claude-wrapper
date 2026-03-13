@@ -166,7 +166,7 @@ pub use chain::{
 pub use skill::{RegisteredSkill, Skill, SkillArgument, SkillRegistry, SkillScope, SkillSource};
 
 // Storage
-pub use store::{InMemoryStore, PoolStore};
+pub use store::{InMemoryStore, JsonFileStore, PoolStore};
 
 // Supervisor
 pub use supervisor::{SupervisorHandle, check_and_restart_slots};
