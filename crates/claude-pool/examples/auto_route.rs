@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
     let result = pool.auto(prompt).await?;
     println!("Chose:  {}", result.route_name());
     println!("Output:\n{}", result.output());
+    dbg!(result);
 
     pool.drain().await?;
     Ok(())
