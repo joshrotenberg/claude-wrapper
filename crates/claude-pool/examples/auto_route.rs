@@ -8,11 +8,13 @@
 //! - Multiple independent items -> parallel
 //! - Sequential dependencies -> chain
 //!
+//! Also demonstrates structured hints that constrain routing decisions.
+//!
 //! ```sh
 //! cargo run -p claude-pool --example auto_route
 //! ```
 
-use claude_pool::{Pool, PoolConfig};
+use claude_pool::{AutoHint, Pool, PoolConfig, RoutePreference};
 use claude_wrapper::Claude;
 
 #[tokio::main]
@@ -30,7 +32,8 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    // Try a few different prompts.
+    // --- Basic routing (no hints) ---
+
     let prompts = [
         // Should route as single.
         "What is the capital of France? One sentence.",
@@ -42,17 +45,59 @@ async fn main() -> anyhow::Result<()> {
          Finally, summarize everything into a single paragraph.",
     ];
 
+    println!("=== Basic routing (no hints) ===\n");
     for prompt in &prompts {
         println!("---");
         println!("Prompt: {}", &prompt[..prompt.len().min(80)]);
 
-        // Route only (no execution) to see the decision.
         let route = pool.route(prompt).await?;
         println!("Route:  {:?}\n", route);
     }
 
-    // Now actually execute one.
-    println!("===\nExecuting with auto-route:\n");
+    // --- Routing with hints ---
+
+    println!("=== Routing with hints ===\n");
+
+    // Hint: only 2 slots available, prefer parallel, with decomposition boundaries.
+    let hints = AutoHint {
+        max_parallel: Some(2),
+        prefer: Some(RoutePreference::PreferParallel),
+        domain: Some("Rust monorepo with independent crates".into()),
+        decomposition_hints: Some(vec![
+            "claude-wrapper crate".into(),
+            "claude-pool crate".into(),
+        ]),
+        ..Default::default()
+    };
+
+    let prompt = "Audit the public API surface of each crate in this workspace. \
+                  Check for missing doc comments and inconsistent naming.";
+
+    println!("Prompt: {}", &prompt[..prompt.len().min(80)]);
+    println!("Hints:  max_parallel=2, prefer=parallel, 2 decomposition boundaries");
+
+    let route = pool.route_with_hints(prompt, &hints).await?;
+    println!("Route:  {:?}\n", route);
+
+    // Hint: cap chain depth.
+    let hints = AutoHint {
+        max_chain_steps: Some(2),
+        ..Default::default()
+    };
+
+    let prompt = "First analyze the code for performance issues, then suggest fixes, \
+                  then write tests for the fixes, then summarize.";
+
+    println!("---");
+    println!("Prompt: {}", &prompt[..prompt.len().min(80)]);
+    println!("Hints:  max_chain_steps=2");
+
+    let route = pool.route_with_hints(prompt, &hints).await?;
+    println!("Route:  {:?}\n", route);
+
+    // --- Execute one ---
+
+    println!("=== Executing with auto-route ===\n");
     let prompt = "Explain what a mutex, an arc, and a channel are in Rust. \
                   Each explanation should be one sentence. These are independent.";
 

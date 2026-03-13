@@ -182,4 +182,4 @@ pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};
 pub use worktree::WorktreeManager;
 
 // Auto-routing
-pub use auto::{AutoResult, AutoRoute, AutoStep};
+pub use auto::{AutoConfig, AutoHint, AutoResult, AutoRoute, AutoStep, RoutePreference};
