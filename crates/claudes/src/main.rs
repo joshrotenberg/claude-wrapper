@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+
+mod context;
+mod decisioner;
 mod run;
 
 /// Multi-agent orchestrated CLI for Claude Code.
@@ -41,6 +44,10 @@ struct Cli {
     #[arg(long, short = 'C')]
     working_dir: Option<PathBuf>,
 
+    /// Decisioner strategy: auto, conservative, balanced, aggressive.
+    #[arg(long, short, default_value = "auto")]
+    strategy: decisioner::Strategy,
+
     /// Enable verbose output.
     #[arg(long, short)]
     verbose: bool,
@@ -62,6 +69,8 @@ async fn main() -> Result<()> {
     }
 
     // Determine execution mode.
+    // Explicit modes (--parallel, --chain) bypass the decisioner.
+    // Default prompt mode uses the decisioner to pick strategy.
     if let Some(ref prompts) = cli.parallel {
         run::parallel(&cli, prompts).await
     } else if let Some(ref steps) = cli.chain {
@@ -70,7 +79,7 @@ async fn main() -> Result<()> {
         if cli.plan {
             run::plan(&cli, prompt).await
         } else {
-            run::single(&cli, prompt).await
+            run::auto(&cli, prompt).await
         }
     } else {
         // No args: interactive coordinator mode (planned).
