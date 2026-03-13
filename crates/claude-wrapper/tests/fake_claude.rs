@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
+use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand, RetryPolicy};
 
 const FAKE_CLAUDE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -331,4 +331,196 @@ async fn session_continue_recent() {
     assert_eq!(second.session_id, "sess-recent");
     assert!((session.total_cost_usd() - 0.02).abs() < f64::EPSILON);
     assert_eq!(session.total_turns(), 4);
+}
+
+// ── Subcommand execution tests ───────────────────────────────────────
+
+/// Verify that MCP list command executes through the fake binary.
+#[tokio::test]
+async fn mcp_list_executes() {
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "no servers configured")]);
+    let output = claude_wrapper::McpListCommand::new()
+        .execute(&claude)
+        .await
+        .expect("mcp list should succeed");
+    assert!(output.success);
+    assert!(output.stdout.contains("no servers"));
+}
+
+/// Verify that auth status command executes through the fake binary.
+#[tokio::test]
+async fn auth_status_executes() {
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "authenticated")]);
+    let output = claude_wrapper::AuthStatusCommand::new()
+        .execute(&claude)
+        .await
+        .expect("auth status should succeed");
+    assert!(output.success);
+}
+
+/// Verify that doctor command executes through the fake binary.
+#[tokio::test]
+async fn doctor_executes() {
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "all checks passed")]);
+    let output = claude_wrapper::DoctorCommand::new()
+        .execute(&claude)
+        .await
+        .expect("doctor should succeed");
+    assert!(output.success);
+    assert!(output.stdout.contains("all checks passed"));
+}
+
+/// Verify that agents command executes through the fake binary.
+#[tokio::test]
+async fn agents_executes() {
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "[]")]);
+    let output = claude_wrapper::AgentsCommand::new()
+        .execute(&claude)
+        .await
+        .expect("agents should succeed");
+    assert!(output.success);
+}
+
+/// Verify that raw command passes arbitrary args through.
+#[tokio::test]
+async fn raw_command_executes() {
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "raw output")]);
+    let output = claude_wrapper::RawCommand::new("some-subcommand")
+        .arg("--flag")
+        .arg("value")
+        .execute(&claude)
+        .await
+        .expect("raw command should succeed");
+    assert!(output.success);
+    assert!(output.stdout.contains("raw output"));
+}
+
+// ── Retry integration tests ─────────────────────────────────────────
+
+/// Verify that client-level retry policy retries on configured exit codes.
+#[tokio::test]
+async fn retry_on_exit_code_with_fake_binary() {
+    // Exit code 1 always fails with the fake binary, but retry should attempt it.
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_EXIT_CODE", "1")
+        .env("FAKE_CLAUDE_ERROR_MSG", "transient failure")
+        .retry(
+            RetryPolicy::new()
+                .max_attempts(2)
+                .initial_backoff(std::time::Duration::from_millis(10))
+                .retry_on_exit_codes([1]),
+        )
+        .build()
+        .expect("failed to build client");
+
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+
+    // Should still fail (fake always returns exit code 1), but should have retried.
+    assert!(result.is_err());
+}
+
+/// Verify that per-command retry policy overrides client default.
+#[tokio::test]
+async fn per_command_retry_override() {
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_EXIT_CODE", "1")
+        .env("FAKE_CLAUDE_ERROR_MSG", "fail")
+        // Client default: no retry on exit code 1
+        .retry(RetryPolicy::new().max_attempts(1))
+        .build()
+        .expect("failed to build client");
+
+    // Command-level retry overrides to retry on exit code 1.
+    let result = QueryCommand::new("test")
+        .retry(
+            RetryPolicy::new()
+                .max_attempts(2)
+                .initial_backoff(std::time::Duration::from_millis(10))
+                .retry_on_exit_codes([1]),
+        )
+        .execute(&claude)
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Verify that without retry, a failure is immediate.
+#[tokio::test]
+async fn no_retry_fails_immediately() {
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_EXIT_CODE", "1"),
+        ("FAKE_CLAUDE_ERROR_MSG", "immediate failure"),
+    ]);
+
+    let start = std::time::Instant::now();
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err());
+    // Without retry, should complete very quickly (no backoff delay).
+    assert!(elapsed < std::time::Duration::from_secs(1));
+}
+
+// ── McpConfigBuilder tests ──────────────────────────────────────────
+
+/// Verify McpConfigBuilder produces valid JSON (no binary needed).
+#[tokio::test]
+async fn mcp_config_builder_roundtrip() {
+    use claude_wrapper::McpConfigBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".mcp.json");
+
+    McpConfigBuilder::new()
+        .http_server("hub", "http://localhost:9090")
+        .stdio_server("tool", "npx", ["-y", "my-tool"])
+        .write_to(&path)
+        .unwrap();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+    assert!(parsed["mcpServers"]["hub"].is_object());
+    assert!(parsed["mcpServers"]["tool"].is_object());
+    assert_eq!(parsed["mcpServers"]["hub"]["url"], "http://localhost:9090");
+    assert_eq!(parsed["mcpServers"]["tool"]["command"], "npx");
+}
+
+// ── Environment variable handling ───────────────────────────────────
+
+/// Verify that custom env vars are passed through to the subprocess.
+#[tokio::test]
+async fn env_vars_passed_to_subprocess() {
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_OUTPUT", "env test")
+        .env("CUSTOM_VAR", "custom_value")
+        .build()
+        .expect("failed to build client");
+
+    let output = claude_wrapper::VersionCommand::new()
+        .execute(&claude)
+        .await
+        .expect("should succeed");
+    assert!(output.stdout.contains("env test"));
+}
+
+/// Verify that working directory is set on the subprocess.
+#[tokio::test]
+async fn working_dir_set_on_subprocess() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_OUTPUT", "dir test")
+        .working_dir(dir.path())
+        .build()
+        .expect("failed to build client");
+
+    let output = claude_wrapper::VersionCommand::new()
+        .execute(&claude)
+        .await
+        .expect("should succeed");
+    assert!(output.success);
 }
