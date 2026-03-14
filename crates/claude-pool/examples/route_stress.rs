@@ -191,7 +191,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => {
                 errors += 1;
-                println!("ERROR: {}", e);
+                println!("ERROR: {e}");
+                // Print the underlying cause chain for debugging.
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    println!("{:<40}   caused by: {cause}", "");
+                    source = std::error::Error::source(cause);
+                }
             }
         }
     }
