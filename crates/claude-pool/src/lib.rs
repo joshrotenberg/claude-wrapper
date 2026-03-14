@@ -39,7 +39,6 @@
 //! | Fan-out | N independent tasks running in parallel across slots |
 //! | Task | A single unit of work submitted to the pool |
 //! | Tick | One iteration of the coordinator's monitor loop |
-//! | Skill | A reusable SKILL.md-format prompt template |
 //!
 //! ## Verbs
 //!
@@ -140,12 +139,10 @@ pub(crate) mod executor;
 pub mod messaging;
 pub mod pool;
 pub mod prelude;
-pub mod skill;
 pub mod store;
 pub mod supervisor;
 pub mod types;
 pub(crate) mod utils;
-pub mod workflow;
 pub mod worktree;
 
 // Core pool types
@@ -163,9 +160,6 @@ pub use chain::{
     StepFailurePolicy, StepResult, execute_chain,
 };
 
-// Skill management
-pub use skill::{RegisteredSkill, Skill, SkillArgument, SkillRegistry, SkillScope, SkillSource};
-
 // Storage
 pub use store::{InMemoryStore, JsonFileStore, PoolStore};
 
@@ -174,9 +168,6 @@ pub use supervisor::{SupervisorHandle, check_and_restart_slots};
 
 // Messaging
 pub use messaging::{Message, MessageBus};
-
-// Workflow
-pub use workflow::{Workflow, WorkflowArgument, WorkflowRegistry};
 
 // Worktree management
 pub use worktree::WorktreeManager;

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use claude_pool::SkillRegistry;
 use claude_pool::types::{TaskId, TaskOverrides};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -78,8 +77,7 @@ fn pool_chain(state: PoolState) -> Tool {
             let state = Arc::clone(&state);
             async move {
                 let steps = chain_steps_from_input(input.steps);
-                let skills = SkillRegistry::new();
-                match claude_pool::execute_chain(&*state, &skills, &steps).await {
+                match claude_pool::execute_chain(&*state, &steps).await {
                     Ok(result) => Ok(json_result(&result)),
                     Err(e) => Ok(CallToolResult::error(format!("{e}"))),
                 }
@@ -98,12 +96,11 @@ fn pool_submit_chain(state: PoolState) -> Tool {
             let state = Arc::clone(&state);
             async move {
                 let steps = chain_steps_from_input(input.steps);
-                let skills = SkillRegistry::new();
                 let options = claude_pool::ChainOptions {
                     tags: input.tags.unwrap_or_default(),
                     ..Default::default()
                 };
-                match state.submit_chain(steps, &skills, options).await {
+                match state.submit_chain(steps, options).await {
                     Ok(task_id) => Ok(CallToolResult::json(
                         serde_json::json!({ "task_id": task_id }),
                     )),

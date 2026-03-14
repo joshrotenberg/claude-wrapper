@@ -1,7 +1,7 @@
 //! Chain execution — sequential pipelines of tasks.
 //!
 //! A chain runs steps in order, feeding each step's output as context
-//! to the next. Steps can reference skills or use inline prompts.
+//! to the next.
 //!
 //! Chains can be run synchronously via [`execute_chain`] or submitted
 //! for async execution via [`Pool::submit_chain`](crate::Pool::submit_chain).
@@ -13,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::pool::Pool;
-use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::{TaskId, TaskOverrides, TaskState};
 
@@ -23,7 +22,7 @@ pub struct ChainStep {
     /// Step name (for logging and result tracking).
     pub name: String,
 
-    /// Either an inline prompt or a skill reference.
+    /// The action for this step.
     pub action: StepAction,
 
     /// Per-step config overrides (model, effort, etc.).
@@ -55,16 +54,6 @@ pub enum StepAction {
     Prompt {
         /// The prompt template.
         prompt: String,
-    },
-    /// Run a registered skill with the given arguments.
-    /// The special argument `_previous_output` is automatically set
-    /// to the output from the prior step.
-    Skill {
-        /// Skill name.
-        skill: String,
-        /// Skill arguments.
-        #[serde(default)]
-        arguments: HashMap<String, String>,
     },
 }
 
@@ -211,10 +200,9 @@ fn unix_secs_now() -> u64 {
 /// Execute a chain of steps against the pool.
 pub async fn execute_chain<S: PoolStore + 'static>(
     pool: &Pool<S>,
-    skills: &SkillRegistry,
     steps: &[ChainStep],
 ) -> crate::Result<ChainResult> {
-    execute_chain_with_progress(pool, skills, steps, None, None).await
+    execute_chain_with_progress(pool, steps, None, None).await
 }
 
 /// Execute a chain with optional progress tracking.
@@ -226,7 +214,6 @@ pub async fn execute_chain<S: PoolStore + 'static>(
 /// is provided, all steps use that directory instead of the slot's default.
 pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
     pool: &Pool<S>,
-    skills: &SkillRegistry,
     steps: &[ChainStep],
     chain_task_id: Option<&TaskId>,
     working_dir: Option<&std::path::Path>,
@@ -282,7 +269,7 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
             pool.set_chain_progress(task_id, progress).await;
         }
 
-        let prompt = render_step_prompt(step, &previous_output, skills, &step_context)?;
+        let prompt = render_step_prompt(step, &previous_output, &step_context)?;
 
         // Build an output callback that updates chain progress when we have a task ID.
         let on_output: Option<OnOutputChunk> = chain_task_id.map(|tid| {
@@ -298,7 +285,6 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
             step,
             &prompt,
             &previous_output,
-            skills,
             on_output.clone(),
             working_dir,
             &step_context,
@@ -397,40 +383,22 @@ pub async fn execute_chain_with_progress<S: PoolStore + 'static>(
 fn render_step_prompt(
     step: &ChainStep,
     previous_output: &str,
-    skills: &SkillRegistry,
     step_context: &HashMap<String, String>,
 ) -> crate::Result<String> {
-    match &step.action {
-        StepAction::Prompt { prompt } => {
-            let rendered = prompt.replace("{previous_output}", previous_output);
-            Ok(expand_step_refs(rendered, step_context))
-        }
-        StepAction::Skill { skill, arguments } => {
-            let skill_def = skills
-                .get(skill)
-                .ok_or_else(|| crate::Error::Store(format!("skill not found: {skill}")))?;
-            let mut args = arguments.clone();
-            if !previous_output.is_empty() {
-                args.entry("_previous_output".into())
-                    .or_insert(previous_output.to_string());
-            }
-            let rendered = skill_def.render(&args)?;
-            Ok(expand_step_refs(rendered, step_context))
-        }
-    }
+    let StepAction::Prompt { prompt } = &step.action;
+    let rendered = prompt.replace("{previous_output}", previous_output);
+    Ok(expand_step_refs(rendered, step_context))
 }
 
 /// Execute a step with retry and recovery support.
 ///
 /// Returns `Ok(StepResult)` on success (or successful recovery), or
 /// `Err(error_message)` if all retries and recovery are exhausted.
-#[allow(clippy::too_many_arguments)]
 async fn execute_step_with_retries<S: PoolStore + 'static>(
     pool: &Pool<S>,
     step: &ChainStep,
     initial_prompt: &str,
     previous_output: &str,
-    skills: &SkillRegistry,
     on_output: Option<OnOutputChunk>,
     working_dir: Option<&std::path::Path>,
     step_context: &HashMap<String, String>,
@@ -444,7 +412,7 @@ async fn execute_step_with_retries<S: PoolStore + 'static>(
             initial_prompt.to_string()
         } else {
             // Re-render the prompt for retries (same prompt, fresh attempt).
-            match render_step_prompt(step, previous_output, skills, step_context) {
+            match render_step_prompt(step, previous_output, step_context) {
                 Ok(p) => p,
                 Err(e) => return (Err(e.to_string()), total_cost),
             }
@@ -573,10 +541,9 @@ mod tests {
             output_vars: Default::default(),
         };
 
-        if let StepAction::Prompt { prompt } = &step.action {
-            let rendered = prompt.replace("{previous_output}", "hello world");
-            assert_eq!(rendered, "Based on: hello world\nDo more.");
-        }
+        let StepAction::Prompt { prompt } = &step.action;
+        let rendered = prompt.replace("{previous_output}", "hello world");
+        assert_eq!(rendered, "Based on: hello world\nDo more.");
     }
 
     #[test]
