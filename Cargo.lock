@@ -298,6 +298,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-pool-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "claude-pool",
+ "claude-wrapper",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-mcp",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "claude-pool-server"
 version = "0.3.0"
 dependencies = [
