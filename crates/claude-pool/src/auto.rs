@@ -313,11 +313,16 @@ impl<S: PoolStore + 'static> Pool<S> {
     ) -> crate::Result<AutoRoute> {
         let routing_prompt = assemble_routing_prompt(prompt, config);
 
+        // Disallow tools so the router classifies instead of exploring.
+        // Without this, the model sometimes tries to read files or run
+        // commands for vague prompts, consuming turns without producing
+        // a routing decision.
         let cmd = claude_wrapper::QueryCommand::new(&routing_prompt)
             .output_format(claude_wrapper::OutputFormat::Json)
             .permission_mode(claude_wrapper::PermissionMode::Plan)
+            .disallowed_tools(["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"])
             .no_session_persistence()
-            .max_turns(1);
+            .max_turns(2);
 
         let output = cmd
             .execute(self.claude())
@@ -474,11 +479,26 @@ fn normalize_route(route: AutoRoute) -> crate::Result<AutoRoute> {
 /// strategies.
 pub(crate) fn parse_route_from_output(output: &str) -> crate::Result<AutoRoute> {
     // First try: parse as QueryResult wrapper, extract the result text.
-    if let Ok(query_result) = serde_json::from_str::<serde_json::Value>(output)
-        && let Some(result_text) = query_result.get("result").and_then(|v| v.as_str())
-        && let Ok(route) = extract_json_route(result_text)
-    {
-        return Ok(route);
+    if let Ok(query_result) = serde_json::from_str::<serde_json::Value>(output) {
+        // Check for error_max_turns / missing result — the model tried to use
+        // tools instead of returning JSON.
+        if let Some(subtype) = query_result.get("subtype").and_then(|v| v.as_str())
+            && subtype != "success"
+        {
+            tracing::warn!(
+                subtype,
+                "routing LLM returned non-success result (likely used tools instead of classifying)"
+            );
+            return Err(crate::Error::Store(format!(
+                "routing LLM returned '{subtype}' instead of a routing decision"
+            )));
+        }
+
+        if let Some(result_text) = query_result.get("result").and_then(|v| v.as_str())
+            && let Ok(route) = extract_json_route(result_text)
+        {
+            return Ok(route);
+        }
     }
 
     // Second try: raw output is the route directly.
@@ -486,6 +506,10 @@ pub(crate) fn parse_route_from_output(output: &str) -> crate::Result<AutoRoute> 
         return Ok(route);
     }
 
+    tracing::debug!(
+        output = %output.chars().take(500).collect::<String>(),
+        "could not parse routing decision from LLM output"
+    );
     Err(crate::Error::Store(
         "could not parse routing decision from LLM output".into(),
     ))
