@@ -36,7 +36,6 @@ use claude_wrapper::Claude;
 use crate::cli_parsing::extract_failure_details;
 use crate::error::{Error, Result};
 use crate::messaging::MessageBus;
-use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::*;
 use crate::utils::new_id;
@@ -898,7 +897,6 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn submit_chain(
         &self,
         steps: Vec<crate::chain::ChainStep>,
-        skills: &SkillRegistry,
         options: crate::chain::ChainOptions,
     ) -> Result<TaskId> {
         self.check_shutdown()?;
@@ -974,11 +972,9 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         let pool = self.clone();
         let tid = task_id.clone();
-        let skills = skills.clone();
         tokio::spawn(async move {
             let result = crate::chain::execute_chain_with_progress(
                 &pool,
-                &skills,
                 &steps,
                 Some(&tid),
                 chain_working_dir.as_deref(),
@@ -1056,7 +1052,6 @@ impl<S: PoolStore + 'static> Pool<S> {
     pub async fn fan_out_chains(
         &self,
         chains: Vec<Vec<crate::chain::ChainStep>>,
-        skills: &SkillRegistry,
         options: crate::chain::ChainOptions,
     ) -> Result<Vec<TaskId>> {
         self.check_shutdown()?;
@@ -1066,10 +1061,9 @@ impl<S: PoolStore + 'static> Pool<S> {
 
         for chain_steps in chains {
             let pool = self.clone();
-            let skills = skills.clone();
             let options = options.clone();
             handles.push(tokio::spawn(async move {
-                pool.submit_chain(chain_steps, &skills, options).await
+                pool.submit_chain(chain_steps, options).await
             }));
         }
 
@@ -1088,33 +1082,6 @@ impl<S: PoolStore + 'static> Pool<S> {
         }
 
         Ok(task_ids)
-    }
-
-    /// Submit a workflow template for async execution.
-    ///
-    /// Instantiates the workflow by substituting placeholders with arguments,
-    /// then submits the resulting chain. Returns the task ID immediately.
-    pub async fn submit_workflow(
-        &self,
-        workflow_name: &str,
-        arguments: std::collections::HashMap<String, String>,
-        skills: &SkillRegistry,
-        workflows: &crate::workflow::WorkflowRegistry,
-        tags: Vec<String>,
-    ) -> Result<TaskId> {
-        // Get the workflow and instantiate it
-        let workflow = workflows
-            .get(workflow_name)
-            .ok_or_else(|| Error::Store(format!("workflow '{}' not found", workflow_name)))?;
-
-        let steps = workflow.instantiate(&arguments)?;
-
-        // Submit the instantiated chain with tags
-        let options = crate::chain::ChainOptions {
-            tags,
-            ..Default::default()
-        };
-        self.submit_chain(steps, skills, options).await
     }
 
     /// Get the progress of an in-flight chain.
@@ -2219,7 +2186,6 @@ mod tests {
     async fn fan_out_chains_submits_all_chains() {
         let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
 
-        let skills = crate::skill::SkillRegistry::new();
         let options = crate::chain::ChainOptions {
             tags: vec![],
             ..Default::default()
@@ -2255,7 +2221,7 @@ mod tests {
         let chains = vec![chain1, chain2];
 
         // Submit both chains in parallel.
-        let task_ids = pool.fan_out_chains(chains, &skills, options).await.unwrap();
+        let task_ids = pool.fan_out_chains(chains, options).await.unwrap();
 
         // Should have 2 task IDs.
         assert_eq!(task_ids.len(), 2);

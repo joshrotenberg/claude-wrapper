@@ -12,8 +12,8 @@
 //! ```
 
 use claude_pool::{
-    ChainOptions, ChainResult, ChainStep, Pool, PoolConfig, SkillRegistry, StepAction,
-    StepFailurePolicy, TaskOverrides,
+    ChainOptions, ChainResult, ChainStep, Pool, PoolConfig, StepAction, StepFailurePolicy,
+    TaskOverrides,
 };
 use claude_wrapper::Claude;
 
@@ -78,10 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Running 3-step chain: analyze -> solutions -> summary\n");
 
-    let skills = SkillRegistry::new();
-    let task_id = pool
-        .submit_chain(steps, &skills, ChainOptions::default())
-        .await?;
+    let task_id = pool.submit_chain(steps, ChainOptions::default()).await?;
 
     // Poll for the result.
     loop {

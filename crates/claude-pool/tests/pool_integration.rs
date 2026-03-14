@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use claude_pool::PoolStore as _;
 use claude_pool::{
-    ChainIsolation, ChainOptions, ChainResult, ChainStep, Pool, SkillRegistry, StepAction,
+    ChainIsolation, ChainOptions, ChainResult, ChainStep, Pool, StepAction,
     check_and_restart_slots,
     types::{SlotId, SlotState},
 };
@@ -84,17 +84,13 @@ async fn pool_submit_and_retrieve_result() {
 async fn pool_chain_executes_all_steps() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(2).build().await.unwrap();
-    let skills = SkillRegistry::new();
 
     let steps = vec![
         make_prompt_step("step1", "do thing one"),
         make_prompt_step("step2", "do thing two based on {previous_output}"),
     ];
 
-    let task_id = pool
-        .submit_chain(steps, &skills, no_isolation())
-        .await
-        .unwrap();
+    let task_id = pool.submit_chain(steps, no_isolation()).await.unwrap();
 
     let result = poll_result!(pool, &task_id);
     assert!(result.success, "chain task failed: {}", result.output);
@@ -122,7 +118,6 @@ async fn pool_chain_output_vars_flow() {
 
     let claude = claude_with_fake_binary(wrapper.path());
     let pool = Pool::builder(claude).slots(2).build().await.unwrap();
-    let skills = SkillRegistry::new();
 
     let mut output_vars = std::collections::HashMap::new();
     output_vars.insert("summary".to_string(), "summary".to_string());
@@ -140,10 +135,7 @@ async fn pool_chain_output_vars_flow() {
         make_prompt_step("use_result", "summary is: {steps.extract.summary}"),
     ];
 
-    let task_id = pool
-        .submit_chain(steps, &skills, no_isolation())
-        .await
-        .unwrap();
+    let task_id = pool.submit_chain(steps, no_isolation()).await.unwrap();
 
     let result = poll_result!(pool, &task_id);
     assert!(result.success, "chain failed: {}", result.output);
@@ -171,7 +163,6 @@ async fn pool_chain_cancellation_skips_remaining() {
 
     let claude = claude_with_fake_binary(wrapper.path());
     let pool = Pool::builder(claude).slots(1).build().await.unwrap();
-    let skills = SkillRegistry::new();
 
     let steps = vec![
         make_prompt_step("step1", "do step one"),
@@ -179,10 +170,7 @@ async fn pool_chain_cancellation_skips_remaining() {
         make_prompt_step("step3", "do step three"),
     ];
 
-    let task_id = pool
-        .submit_chain(steps, &skills, no_isolation())
-        .await
-        .unwrap();
+    let task_id = pool.submit_chain(steps, no_isolation()).await.unwrap();
 
     // Yield briefly — step1 starts but is blocked sleeping for 1 second.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -215,7 +203,6 @@ async fn pool_chain_cancellation_skips_remaining() {
 async fn pool_fan_out_parallel() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(3).build().await.unwrap();
-    let skills = SkillRegistry::new();
 
     let chains: Vec<Vec<ChainStep>> = (0..3)
         .map(|i| {
@@ -226,10 +213,7 @@ async fn pool_fan_out_parallel() {
         })
         .collect();
 
-    let task_ids = pool
-        .fan_out_chains(chains, &skills, no_isolation())
-        .await
-        .unwrap();
+    let task_ids = pool.fan_out_chains(chains, no_isolation()).await.unwrap();
 
     assert_eq!(task_ids.len(), 3, "expected 3 task IDs");
 
@@ -267,13 +251,11 @@ async fn pool_chain_worktree_creates_and_cleans() {
         .unwrap();
 
     let pool = Pool::builder(claude).slots(1).build().await.unwrap();
-    let skills = SkillRegistry::new();
 
     let steps = vec![make_prompt_step("step1", "hello from worktree")];
     let task_id = pool
         .submit_chain(
             steps,
-            &skills,
             ChainOptions {
                 isolation: ChainIsolation::Worktree,
                 ..Default::default()

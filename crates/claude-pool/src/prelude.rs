@@ -37,6 +37,3 @@ pub use crate::types::{
 
 // Chain execution
 pub use crate::chain::{ChainOptions, ChainResult, ChainStatus, ChainStep, execute_chain};
-
-// Skill management
-pub use crate::skill::{RegisteredSkill, Skill, SkillRegistry, SkillScope};

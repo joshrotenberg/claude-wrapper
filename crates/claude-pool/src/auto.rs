@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::chain::{ChainOptions, ChainResult, ChainStep, StepAction, StepFailurePolicy};
 use crate::pool::Pool;
-use crate::skill::SkillRegistry;
 use crate::store::PoolStore;
 use crate::types::TaskResult;
 
@@ -359,9 +358,8 @@ impl<S: PoolStore + 'static> Pool<S> {
                     })
                     .collect();
 
-                let skills = SkillRegistry::new();
                 let task_id = self
-                    .submit_chain(chain_steps, &skills, ChainOptions::default())
+                    .submit_chain(chain_steps, ChainOptions::default())
                     .await?;
 
                 // Poll for result with timeout.
