@@ -90,7 +90,7 @@ fn pool_read_messages(state: PoolState) -> Tool {
             async move {
                 let sid = SlotId(input.slot_id);
                 let messages = state.read_messages(&sid);
-                Ok(json_result(&messages))
+                Ok(json_result(&serde_json::json!({ "messages": messages })))
             }
         })
         .build()
@@ -106,7 +106,7 @@ fn pool_peek_messages(state: PoolState) -> Tool {
             async move {
                 let sid = SlotId(input.slot_id);
                 let messages = state.peek_messages(&sid);
-                Ok(json_result(&messages))
+                Ok(json_result(&serde_json::json!({ "messages": messages })))
             }
         })
         .build()

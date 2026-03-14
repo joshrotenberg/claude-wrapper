@@ -86,7 +86,7 @@ fn pool_tasks(state: PoolState) -> Tool {
             async move {
                 let filter = TaskFilter::default();
                 match state.store().list_tasks(&filter).await {
-                    Ok(tasks) => Ok(json_result(&tasks)),
+                    Ok(tasks) => Ok(json_result(&serde_json::json!({ "tasks": tasks }))),
                     Err(e) => Ok(CallToolResult::error(format!("{e}"))),
                 }
             }
@@ -107,7 +107,7 @@ fn pool_slots(state: PoolState) -> Tool {
                     .find_slots(input.name.as_deref(), input.role.as_deref(), slot_state)
                     .await
                 {
-                    Ok(slots) => Ok(json_result(&slots)),
+                    Ok(slots) => Ok(json_result(&serde_json::json!({ "slots": slots }))),
                     Err(e) => Ok(CallToolResult::error(format!("{e}"))),
                 }
             }

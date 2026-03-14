@@ -74,7 +74,7 @@ fn context_list(state: PoolState) -> Tool {
             let state = Arc::clone(&state);
             async move {
                 let entries = state.list_context();
-                Ok(json_result(&entries))
+                Ok(json_result(&serde_json::json!({ "entries": entries })))
             }
         })
         .build()

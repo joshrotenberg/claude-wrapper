@@ -169,7 +169,7 @@ fn pool_fan_out(state: PoolState) -> Tool {
             async move {
                 let refs: Vec<&str> = input.prompts.iter().map(|s| s.as_str()).collect();
                 match state.fan_out(&refs).await {
-                    Ok(results) => Ok(json_result(&results)),
+                    Ok(results) => Ok(json_result(&serde_json::json!({ "results": results }))),
                     Err(e) => Ok(CallToolResult::error(format!("{e}"))),
                 }
             }
