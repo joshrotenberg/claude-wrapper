@@ -4,6 +4,7 @@ members = [
     "crates/claude-wrapper",
     "crates/claude-pool",
     "crates/claude-pool-server",
+    "crates/claude-pool-mcp",
     "crates/claudes",
 ]
 
