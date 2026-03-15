@@ -139,6 +139,12 @@ fn render_hints(hints: &AutoHint) -> String {
 }
 
 /// Assemble the full routing prompt from config and task.
+///
+/// Routing instructions and the task are combined in a single user message
+/// rather than using `--system-prompt`. Testing showed that the model treats
+/// classification instructions less authoritatively when they're in the
+/// system prompt, causing misroutes. Once the prompt is hardened with
+/// few-shot examples (#285), we can revisit system prompt separation (#287).
 pub(crate) fn assemble_routing_prompt(task: &str, config: Option<&AutoConfig>) -> String {
     let base = config
         .and_then(|c| c.custom_prompt.as_deref())

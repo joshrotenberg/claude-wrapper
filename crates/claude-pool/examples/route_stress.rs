@@ -187,15 +187,32 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     wrong += 1;
                     println!("got={:<10} MISMATCH", got);
+                    // Dump the route details for debugging.
+                    let json = serde_json::to_string_pretty(&route).unwrap_or_default();
+                    println!("  prompt:   {:?}", case.prompt);
+                    println!("  route:    {json}");
+                    if let Some(hints) = &case.hints {
+                        println!(
+                            "  hints:    {}",
+                            serde_json::to_string(hints).unwrap_or_default()
+                        );
+                    }
                 }
             }
             Err(e) => {
                 errors += 1;
                 println!("ERROR: {e}");
+                println!("  prompt:   {:?}", case.prompt);
+                if let Some(hints) = &case.hints {
+                    println!(
+                        "  hints:    {}",
+                        serde_json::to_string(hints).unwrap_or_default()
+                    );
+                }
                 // Print the underlying cause chain for debugging.
                 let mut source = std::error::Error::source(&e);
                 while let Some(cause) = source {
-                    println!("{:<40}   caused by: {cause}", "");
+                    println!("  caused by: {cause}");
                     source = std::error::Error::source(cause);
                 }
             }
