@@ -901,6 +901,14 @@ mod tests {
         assert!(DEFAULT_ROUTING_PROMPT.contains("SINGLE"));
         assert!(DEFAULT_ROUTING_PROMPT.contains("PARALLEL"));
         assert!(DEFAULT_ROUTING_PROMPT.contains("CHAIN"));
+        // Decision tree
+        assert!(DEFAULT_ROUTING_PROMPT.contains("Decision test"));
+        // Few-shot examples
+        assert!(DEFAULT_ROUTING_PROMPT.contains("Examples:"));
+        // Anti-patterns
+        assert!(DEFAULT_ROUTING_PROMPT.contains("Common mistakes to avoid"));
+        // Strong SINGLE bias
+        assert!(DEFAULT_ROUTING_PROMPT.contains("Splitting incorrectly is worse"));
     }
 
     #[test]
