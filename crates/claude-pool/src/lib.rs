@@ -139,6 +139,7 @@ pub(crate) mod executor;
 pub mod messaging;
 pub mod pool;
 pub mod prelude;
+pub mod route_test;
 pub mod store;
 pub mod supervisor;
 pub mod types;
