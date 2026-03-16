@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+## [0.4.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.3.1...v0.4.0) - 2026-03-16
+
+### Added
+
+- add pool examples and document examples in READMEs ([#276](https://github.com/joshrotenberg/claude-wrapper/pull/276))
+- add missing subcommands and MCP OAuth flags ([#261](https://github.com/joshrotenberg/claude-wrapper/pull/261))
+- add missing high-priority CLI flags to QueryCommand ([#258](https://github.com/joshrotenberg/claude-wrapper/pull/258))
+- add Transport enum for MCP type safety ([#251](https://github.com/joshrotenberg/claude-wrapper/pull/251))
+
+### Fixed
+
+- streaming timeout + gitignore .claude-pool ([#202](https://github.com/joshrotenberg/claude-wrapper/pull/202))
+
+### Other
+
+- add CI-runnable fake-binary tests for wrapper commands and retry ([#273](https://github.com/joshrotenberg/claude-wrapper/pull/273))
+- remove stale CLI flags (quiet, color, doctor --json, agents --json) ([#259](https://github.com/joshrotenberg/claude-wrapper/pull/259))
+- comprehensive rustdoc for all public command builders ([#252](https://github.com/joshrotenberg/claude-wrapper/pull/252))
+
 ## [0.3.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.3.0...v0.3.1) - 2026-03-11
 
 ### Added

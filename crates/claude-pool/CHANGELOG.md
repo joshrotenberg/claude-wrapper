@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-v0.3.0...claude-pool-v0.4.0) - 2026-03-16
+
+### Added
+
+- use system prompt and XML tags for auto-routing ([#296](https://github.com/joshrotenberg/claude-wrapper/pull/296))
+- harden routing prompt with decision tree, examples, and anti-patterns ([#294](https://github.com/joshrotenberg/claude-wrapper/pull/294))
+- add routing test harness with structured output ([#293](https://github.com/joshrotenberg/claude-wrapper/pull/293))
+- improve route_stress diagnostics and document system prompt findings ([#291](https://github.com/joshrotenberg/claude-wrapper/pull/291))
+- prompt refinement, route normalization, and stress test ([#281](https://github.com/joshrotenberg/claude-wrapper/pull/281))
+- structured auto-routing hints and modular prompt ([#280](https://github.com/joshrotenberg/claude-wrapper/pull/280))
+- add auto-routing — LLM picks run/fan_out/chain ([#278](https://github.com/joshrotenberg/claude-wrapper/pull/278))
+- add pool examples and document examples in READMEs ([#276](https://github.com/joshrotenberg/claude-wrapper/pull/276))
+- pool polish — worktree cleanup, workflow disk loading, JSON file store ([#275](https://github.com/joshrotenberg/claude-wrapper/pull/275))
+- add per-task budget enforcement to pool ([#272](https://github.com/joshrotenberg/claude-wrapper/pull/272))
+- add fallback_model to PoolConfig and SlotConfig ([#236](https://github.com/joshrotenberg/claude-wrapper/pull/236))
+- add max_budget_usd to TaskOverrides for per-task budget caps ([#232](https://github.com/joshrotenberg/claude-wrapper/pull/232))
+- add disallowed_tools and tools to TaskOverrides for tool scoping ([#231](https://github.com/joshrotenberg/claude-wrapper/pull/231))
+- add json_schema to TaskOverrides for structured output ([#230](https://github.com/joshrotenberg/claude-wrapper/pull/230))
+- task execution metrics, session aggregation, and REST/MCP endpoints ([#216](https://github.com/joshrotenberg/claude-wrapper/pull/216))
+- SSE streaming endpoints for REST API (Phase 2) ([#213](https://github.com/joshrotenberg/claude-wrapper/pull/213))
+
+### Fixed
+
+- create worktrees under repo instead of temp dir ([#298](https://github.com/joshrotenberg/claude-wrapper/pull/298))
+- prevent routing LLM from using tools instead of classifying ([#284](https://github.com/joshrotenberg/claude-wrapper/pull/284))
+
+### Other
+
+- update READMEs, .mcp.json, and workspace for release prep ([#301](https://github.com/joshrotenberg/claude-wrapper/pull/301))
+- add route_stress as ignored integration test ([#297](https://github.com/joshrotenberg/claude-wrapper/pull/297))
+- [**breaking**] remove dead code — skills, workflows, pool-server, claudes ([#283](https://github.com/joshrotenberg/claude-wrapper/pull/283))
+- coordinator workflow as first-class concept ([#247](https://github.com/joshrotenberg/claude-wrapper/pull/247))
+- TaskOverrides + RunOptions builder ([#209](https://github.com/joshrotenberg/claude-wrapper/pull/209))
+- organize lib.rs re-exports with prelude module ([#208](https://github.com/joshrotenberg/claude-wrapper/pull/208))
+- centralize ID generation ([#207](https://github.com/joshrotenberg/claude-wrapper/pull/207))
+- add comprehensive rustdoc to pool server tools ([#205](https://github.com/joshrotenberg/claude-wrapper/pull/205))
+
 ## [0.3.0](https://github.com/joshrotenberg/claude-wrapper/compare/claude-pool-v0.2.0...claude-pool-v0.3.0) - 2026-03-11
 
 ### Added
