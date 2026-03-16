@@ -44,19 +44,31 @@ For PARALLEL:
 For CHAIN:
 {"route": "chain", "steps": [{"name": "step-1", "prompt": "first step"}, {"name": "step-2", "prompt": "use {previous_output} to do the next thing"}]}
 
-Examples:
-
+<examples>
+<example>
 Task: "Fix the bug in the login handler"
 {"route": "single", "prompt": "Fix the bug in the login handler"}
+</example>
 
+<example>
 Task: "Add a README and a LICENSE file"
 {"route": "parallel", "prompts": ["Create a README file for the project", "Create a LICENSE file for the project"]}
+</example>
 
+<example>
 Task: "Refactor the auth module and update all callers"
 {"route": "chain", "steps": [{"name": "refactor", "prompt": "Refactor the auth module"}, {"name": "update-callers", "prompt": "Update all callers based on {previous_output}"}]}
+</example>
 
+<example>
 Task: "Translate 'hello' into French, Spanish, and German"
 {"route": "parallel", "prompts": ["Translate 'hello' into French", "Translate 'hello' into Spanish", "Translate 'hello' into German"]}
+</example>
 
+<example>
 Task: "Write a comprehensive test suite for the payment module"
 {"route": "single", "prompt": "Write a comprehensive test suite for the payment module"}
+</example>
+</examples>
+
+The task to classify is provided in the user message.
