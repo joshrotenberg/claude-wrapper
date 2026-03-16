@@ -8,10 +8,16 @@ Rust workspace providing a type-safe wrapper around the Claude Code CLI, a slot-
 
 ```
 crates/
-  claude-wrapper/   # Core CLI wrapper (builder pattern, typed outputs, async)
-  claude-pool/      # Pool library (slots, chains, skills, messaging, worktree isolation)
-  claude-pool-server/ # MCP server binary (stdio + HTTP transports)
+  claude-wrapper/     # Core CLI wrapper (builder pattern, typed outputs, async)
+  claude-pool/        # Pool library (slots, chains, fan-out, auto-routing, messaging, worktree isolation)
+  claude-pool-mcp/    # MCP server binary (stdio transport, tower-mcp based)
 ```
+
+## Skills
+
+Pool coordinator skill (follows [Agent Skills spec](https://agentskills.io/specification)): [`crates/claude-pool-mcp/skills/pool-coordinator/SKILL.md`](crates/claude-pool-mcp/skills/pool-coordinator/SKILL.md)
+
+This skill teaches Claude to prefer pool MCP tools over built-in Agent() calls, with tool selection guidance, model recommendations, and a complete tool reference.
 
 ## Build and Test
 
@@ -28,14 +34,17 @@ cargo test --lib --all-features
 # Doc tests
 cargo test --doc --all-features
 
-# Integration tests (requires real claude binary)
-cargo test --test '*' --all-features -- --ignored
+# Integration tests (requires fake-claude binary)
+cargo test --test pool_integration --test auto_route_tests -p claude-pool -- --ignored
+
+# Live routing accuracy test (requires real claude binary, burns tokens)
+cargo test --test route_stress -p claude-pool -- --ignored
 
 # Docs
 cargo doc --no-deps --all-features
 ```
 
-Run all four non-integration checks before every commit.
+Run format, lint, unit tests, and doc tests before every commit.
 
 ## Code Style
 
@@ -54,14 +63,14 @@ Run all four non-integration checks before every commit.
 **claude-pool** manages a pool of Claude CLI slots:
 - `Pool` orchestrates slot lifecycle, task assignment, chains, fan-outs
 - `PoolStore` trait abstracts storage (in-memory default, pluggable)
-- `SkillRegistry` loads SKILL.md-format skills (builtins, global, project)
+- Auto-routing classifies tasks as single/parallel/chain via LLM
 - `WorktreeManager` handles git worktree/clone isolation for parallel work
 - `MessageBus` provides inter-slot messaging with broadcast support
+- `RouteTestRunner` provides structured routing accuracy testing
 
-**claude-pool-server** exposes pool as MCP tools via `tower-mcp`:
-- 30+ tools: run, submit, chain, fan-out, claim, broadcast, find-slots, skills, context, messaging
-- Resources and prompts for skill discovery
-- HTTP transport with bearer token auth (behind `http` feature flag)
+**claude-pool-mcp** exposes pool as MCP tools via `tower-mcp`:
+- 31 tools: run, submit, chain, fan-out, auto-route, review, context, messaging, scaling
+- Stdio transport, configurable via CLI flags
 
 ## Git Workflow
 
@@ -73,15 +82,15 @@ Run all four non-integration checks before every commit.
 ## Testing Patterns
 
 - Unit tests live in the same file as the code (`#[cfg(test)] mod tests`)
-- Integration tests in `tests/` directories require a real `claude` binary and use `#[ignore]`
+- Integration tests in `tests/` use fake-claude binary and `#[ignore]`
+- Live routing tests in `tests/route_stress.rs` use real claude and `#[ignore]`
 - Use `InMemoryStore` for pool tests
-- MCP tool tests validate JSON schemas and error handling
 
 ## Key Dependencies
 
 - `tower-mcp` 0.8 -- MCP server framework
 - `tokio` -- async runtime
-- `serde` / `serde_json` / `serde_yaml` -- serialization
+- `serde` / `serde_json` -- serialization
 - `dashmap` -- concurrent hash maps (store, message bus)
 - `clap` -- CLI argument parsing
 - `schemars` -- JSON schema generation for MCP tool inputs
