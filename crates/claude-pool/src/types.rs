@@ -98,7 +98,11 @@ pub struct PoolConfig {
     /// Maximum number of restarts per slot before marking as errored.
     pub max_restarts: u32,
 
-    /// Enable git worktree isolation for slots.
+    /// Enable git worktree isolation for slots (default: true).
+    ///
+    /// Each slot gets its own git worktree under `.claude/pool-worktrees/`,
+    /// enabling parallel file writes without conflicts. Required for workers
+    /// to edit files when Claude uses `auto` permission mode.
     pub worktree_isolation: bool,
 
     /// Maximum time to wait for an idle slot before failing a task (in seconds).
@@ -154,7 +158,7 @@ impl Default for PoolConfig {
             budget_microdollars: None,
             slot_mode: SlotMode::default(),
             max_restarts: 3,
-            worktree_isolation: false,
+            worktree_isolation: true,
             slot_assignment_timeout_secs: 300,
             scaling: ScalingConfig::default(),
             unattended_mode: false,

@@ -232,10 +232,12 @@ pub(crate) async fn execute_task<S: PoolStore + 'static>(
 
     // Use override working dir, slot worktree, or default.
     let claude_instance = if let Some(slot) = inner.store.get_slot(slot_id).await? {
-        // Resume session if the slot has one, but NOT when using an
-        // override working dir (clone isolation) — the session belongs
-        // to the original working directory and won't exist in the clone.
+        // Resume session if the slot has one, but NOT when:
+        // - Using an override working dir (clone isolation)
+        // - Using a slot worktree (session belongs to repo root, not worktree)
+        // Stale session resumption causes "No conversation found" errors.
         if override_working_dir.is_none()
+            && slot.worktree_path.is_none()
             && let Some(ref session_id) = slot.session_id
         {
             cmd = cmd.resume(session_id);
@@ -381,9 +383,11 @@ pub(crate) async fn execute_task_streaming<S: PoolStore + 'static>(
 
     // Use override working dir (chain worktree) > slot worktree > default.
     let claude_instance = if let Some(slot) = inner.store.get_slot(slot_id).await? {
-        // Skip session resumption in clone isolation — the session
-        // belongs to the original directory and won't exist in the clone.
+        // Skip session resumption when using worktrees or clone isolation —
+        // the session belongs to the original directory and won't exist
+        // in the worktree/clone. Stale sessions cause "No conversation found" errors.
         if override_working_dir.is_none()
+            && slot.worktree_path.is_none()
             && let Some(ref session_id) = slot.session_id
         {
             cmd = cmd.resume(session_id);

@@ -116,9 +116,21 @@ mod tests {
         Claude::builder().binary("/usr/bin/false").build().unwrap()
     }
 
+    fn test_config() -> crate::types::PoolConfig {
+        crate::types::PoolConfig {
+            worktree_isolation: false,
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn check_restarts_errored_slots() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         // Mark slot-0 as errored.
         let mut slot = pool
@@ -148,6 +160,7 @@ mod tests {
     async fn check_skips_slots_at_restart_limit() {
         let config = PoolConfig {
             max_restarts: 2,
+            worktree_isolation: false,
             ..Default::default()
         };
         let pool = Pool::builder(mock_claude())
@@ -183,7 +196,12 @@ mod tests {
 
     #[tokio::test]
     async fn check_ignores_idle_and_busy_slots() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         // Mark slot-1 as busy.
         let mut slot = pool
@@ -201,7 +219,12 @@ mod tests {
 
     #[tokio::test]
     async fn start_supervisor_returns_none_when_disabled() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
         assert!(pool.start_supervisor().is_none());
     }
 
@@ -210,6 +233,7 @@ mod tests {
         let config = PoolConfig {
             supervisor_enabled: true,
             supervisor_interval_secs: 1,
+            worktree_isolation: false,
             ..Default::default()
         };
         let pool = Pool::builder(mock_claude())

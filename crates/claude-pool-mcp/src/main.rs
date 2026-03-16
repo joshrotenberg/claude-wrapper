@@ -49,6 +49,10 @@ struct Cli {
     /// Maximum slots ceiling.
     #[arg(long, default_value_t = 16)]
     max_slots: usize,
+
+    /// Disable per-slot worktree isolation (not recommended for write tasks).
+    #[arg(long)]
+    no_worktree: bool,
 }
 
 fn parse_effort(s: &str) -> Option<Effort> {
@@ -93,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         budget_microdollars: cli.budget_usd.map(|usd| (usd * 1_000_000.0) as u64),
         system_prompt: cli.system_prompt.clone(),
         permission_mode: Some(parse_permission_mode(&cli.permission_mode)),
+        worktree_isolation: !cli.no_worktree,
         scaling: ScalingConfig {
             min_slots: cli.min_slots,
             max_slots: cli.max_slots,
