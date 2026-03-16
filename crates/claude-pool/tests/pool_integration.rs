@@ -1,12 +1,7 @@
 #![cfg(unix)]
 //! Integration tests for claude-pool using the fake-claude binary.
 //!
-//! All tests are marked `#[ignore]` because they require the fake-claude.sh
-//! script (which behaves as a real binary). Run with:
-//!
-//! ```sh
-//! cargo test --test pool_integration -p claude-pool -- --ignored
-//! ```
+//! These tests require the fake-claude.sh script (which behaves as a real binary).
 
 mod helpers;
 
@@ -64,7 +59,6 @@ macro_rules! poll_result {
 
 /// Submit a task asynchronously, poll until complete, verify output/cost/session_id.
 #[tokio::test]
-#[ignore]
 async fn pool_submit_and_retrieve_result() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(1).build().await.unwrap();
@@ -80,7 +74,6 @@ async fn pool_submit_and_retrieve_result() {
 
 /// Run a 2-step chain. Both steps should complete, cost accumulates, step names preserved.
 #[tokio::test]
-#[ignore]
 async fn pool_chain_executes_all_steps() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(2).build().await.unwrap();
@@ -108,7 +101,6 @@ async fn pool_chain_executes_all_steps() {
 
 /// Step 1 returns JSON; output_vars extracts a field; step 2 uses it via template.
 #[tokio::test]
-#[ignore]
 async fn pool_chain_output_vars_flow() {
     // Wrapper that makes fake-claude output JSON with a "summary" field.
     let json_output = r#"{"summary": "all good"}"#;
@@ -156,7 +148,6 @@ async fn pool_chain_output_vars_flow() {
 /// Submit a 3-step chain with a 1-second delay per step. Cancel after step 1 starts.
 /// Remaining steps should be skipped.
 #[tokio::test]
-#[ignore]
 async fn pool_chain_cancellation_skips_remaining() {
     // Wrapper: each invocation sleeps 1 second before responding.
     let wrapper = write_env_wrapper(&[("FAKE_CLAUDE_DELAY", "1")], &fake_claude_path());
@@ -199,7 +190,6 @@ async fn pool_chain_cancellation_skips_remaining() {
 
 /// Fan out 3 single-step chains. All should complete with distinct task IDs.
 #[tokio::test]
-#[ignore]
 async fn pool_fan_out_parallel() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(3).build().await.unwrap();
@@ -238,7 +228,6 @@ async fn pool_fan_out_parallel() {
 
 /// Chain with Worktree isolation: worktree is created during execution and cleaned up after.
 #[tokio::test]
-#[ignore]
 async fn pool_chain_worktree_creates_and_cleans() {
     let repo = helpers::temp_git_repo();
     let fake = fake_claude_path();
@@ -298,7 +287,6 @@ async fn pool_chain_worktree_creates_and_cleans() {
 
 /// Mark a slot as errored, run check_and_restart_slots, verify recovery. Then run a task.
 #[tokio::test]
-#[ignore]
 async fn supervisor_restarts_errored_slot_integration() {
     let claude = claude_with_fake_binary(&fake_claude_path());
     let pool = Pool::builder(claude).slots(2).build().await.unwrap();

@@ -4,11 +4,6 @@
 //! These tests verify the full `route()` pipeline: prompt assembly, CLI
 //! invocation, output parsing, and normalization. The fake binary returns
 //! pre-canned JSON routing decisions via `FAKE_CLAUDE_OUTPUT`.
-//!
-//! Run with:
-//! ```sh
-//! cargo test --test auto_route_tests -p claude-pool -- --ignored
-//! ```
 
 mod helpers;
 
@@ -59,7 +54,6 @@ fn assert_chain(route: &AutoRoute) -> &[claude_pool::AutoStep] {
 // ── Single route tests ───────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_single_basic() {
     let output = r#"{"route": "single", "prompt": "What is 2+2?"}"#;
     let pool = pool_with_output(output).await;
@@ -69,7 +63,6 @@ async fn route_single_basic() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_single_vague_prompt() {
     let output = r#"{"route": "single", "prompt": "Refactor."}"#;
     let pool = pool_with_output(output).await;
@@ -79,7 +72,6 @@ async fn route_single_vague_prompt() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_single_coherent_task() {
     let output = r#"{"route": "single", "prompt": "Write a blog post about Rust error handling."}"#;
     let pool = pool_with_output(output).await;
@@ -94,7 +86,6 @@ async fn route_single_coherent_task() {
 // ── Parallel route tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_parallel_basic() {
     let output = r#"{"route": "parallel", "prompts": ["Translate 'hello' into French", "Translate 'hello' into Spanish", "Translate 'hello' into German", "Translate 'hello' into Japanese"]}"#;
     let pool = pool_with_output(output).await;
@@ -108,7 +99,6 @@ async fn route_parallel_basic() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_parallel_many_independent_items() {
     let prompts: Vec<String> = (1..=10)
         .map(|i| format!("Review file{i}.rs for bugs"))
@@ -127,7 +117,6 @@ async fn route_parallel_many_independent_items() {
 // ── Chain route tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_chain_basic() {
     let output = r#"{"route": "chain", "steps": [{"name": "write", "prompt": "Write a function that sorts a list"}, {"name": "test", "prompt": "Write tests for {previous_output}"}, {"name": "review", "prompt": "Review tests for coverage gaps based on {previous_output}"}]}"#;
     let pool = pool_with_output(output).await;
@@ -143,7 +132,6 @@ async fn route_chain_basic() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_chain_dependent_steps() {
     let output = r#"{"route": "chain", "steps": [{"name": "migrate", "prompt": "Migrate the database schema"}, {"name": "update_orm", "prompt": "Update the ORM models based on {previous_output}"}, {"name": "fix_queries", "prompt": "Fix all broken queries based on {previous_output}"}, {"name": "test", "prompt": "Run the test suite"}]}"#;
     let pool = pool_with_output(output).await;
@@ -157,7 +145,6 @@ async fn route_chain_dependent_steps() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_chain_hidden_dependency() {
     let output = r#"{"route": "chain", "steps": [{"name": "refactor", "prompt": "Refactor the auth module"}, {"name": "update_callers", "prompt": "Update all callers based on {previous_output}"}]}"#;
     let pool = pool_with_output(output).await;
@@ -171,7 +158,6 @@ async fn route_chain_hidden_dependency() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_chain_mixed_independent_and_dependent() {
     let output = r#"{"route": "chain", "steps": [{"name": "lint", "prompt": "Lint src/a.rs and src/b.rs"}, {"name": "summarize", "prompt": "Combine results into a summary based on {previous_output}"}]}"#;
     let pool = pool_with_output(output).await;
@@ -187,7 +173,6 @@ async fn route_chain_mixed_independent_and_dependent() {
 // ── Hint-influenced routing ──────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_with_prefer_single_hint() {
     let output = r#"{"route": "single", "prompt": "Check all modules for unused imports."}"#;
     let pool = pool_with_output(output).await;
@@ -204,7 +189,6 @@ async fn route_with_prefer_single_hint() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_with_prefer_parallel_and_decomposition() {
     let output = r#"{"route": "parallel", "prompts": ["Audit input validation", "Audit authentication", "Audit data storage"]}"#;
     let pool = pool_with_output(output).await;
@@ -227,7 +211,6 @@ async fn route_with_prefer_parallel_and_decomposition() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_with_max_parallel_cap() {
     // Even though 6 files, max_parallel=3 should be respected by the router.
     let output = r#"{"route": "parallel", "prompts": ["Review a.rs and b.rs", "Review c.rs and d.rs", "Review e.rs and f.rs"]}"#;
@@ -253,7 +236,6 @@ async fn route_with_max_parallel_cap() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_with_max_chain_steps_compresses() {
     // 5 dependent steps compressed to max 2 is ambiguous: chain(2) or single
     // are both reasonable. We test that the router returns *something* valid.
@@ -285,7 +267,6 @@ async fn route_with_max_chain_steps_compresses() {
 // ── Adversarial inputs ───────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_prompt_injection_still_routes() {
     let output = r#"{"route": "single", "prompt": "Review main.rs"}"#;
     let pool = pool_with_output(output).await;
@@ -298,7 +279,6 @@ async fn route_prompt_injection_still_routes() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_non_json_output_request_still_routes() {
     let output = r#"{"route": "single", "prompt": "Fix the bug in auth.rs"}"#;
     let pool = pool_with_output(output).await;
@@ -317,7 +297,6 @@ async fn route_non_json_output_request_still_routes() {
 // binary wraps output in a QueryResult JSON envelope.
 
 #[tokio::test]
-#[ignore]
 async fn route_parallel_single_item_normalized_to_single() {
     // Router returns parallel with one item; execute_route normalizes to single.
     // route() only classifies, so normalization happens at execute_route level.
@@ -331,7 +310,6 @@ async fn route_parallel_single_item_normalized_to_single() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_chain_single_step_parsed() {
     let output = r#"{"route": "chain", "steps": [{"name": "only", "prompt": "do it"}]}"#;
     let pool = pool_with_output(output).await;
@@ -343,7 +321,6 @@ async fn route_chain_single_step_parsed() {
 // ── Domain hint routing ──────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn route_with_domain_hint() {
     let output = r#"{"route": "parallel", "prompts": ["Review crate-a", "Review crate-b"]}"#;
     let pool = pool_with_output(output).await;
@@ -361,7 +338,6 @@ async fn route_with_domain_hint() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn route_with_prefer_chain_hint() {
     let output = r#"{"route": "chain", "steps": [{"name": "plan", "prompt": "Create a migration plan"}, {"name": "execute", "prompt": "Execute the migration based on {previous_output}"}]}"#;
     let pool = pool_with_output(output).await;

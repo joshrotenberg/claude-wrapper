@@ -57,6 +57,12 @@ jobs:
       - name: Doc tests
         run: cargo test --doc --all-features
 
+      - name: Integration tests (fake binary)
+        if: matrix.os != 'windows-latest'
+        run: |
+          chmod +x crates/test-helpers/fake-claude.sh
+          cargo test --test pool_integration --test auto_route_tests --test worktree_tests -p claude-pool
+
   security:
     name: Security audit
     runs-on: ubuntu-latest
