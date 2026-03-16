@@ -6,15 +6,13 @@
 //!
 //! # Configuration layers
 //!
-//! The routing prompt is assembled from up to three layers:
+//! The routing call uses two layers:
 //!
-//! 1. **System prompt** — the built-in classification instructions
-//!    (loaded from `prompts/auto_route.md` via `include_str!`). Can be
-//!    overridden entirely via [`AutoConfig::custom_prompt`].
-//! 2. **Hints** — optional structured [`AutoHint`] that constrain or bias
-//!    the routing decision (max parallelism, preferred route, domain context,
-//!    decomposition boundaries).
-//! 3. **Task** — the actual work prompt.
+//! 1. **System prompt** (`--system-prompt`) — the built-in classification
+//!    instructions (loaded from `prompts/auto_route.md` via `include_str!`)
+//!    plus optional structured hints. Can be overridden entirely via
+//!    [`AutoConfig::custom_prompt`].
+//! 2. **User message** — the task to classify, wrapped in `<task>` tags.
 //!
 //! # Prompt iteration
 //!
@@ -138,14 +136,10 @@ fn render_hints(hints: &AutoHint) -> String {
     section
 }
 
-/// Assemble the full routing prompt from config and task.
+/// Assemble the routing system prompt (instructions + hints, no task).
 ///
-/// Routing instructions and the task are combined in a single user message
-/// rather than using `--system-prompt`. Testing showed that the model treats
-/// classification instructions less authoritatively when they're in the
-/// system prompt, causing misroutes. Once the prompt is hardened with
-/// few-shot examples (#285), we can revisit system prompt separation (#287).
-pub(crate) fn assemble_routing_prompt(task: &str, config: Option<&AutoConfig>) -> String {
+/// The task is sent separately as the user message wrapped in `<task>` tags.
+pub(crate) fn assemble_routing_system_prompt(config: Option<&AutoConfig>) -> String {
     let base = config
         .and_then(|c| c.custom_prompt.as_deref())
         .unwrap_or(DEFAULT_ROUTING_PROMPT);
@@ -156,9 +150,12 @@ pub(crate) fn assemble_routing_prompt(task: &str, config: Option<&AutoConfig>) -
         prompt.push_str(&render_hints(hints));
     }
 
-    prompt.push_str("\n\n## Task\n\n");
-    prompt.push_str(task);
     prompt
+}
+
+/// Wrap the task in `<task>` tags for the user message.
+pub(crate) fn wrap_task(task: &str) -> String {
+    format!("<task>{task}</task>")
 }
 
 /// The routing decision made by the LLM.
@@ -317,13 +314,15 @@ impl<S: PoolStore + 'static> Pool<S> {
         prompt: &str,
         config: Option<&AutoConfig>,
     ) -> crate::Result<AutoRoute> {
-        let routing_prompt = assemble_routing_prompt(prompt, config);
+        let system = assemble_routing_system_prompt(config);
+        let user_message = wrap_task(prompt);
 
         // Disallow tools so the router classifies instead of exploring.
         // Without this, the model sometimes tries to read files or run
         // commands for vague prompts, consuming turns without producing
         // a routing decision.
-        let cmd = claude_wrapper::QueryCommand::new(&routing_prompt)
+        let cmd = claude_wrapper::QueryCommand::new(&user_message)
+            .system_prompt(system)
             .output_format(claude_wrapper::OutputFormat::Json)
             .permission_mode(claude_wrapper::PermissionMode::Plan)
             .disallowed_tools(["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"])
@@ -843,15 +842,15 @@ mod tests {
     }
 
     #[test]
-    fn assemble_prompt_no_config() {
-        let prompt = assemble_routing_prompt("do the thing", None);
+    fn assemble_system_prompt_no_config() {
+        let prompt = assemble_routing_system_prompt(None);
         assert!(prompt.starts_with("You are a work router."));
-        assert!(prompt.contains("## Task\n\ndo the thing"));
+        assert!(!prompt.contains("## Task"));
         assert!(!prompt.contains("## Constraints"));
     }
 
     #[test]
-    fn assemble_prompt_with_hints() {
+    fn assemble_system_prompt_with_hints() {
         let config = AutoConfig {
             custom_prompt: None,
             hints: Some(AutoHint {
@@ -859,27 +858,27 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let prompt = assemble_routing_prompt("review files", Some(&config));
+        let prompt = assemble_routing_system_prompt(Some(&config));
         assert!(prompt.starts_with("You are a work router."));
         assert!(prompt.contains("## Constraints"));
         assert!(prompt.contains("Maximum parallel tasks: 2"));
-        assert!(prompt.contains("## Task\n\nreview files"));
+        assert!(!prompt.contains("## Task"));
     }
 
     #[test]
-    fn assemble_prompt_with_custom_prompt() {
+    fn assemble_system_prompt_with_custom_prompt() {
         let config = AutoConfig {
             custom_prompt: Some("You are a custom router.".into()),
             hints: None,
         };
-        let prompt = assemble_routing_prompt("my task", Some(&config));
+        let prompt = assemble_routing_system_prompt(Some(&config));
         assert!(prompt.starts_with("You are a custom router."));
         assert!(!prompt.contains("You are a work router."));
-        assert!(prompt.contains("## Task\n\nmy task"));
+        assert!(!prompt.contains("## Task"));
     }
 
     #[test]
-    fn assemble_prompt_custom_prompt_with_hints() {
+    fn assemble_system_prompt_custom_prompt_with_hints() {
         let config = AutoConfig {
             custom_prompt: Some("Custom instructions.".into()),
             hints: Some(AutoHint {
@@ -887,11 +886,17 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let prompt = assemble_routing_prompt("task", Some(&config));
+        let prompt = assemble_routing_system_prompt(Some(&config));
         assert!(prompt.starts_with("Custom instructions."));
         assert!(prompt.contains("## Constraints"));
         assert!(prompt.contains("Domain: testing"));
-        assert!(prompt.contains("## Task\n\ntask"));
+        assert!(!prompt.contains("## Task"));
+    }
+
+    #[test]
+    fn wrap_task_adds_xml_tags() {
+        let wrapped = wrap_task("do the thing");
+        assert_eq!(wrapped, "<task>do the thing</task>");
     }
 
     #[test]
@@ -903,12 +908,18 @@ mod tests {
         assert!(DEFAULT_ROUTING_PROMPT.contains("CHAIN"));
         // Decision tree
         assert!(DEFAULT_ROUTING_PROMPT.contains("Decision test"));
-        // Few-shot examples
-        assert!(DEFAULT_ROUTING_PROMPT.contains("Examples:"));
+        // Few-shot examples in XML tags
+        assert!(DEFAULT_ROUTING_PROMPT.contains("<examples>"));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("<example>"));
+        assert!(DEFAULT_ROUTING_PROMPT.contains("</examples>"));
         // Anti-patterns
         assert!(DEFAULT_ROUTING_PROMPT.contains("Common mistakes to avoid"));
         // Strong SINGLE bias
         assert!(DEFAULT_ROUTING_PROMPT.contains("Splitting incorrectly is worse"));
+        // System prompt instruction
+        assert!(
+            DEFAULT_ROUTING_PROMPT.contains("task to classify is provided in the user message")
+        );
     }
 
     #[test]
