@@ -1,0 +1,46 @@
+name: Route Accuracy
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  route-accuracy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run routing stress test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: cargo run -p claude-pool --example route_stress -- --json > route-results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-accuracy-${{ github.run_id }}
+          path: route-results.json
+
+      - name: Summary
+        run: |
+          echo '## Route Accuracy Results' >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat route-results.json | python3 -m json.tool >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
