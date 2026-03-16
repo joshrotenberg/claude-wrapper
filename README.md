@@ -10,7 +10,7 @@ Rust tooling suite for the Claude Code CLI built around the coordinator/worker m
 ## Coordinator/Worker Model
 
 **claude-pool** implements coordinator/worker orchestration for Claude Code. A
-**coordinator** — an interactive Claude session with the pool in its MCP config —
+**coordinator** -- an interactive Claude session with the pool in its MCP config --
 schedules work, dispatches tasks to **worker** slots, monitors results, reviews
 outputs, and decides what merges. Workers are isolated Claude instances that
 execute one task at a time and return.
@@ -27,40 +27,40 @@ this into one dispatch/monitor cycle. Fan-outs run monitor in parallel.
 
 - **Session-scoped**: Slots live only as long as your process. No external state.
 - **Human-in-the-loop**: The coordinator reviews and approves worker output.
-- **Selective**: Choose what offloads — chains, fan-outs, or single tasks.
+- **Selective**: Choose what offloads -- chains, fan-outs, or single tasks.
 - **MCP-native**: Expose the pool as an MCP server and use it directly from Claude Code.
 
 ## The Three Crates
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Your Application or Interactive Claude Session │
-└────────────────────┬────────────────────────────┘
-                     │
-                     │ MCP: claude-pool-server
-                     ▼
-      ┌──────────────────────────────────┐
-      │      claude-pool (library)       │
-      │  • Task submission & routing     │
-      │  • Slot pool (N slots)       │
-      │  • Budget tracking               │
-      │  • Chains, fan-out, skills       │
-      │  • Worktree isolation            │
-      └────────────┬─────────────────────┘
-                   │
-          ┌────────┼────────┐
-          ▼        ▼        ▼
-      Slot-0 Slot-1 Slot-N
-      (Claude CLI instances)
-          │        │        │
-         Uses: claude-wrapper (CLI wrapper)
++---------------------------------------------------+
+|  Your Application or Interactive Claude Session    |
++------------------------+--------------------------+
+                         |
+                         |  MCP: claude-pool-mcp
+                         v
+      +--------------------------------------+
+      |      claude-pool (library)           |
+      |  * Task submission & routing         |
+      |  * Slot pool (N slots)               |
+      |  * Budget tracking                   |
+      |  * Chains, fan-out, auto-routing     |
+      |  * Worktree isolation                |
+      +----------------+--------------------+
+                        |
+              +---------+---------+
+              v         v         v
+          Slot-0    Slot-1    Slot-N
+          (Claude CLI instances)
+              |         |         |
+             Uses: claude-wrapper (CLI wrapper)
 ```
 
 | Crate | Purpose | Docs |
 |-------|---------|------|
-| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe Rust interface to Claude Code CLI | [README](crates/claude-wrapper/README.md) ⟡ [docs.rs](https://docs.rs/claude-wrapper) |
-| **[claude-pool](crates/claude-pool/)** | Coordinator/worker orchestration | [README](crates/claude-pool/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool) |
-| **[claude-pool-server](crates/claude-pool-server/)** | MCP + REST server | [README](crates/claude-pool-server/README.md) ⟡ [docs.rs](https://docs.rs/claude-pool-server) |
+| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe Rust interface to Claude Code CLI | [README](crates/claude-wrapper/README.md) |
+| **[claude-pool](crates/claude-pool/)** | Coordinator/worker orchestration | [README](crates/claude-pool/README.md) |
+| **[claude-pool-mcp](crates/claude-pool-mcp/)** | MCP server exposing pool as tools | [README](crates/claude-pool-mcp/README.md) |
 
 ## Quick Start
 
@@ -100,18 +100,28 @@ async fn main() -> claude_pool::Result<()> {
 }
 ```
 
-### 3. Launch the MCP server
+### 3. Use as an MCP server from Claude Code
 
-```bash
-claude-pool-server -n 4 --budget-usd 10.0 --model sonnet
-# Stdio transport. Add to .mcp.json and use from Claude.
+Add to your `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "claude-pool": {
+      "command": "cargo",
+      "args": ["run", "-p", "claude-pool-mcp", "--", "-n", "4", "--model", "sonnet"]
+    }
+  }
+}
 ```
+
+Then use `pool_run`, `pool_fan_out`, `pool_chain`, `pool_auto`, and 27 other tools directly from Claude Code. See the [coordinator skill](crates/claude-pool-mcp/skills/pool-coordinator/SKILL.md) for tool selection guidance.
 
 ## Features
 
-- **claude-wrapper**: Type-safe CLI wrapper with full option coverage (28 options), MCP server management, plugin management, streaming NDJSON events, session management
-- **claude-pool**: Multi-slot coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, budget control, shared context injection, optional worktree isolation, reusable skills registry
-- **claude-pool-server**: Standalone MCP server binary, configurable via CLI flags, full pool tool exposure, MCP resources for state inspection
+- **claude-wrapper**: Type-safe CLI wrapper with full option coverage, MCP server management, plugin management, streaming NDJSON events, session management
+- **claude-pool**: Multi-slot coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, auto-routing (LLM picks single/parallel/chain), budget control, shared context injection, worktree isolation, review gates
+- **claude-pool-mcp**: 31-tool MCP server, stdio transport, configurable via CLI flags
 
 ## Installation
 
@@ -121,62 +131,22 @@ cargo add claude-wrapper
 
 # Library: slot pool orchestration
 cargo add claude-pool
-
-# Binary: MCP server for the pool
-cargo install claude-pool-server
 ```
 
-## Documentation
-
-- **API Docs**: [docs.rs/claude-wrapper](https://docs.rs/claude-wrapper), [docs.rs/claude-pool](https://docs.rs/claude-pool), [docs.rs/claude-pool-server](https://docs.rs/claude-pool-server)
-- **Crate READMEs**: See individual crate directories above
-- **Examples**: Each crate README contains detailed examples
-
-## Status
-
-**Production-ready.** All three crates are actively maintained with comprehensive test coverage (168+ lib tests, plus integration and doc tests).
-
-### Implemented
-
-- Full CLI wrapper (28 QueryCommand options + all subcommands)
-- Slot pool with task routing, budgets, and slot identity
-- MCP server binary with tools and resources
-- Sequential chains with failure policies
-- Parallel fan-out execution
-- Shared context injection across slots
-- Worktree isolation per slot
-- Reusable skills registry
-
 ## Development & Testing
-
-Pre-commit checks:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib --all-features
-cargo test --test '*' --all-features
-```
-
-Doc tests:
-
-```bash
 cargo test --doc --all-features
+
+# Integration tests (requires fake-claude binary)
+cargo test --test pool_integration --test auto_route_tests -p claude-pool -- --ignored
+
+# Live routing accuracy test (requires real claude binary)
+cargo test --test route_stress -p claude-pool -- --ignored
 ```
-
-Full release checklist (before merging release PR):
-
-```bash
-cargo doc --no-deps --all-features  # Docs build without warnings
-cargo test --doc --all-features     # Doc tests pass
-cargo publish --dry-run -p claude-wrapper
-cargo publish --dry-run -p claude-pool
-cargo publish --dry-run -p claude-pool-server
-```
-
-## Contributing
-
-Issues and PRs welcome. Please ensure all checks pass before submitting.
 
 ## License
 
