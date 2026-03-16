@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current time in milliseconds since epoch.
@@ -130,6 +131,13 @@ pub struct PoolConfig {
     /// avoids accidental recursive pool calls (a slot invoking `pool_run` on itself).
     /// Default: `true`.
     pub strict_mcp_config: bool,
+
+    /// Base directory for git worktrees (chains and slot isolation).
+    ///
+    /// Defaults to `.claude/pool-worktrees/` under the repo root, which keeps
+    /// worktrees within the project directory so Claude's `auto` permission
+    /// mode can write to them. Override if you need worktrees elsewhere.
+    pub worktree_base_dir: Option<PathBuf>,
 }
 
 impl Default for PoolConfig {
@@ -154,6 +162,7 @@ impl Default for PoolConfig {
             supervisor_enabled: false,
             supervisor_interval_secs: 30,
             strict_mcp_config: true,
+            worktree_base_dir: None,
         }
     }
 }

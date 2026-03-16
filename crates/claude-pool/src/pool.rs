@@ -122,8 +122,18 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
         // Validate repo_dir is a git repo. Hard error when global worktree
         // isolation is on; soft warning otherwise (per-chain isolation may
         // still request worktrees).
+        //
+        // Default worktree base is .claude/pool-worktrees/ under the repo,
+        // keeping worktrees within the project directory so Claude's auto
+        // permission mode can write to them (#290).
+        let worktree_base = self
+            .config
+            .worktree_base_dir
+            .clone()
+            .unwrap_or_else(|| repo_dir.join(".claude").join("pool-worktrees"));
         let worktree_manager = match crate::worktree::WorktreeManager::new_validated(
-            &repo_dir, None,
+            &repo_dir,
+            Some(worktree_base),
         )
         .await
         {
