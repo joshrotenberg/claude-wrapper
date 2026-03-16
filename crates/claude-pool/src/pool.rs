@@ -119,9 +119,9 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        // Validate repo_dir is a git repo. Hard error when global worktree
-        // isolation is on; soft warning otherwise (per-chain isolation may
-        // still request worktrees).
+        // Validate repo_dir is a git repo. Worktree isolation is on by
+        // default — if the repo isn't a git repo, fall back gracefully
+        // with a warning instead of hard failing.
         //
         // Default worktree base is .claude/pool-worktrees/ under the repo,
         // keeping worktrees within the project directory so Claude's auto
@@ -139,9 +139,6 @@ impl<S: PoolStore + 'static> PoolBuilder<S> {
         {
             Ok(mgr) => Some(mgr),
             Err(e) => {
-                if self.config.worktree_isolation {
-                    return Err(e);
-                }
                 tracing::warn!(
                     repo_dir = %repo_dir.display(),
                     error = %e,
@@ -1840,9 +1837,24 @@ mod tests {
         Claude::builder().binary("/usr/bin/false").build().unwrap()
     }
 
+    /// Pool config for unit tests — worktree isolation disabled since
+    /// tests don't run in a git repo.
+    fn test_config() -> PoolConfig {
+        PoolConfig {
+            worktree_isolation: false,
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn build_pool_registers_slots() {
-        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(3)
+            .build()
+            .await
+            .unwrap();
 
         let slots = pool.store().list_slots().await.unwrap();
         assert_eq!(slots.len(), 3);
@@ -1855,6 +1867,7 @@ mod tests {
     #[tokio::test]
     async fn pool_with_slot_configs() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(2)
             .slot_config(SlotConfig {
                 model: Some("opus".into()),
@@ -1876,7 +1889,13 @@ mod tests {
 
     #[tokio::test]
     async fn context_operations() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         pool.set_context("repo", "claude-wrapper");
         pool.set_context("branch", "main");
@@ -1890,7 +1909,13 @@ mod tests {
 
     #[tokio::test]
     async fn drain_marks_slots_stopped() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         let summary = pool.drain().await.unwrap();
         assert_eq!(summary.total_tasks_completed, 0);
@@ -1907,9 +1932,11 @@ mod tests {
     #[tokio::test]
     async fn budget_enforcement() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .config(PoolConfig {
                 budget_microdollars: Some(100),
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
@@ -1926,9 +1953,11 @@ mod tests {
     #[tokio::test]
     async fn status_snapshot() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(3)
             .config(PoolConfig {
                 budget_microdollars: Some(1_000_000),
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
@@ -1946,9 +1975,11 @@ mod tests {
     #[tokio::test]
     async fn no_idle_slots_timeout() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .config(PoolConfig {
                 slot_assignment_timeout_secs: 1,
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
@@ -1970,7 +2001,13 @@ mod tests {
         // With 2 slots and 4 prompts, all 4 should eventually complete.
         // Since we use mock_claude (non-existent binary), actual execution will fail,
         // but we're testing that the queueing mechanism works (assignment tries to get a slot).
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         let prompts = vec!["prompt1", "prompt2", "prompt3", "prompt4"];
 
@@ -1993,6 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn slot_identity_fields_persisted() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .slot_config(SlotConfig {
                 name: Some("reviewer".into()),
@@ -2018,6 +2056,7 @@ mod tests {
     #[tokio::test]
     async fn find_slots_filters_by_name_role_state() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .slot_config(SlotConfig {
                 name: Some("reviewer".into()),
@@ -2071,7 +2110,13 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_sends_to_all_except_sender() {
-        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(3)
+            .build()
+            .await
+            .unwrap();
 
         let from = SlotId("slot-0".into());
         let ids = pool
@@ -2089,7 +2134,13 @@ mod tests {
 
     #[tokio::test]
     async fn scale_up_increases_slot_count() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         let initial_count = pool.store().list_slots().await.unwrap().len();
         assert_eq!(initial_count, 2);
@@ -2108,8 +2159,14 @@ mod tests {
 
     #[tokio::test]
     async fn scale_up_respects_max_slots() {
-        let mut config = PoolConfig::default();
-        config.scaling.max_slots = 4;
+        let config = PoolConfig {
+            scaling: ScalingConfig {
+                max_slots: 4,
+                ..Default::default()
+            },
+            worktree_isolation: false,
+            ..Default::default()
+        };
 
         let pool = Pool::builder(mock_claude())
             .slots(2)
@@ -2134,7 +2191,13 @@ mod tests {
 
     #[tokio::test]
     async fn scale_down_reduces_slot_count() {
-        let pool = Pool::builder(mock_claude()).slots(4).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(4)
+            .build()
+            .await
+            .unwrap();
 
         let initial = pool.store().list_slots().await.unwrap().len();
         assert_eq!(initial, 4);
@@ -2147,8 +2210,14 @@ mod tests {
 
     #[tokio::test]
     async fn scale_down_respects_min_slots() {
-        let mut config = PoolConfig::default();
-        config.scaling.min_slots = 2;
+        let config = PoolConfig {
+            scaling: ScalingConfig {
+                min_slots: 2,
+                ..Default::default()
+            },
+            worktree_isolation: false,
+            ..Default::default()
+        };
 
         let pool = Pool::builder(mock_claude())
             .slots(3)
@@ -2168,7 +2237,13 @@ mod tests {
 
     #[tokio::test]
     async fn set_target_slots_scales_up() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         let new_count = pool.set_target_slots(5).await.unwrap();
         assert_eq!(new_count, 5);
@@ -2177,7 +2252,13 @@ mod tests {
 
     #[tokio::test]
     async fn set_target_slots_scales_down() {
-        let pool = Pool::builder(mock_claude()).slots(5).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(5)
+            .build()
+            .await
+            .unwrap();
 
         let new_count = pool.set_target_slots(2).await.unwrap();
         assert_eq!(new_count, 2);
@@ -2186,7 +2267,13 @@ mod tests {
 
     #[tokio::test]
     async fn set_target_slots_no_op_when_equal() {
-        let pool = Pool::builder(mock_claude()).slots(3).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(3)
+            .build()
+            .await
+            .unwrap();
 
         let new_count = pool.set_target_slots(3).await.unwrap();
         assert_eq!(new_count, 3);
@@ -2194,7 +2281,13 @@ mod tests {
 
     #[tokio::test]
     async fn fan_out_chains_submits_all_chains() {
-        let pool = Pool::builder(mock_claude()).slots(2).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(2)
+            .build()
+            .await
+            .unwrap();
 
         let options = crate::chain::ChainOptions {
             tags: vec![],
@@ -2391,7 +2484,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_chain_marks_task_cancelled() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         // Manually insert a running chain task.
         let task_id = TaskId("chain-test-1".into());
@@ -2442,7 +2541,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_chain_noop_for_completed() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         let task_id = TaskId("chain-done".into());
         let record = TaskRecord {
@@ -2483,7 +2588,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_chain_not_found() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
         let result = pool.cancel_chain(&TaskId("nonexistent".into())).await;
         assert!(matches!(result, Err(Error::TaskNotFound(_))));
     }
@@ -2492,7 +2603,13 @@ mod tests {
 
     #[tokio::test]
     async fn append_chain_partial_output_accumulates() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         let task_id = TaskId("chain-test".into());
         let progress = crate::chain::ChainProgress {
@@ -2518,7 +2635,13 @@ mod tests {
 
     #[tokio::test]
     async fn append_chain_partial_output_noop_when_none() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         let task_id = TaskId("chain-test-2".into());
         // Progress with partial output = None (completed state).
@@ -2542,7 +2665,13 @@ mod tests {
 
     #[tokio::test]
     async fn append_chain_partial_output_noop_for_missing_task() {
-        let pool = Pool::builder(mock_claude()).slots(1).build().await.unwrap();
+        let pool = Pool::builder(mock_claude())
+            .config(test_config())
+            .config(test_config())
+            .slots(1)
+            .build()
+            .await
+            .unwrap();
 
         // Should not panic when task doesn't exist.
         let task_id = TaskId("nonexistent".into());
@@ -2554,9 +2683,11 @@ mod tests {
     #[tokio::test]
     async fn task_budget_exceeds_remaining_pool_budget() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .config(PoolConfig {
                 budget_microdollars: Some(1_000_000), // $1.00
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
@@ -2581,9 +2712,11 @@ mod tests {
     #[tokio::test]
     async fn task_budget_within_remaining_pool_budget() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .config(PoolConfig {
                 budget_microdollars: Some(1_000_000), // $1.00
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
@@ -2609,9 +2742,11 @@ mod tests {
     #[tokio::test]
     async fn task_budget_check_skipped_without_pool_budget() {
         let pool = Pool::builder(mock_claude())
+            .config(test_config())
             .slots(1)
             .config(PoolConfig {
                 budget_microdollars: None, // No pool budget
+                worktree_isolation: false,
                 ..Default::default()
             })
             .build()
