@@ -18,6 +18,10 @@ pub struct Manifest {
     /// When this manifest was created.
     pub created_at: DateTime<Utc>,
 
+    /// Manifest-level defaults applied to all tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Shared>,
+
     /// One or more tasks to execute.
     pub tasks: Vec<Task>,
 }
@@ -28,6 +32,81 @@ impl Manifest {
         Self {
             version: 1,
             created_at: Utc::now(),
+            shared: None,
+            tasks,
+        }
+    }
+
+    /// Return a new `Manifest` where each task has been merged with `shared` defaults.
+    ///
+    /// Task-level fields take precedence. `None` task fields inherit from `shared`.
+    /// `post_hooks` are special: shared hooks are prepended to task-level hooks.
+    pub fn resolve(&self) -> Manifest {
+        let tasks = self
+            .tasks
+            .iter()
+            .map(|task| {
+                let Some(shared) = &self.shared else {
+                    return task.clone();
+                };
+                Task {
+                    name: task.name.clone(),
+                    prompt: task.prompt.clone(),
+                    model: task.model.clone().or_else(|| shared.model.clone()),
+                    fallback_model: task.fallback_model.clone(),
+                    max_turns: task.max_turns.or(shared.max_turns),
+                    timeout_secs: task.timeout_secs.or(shared.timeout_secs),
+                    max_budget_usd: task.max_budget_usd.or(shared.max_budget_usd),
+                    permission_mode: task
+                        .permission_mode
+                        .clone()
+                        .or_else(|| shared.permission_mode.clone()),
+                    allowed_tools: task
+                        .allowed_tools
+                        .clone()
+                        .or_else(|| shared.allowed_tools.clone()),
+                    disallowed_tools: task
+                        .disallowed_tools
+                        .clone()
+                        .or_else(|| shared.disallowed_tools.clone()),
+                    system_prompt: task
+                        .system_prompt
+                        .clone()
+                        .or_else(|| shared.system_prompt.clone()),
+                    append_system_prompt: task
+                        .append_system_prompt
+                        .clone()
+                        .or_else(|| shared.append_system_prompt.clone()),
+                    effort: task.effort.clone().or_else(|| shared.effort.clone()),
+                    no_session_persistence: task
+                        .no_session_persistence
+                        .or(shared.no_session_persistence),
+                    mcp_config: task
+                        .mcp_config
+                        .clone()
+                        .or_else(|| shared.mcp_config.clone()),
+                    strict_mcp_config: task.strict_mcp_config.or(shared.strict_mcp_config),
+                    add_dirs: task.add_dirs.clone().or_else(|| shared.add_dirs.clone()),
+                    isolation: task.isolation.clone().or_else(|| shared.isolation.clone()),
+                    branch: task.branch.clone().or_else(|| shared.branch.clone()),
+                    env: task.env.clone().or_else(|| shared.env.clone()),
+                    post_hooks: match (&shared.post_hooks, &task.post_hooks) {
+                        (Some(s), Some(t)) => {
+                            let mut merged = s.clone();
+                            merged.extend(t.iter().cloned());
+                            Some(merged)
+                        }
+                        (Some(s), None) => Some(s.clone()),
+                        (None, t) => t.clone(),
+                    },
+                }
+            })
+            .collect();
+
+        Manifest {
+            version: self.version,
+            created_at: self.created_at,
+            shared: self.shared.clone(),
             tasks,
         }
     }
@@ -66,6 +145,87 @@ impl Manifest {
             Err(errors)
         }
     }
+}
+
+/// Manifest-level defaults applied to all tasks.
+///
+/// All fields are optional. Task-level fields take precedence; if a task field
+/// is `None`, the value from `Shared` is used. `post_hooks` are an exception:
+/// shared hooks are **prepended** to any task-level hooks.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Shared {
+    /// Model alias or full ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Conversation turn limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+
+    /// Process timeout in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
+    /// Spending cap in USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_budget_usd: Option<f64>,
+
+    /// Permission mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+
+    /// Tool allow list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
+
+    /// Tool deny list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disallowed_tools: Option<Vec<String>>,
+
+    /// Replace the default system prompt entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// Append to the default system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
+
+    /// Effort level: low, medium, high.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
+    /// Don't save session state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_session_persistence: Option<bool>,
+
+    /// Path to MCP config file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<String>,
+
+    /// Only use MCP servers from config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict_mcp_config: Option<bool>,
+
+    /// Additional accessible directories.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_dirs: Option<Vec<String>>,
+
+    /// Isolation strategy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<Isolation>,
+
+    /// Git branch name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+
+    /// Environment variables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+
+    /// Shell commands to run after each task completes successfully.
+    /// These are **prepended** to any task-level post_hooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_hooks: Option<Vec<String>>,
 }
 
 /// A fully resolved task. Every field is explicit.
@@ -637,5 +797,110 @@ mod tests {
         // Unknown fields should not cause an error (we don't deny_unknown_fields).
         let manifest: Manifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.tasks[0].model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn resolve_shared_fills_missing_task_fields() {
+        let mut manifest = Manifest::new(vec![Task::new("t1", "do it")]);
+        manifest.shared = Some(Shared {
+            model: Some("claude-opus-4-6".into()),
+            max_turns: Some(5),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        let task = &resolved.tasks[0];
+        assert_eq!(task.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(task.max_turns, Some(5));
+        assert_eq!(task.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn resolve_task_fields_override_shared() {
+        let mut task = Task::new("t1", "do it");
+        task.model = Some("claude-haiku-4-5-20251001".into());
+        task.max_turns = Some(10);
+
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            model: Some("claude-opus-4-6".into()),
+            max_turns: Some(5),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        let t = &resolved.tasks[0];
+        assert_eq!(t.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(t.max_turns, Some(10));
+    }
+
+    #[test]
+    fn resolve_no_shared_is_noop() {
+        let mut task = Task::new("t1", "do it");
+        task.model = Some("opus".into());
+        let manifest = Manifest::new(vec![task]);
+
+        let resolved = manifest.resolve();
+        assert_eq!(resolved.tasks[0].model.as_deref(), Some("opus"));
+        assert_eq!(resolved.tasks[0].max_turns, None);
+    }
+
+    #[test]
+    fn resolve_shared_post_hooks_prepended_to_task_hooks() {
+        let mut task = Task::new("t1", "do it");
+        task.post_hooks = Some(vec!["echo task".into()]);
+
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            post_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[0].post_hooks.as_deref(),
+            Some(["echo shared".to_string(), "echo task".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn resolve_shared_post_hooks_only_when_task_has_none() {
+        let mut manifest = Manifest::new(vec![Task::new("t1", "do it")]);
+        manifest.shared = Some(Shared {
+            post_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[0].post_hooks.as_deref(),
+            Some(["echo shared".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn shared_not_serialized_when_none() {
+        let manifest = Manifest::new(vec![Task::new("t", "p")]);
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("shared"));
+    }
+
+    #[test]
+    fn shared_roundtrip() {
+        let json = r#"{
+            "version": 1,
+            "created_at": "2026-03-18T10:30:00Z",
+            "shared": { "model": "claude-opus-4-6", "max_turns": 5 },
+            "tasks": [{ "name": "t1", "prompt": "do it" }]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            manifest.shared.as_ref().unwrap().model.as_deref(),
+            Some("claude-opus-4-6")
+        );
+        let resolved = manifest.resolve();
+        assert_eq!(resolved.tasks[0].model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(resolved.tasks[0].max_turns, Some(5));
     }
 }

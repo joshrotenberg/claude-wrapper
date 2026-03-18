@@ -171,6 +171,8 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         .validate()
         .map_err(|errors| Error::InvalidManifest(errors.join("; ")))?;
 
+    let manifest = manifest.resolve();
+
     info!(tasks = manifest.tasks.len(), "executing manifest");
 
     let mut join_set = JoinSet::new();
