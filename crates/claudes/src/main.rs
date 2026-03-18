@@ -27,6 +27,7 @@ async fn main() -> ExitCode {
 
 async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let global = claudes::manifest::load_global_defaults();
 
     // If --manifest is provided, load and run it directly.
     if let Some(manifest_path) = &args.manifest {
@@ -37,13 +38,16 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let manifest: claudes::Manifest = match serde_json::from_str(&content) {
+        let mut manifest: claudes::Manifest = match serde_json::from_str(&content) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("error: invalid manifest JSON: {e}");
                 return ExitCode::FAILURE;
             }
         };
+        if let Some(ref g) = global {
+            manifest.apply_global_defaults(g);
+        }
 
         let options = claudes::RunOptions {
             project_dir,
@@ -74,7 +78,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let manifest: claudes::Manifest =
+            let mut manifest: claudes::Manifest =
                 if manifest_path.extension().and_then(|e| e.to_str()) == Some("toml") {
                     match toml::from_str(&content) {
                         Ok(m) => m,
@@ -92,6 +96,9 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                         }
                     }
                 };
+            if let Some(ref g) = global {
+                manifest.apply_global_defaults(g);
+            }
 
             let options = claudes::RunOptions {
                 project_dir,
@@ -131,7 +138,10 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         args.isolation.as_deref(),
     );
 
-    let manifest = claudes::plan(&plan_opts);
+    let mut manifest = claudes::plan(&plan_opts);
+    if let Some(ref g) = global {
+        manifest.apply_global_defaults(g);
+    }
 
     if args.dry_run {
         println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
@@ -227,7 +237,10 @@ async fn cmd_plan(args: claudes::cli::PlanArgs) -> ExitCode {
         args.isolation.as_deref(),
     );
 
-    let manifest = claudes::plan(&plan_opts);
+    let mut manifest = claudes::plan(&plan_opts);
+    if let Some(ref g) = claudes::manifest::load_global_defaults() {
+        manifest.apply_global_defaults(g);
+    }
     let json = serde_json::to_string_pretty(&manifest).unwrap();
 
     if let Some(out_path) = &args.out {

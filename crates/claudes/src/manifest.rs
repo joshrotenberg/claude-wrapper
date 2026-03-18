@@ -10,6 +10,35 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Load global defaults from a given config home directory.
+///
+/// Looks for `claudes/defaults.toml` then `claudes/defaults.json` under `config_home`.
+/// Returns `None` if neither file exists or cannot be parsed.
+fn load_global_defaults_from(config_home: &Path) -> Option<Shared> {
+    let base = config_home.join("claudes");
+    for name in &["defaults.toml", "defaults.json"] {
+        let path = base.join(name);
+        if path.exists() {
+            let contents = std::fs::read_to_string(&path).ok()?;
+            return match path.extension().and_then(|e| e.to_str()) {
+                Some("toml") => toml::from_str::<Shared>(&contents).ok(),
+                Some("json") => serde_json::from_str::<Shared>(&contents).ok(),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Load global defaults from `~/.config/claudes/defaults.toml` or `defaults.json`.
+///
+/// Returns the parsed [`Shared`] block, or `None` if no file exists or the file
+/// cannot be parsed. A missing file is not an error.
+pub fn load_global_defaults() -> Option<Shared> {
+    let home = std::env::var("HOME").ok()?;
+    load_global_defaults_from(&PathBuf::from(home).join(".config"))
+}
+
 /// The manifest — a fully resolved, self-contained execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -137,6 +166,90 @@ impl Manifest {
                 path.display()
             ))),
         }
+    }
+
+    /// Merge `global` defaults into this manifest's `shared` block at the lowest priority.
+    ///
+    /// Fields already set in `self.shared` are not overwritten. Pre/post hooks from
+    /// `global` are **prepended** to any existing shared hooks so the final resolution
+    /// order is: task > manifest shared > global defaults.
+    pub fn apply_global_defaults(&mut self, global: &Shared) {
+        let shared = self.shared.get_or_insert_with(Shared::default);
+
+        if shared.model.is_none() {
+            shared.model = global.model.clone();
+        }
+        if shared.max_turns.is_none() {
+            shared.max_turns = global.max_turns;
+        }
+        if shared.timeout_secs.is_none() {
+            shared.timeout_secs = global.timeout_secs;
+        }
+        if shared.max_budget_usd.is_none() {
+            shared.max_budget_usd = global.max_budget_usd;
+        }
+        if shared.permission_mode.is_none() {
+            shared.permission_mode = global.permission_mode.clone();
+        }
+        if shared.allowed_tools.is_none() {
+            shared.allowed_tools = global.allowed_tools.clone();
+        }
+        if shared.disallowed_tools.is_none() {
+            shared.disallowed_tools = global.disallowed_tools.clone();
+        }
+        if shared.system_prompt.is_none() {
+            shared.system_prompt = global.system_prompt.clone();
+        }
+        if shared.append_system_prompt.is_none() {
+            shared.append_system_prompt = global.append_system_prompt.clone();
+        }
+        if shared.effort.is_none() {
+            shared.effort = global.effort.clone();
+        }
+        if shared.no_session_persistence.is_none() {
+            shared.no_session_persistence = global.no_session_persistence;
+        }
+        if shared.mcp_config.is_none() {
+            shared.mcp_config = global.mcp_config.clone();
+        }
+        if shared.strict_mcp_config.is_none() {
+            shared.strict_mcp_config = global.strict_mcp_config;
+        }
+        if shared.add_dirs.is_none() {
+            shared.add_dirs = global.add_dirs.clone();
+        }
+        if shared.isolation.is_none() {
+            shared.isolation = global.isolation.clone();
+        }
+        if shared.branch.is_none() {
+            shared.branch = global.branch.clone();
+        }
+        if shared.env.is_none() {
+            shared.env = global.env.clone();
+        }
+
+        // Hooks: global hooks are prepended to shared hooks.
+        let pre_hooks = match (&global.pre_hooks, &shared.pre_hooks) {
+            (Some(g), Some(s)) => {
+                let mut merged = g.clone();
+                merged.extend(s.iter().cloned());
+                Some(merged)
+            }
+            (Some(g), None) => Some(g.clone()),
+            (None, _) => shared.pre_hooks.clone(),
+        };
+        shared.pre_hooks = pre_hooks;
+
+        let post_hooks = match (&global.post_hooks, &shared.post_hooks) {
+            (Some(g), Some(s)) => {
+                let mut merged = g.clone();
+                merged.extend(s.iter().cloned());
+                Some(merged)
+            }
+            (Some(g), None) => Some(g.clone()),
+            (None, _) => shared.post_hooks.clone(),
+        };
+        shared.post_hooks = post_hooks;
     }
 
     /// Search for a manifest file in `dir`, returning the path to the first one found.
@@ -891,6 +1004,164 @@ mod tests {
         let task = Task::new("minimal", "just a prompt");
         let json = serde_json::to_value(&task).unwrap();
         assert!(!json.as_object().unwrap().contains_key("post_hooks"));
+    }
+
+    #[test]
+    fn load_global_defaults_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_global_defaults_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn load_global_defaults_reads_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("claudes")).unwrap();
+        std::fs::write(
+            dir.path().join("claudes/defaults.toml"),
+            r#"model = "claude-opus-4-6"
+max_turns = 10
+"#,
+        )
+        .unwrap();
+        let shared = load_global_defaults_from(dir.path()).unwrap();
+        assert_eq!(shared.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(shared.max_turns, Some(10));
+    }
+
+    #[test]
+    fn load_global_defaults_reads_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("claudes")).unwrap();
+        std::fs::write(
+            dir.path().join("claudes/defaults.json"),
+            r#"{"model": "claude-haiku-4-5-20251001", "timeout_secs": 300}"#,
+        )
+        .unwrap();
+        let shared = load_global_defaults_from(dir.path()).unwrap();
+        assert_eq!(shared.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(shared.timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn load_global_defaults_prefers_toml_over_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("claudes")).unwrap();
+        std::fs::write(
+            dir.path().join("claudes/defaults.toml"),
+            r#"model = "from-toml""#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("claudes/defaults.json"),
+            r#"{"model": "from-json"}"#,
+        )
+        .unwrap();
+        let shared = load_global_defaults_from(dir.path()).unwrap();
+        assert_eq!(shared.model.as_deref(), Some("from-toml"));
+    }
+
+    #[test]
+    fn apply_global_defaults_fills_missing_fields() {
+        let mut manifest = Manifest::new(vec![Task::new("t", "p")]);
+        let global = Shared {
+            model: Some("claude-opus-4-6".into()),
+            max_turns: Some(5),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        manifest.apply_global_defaults(&global);
+        let shared = manifest.shared.as_ref().unwrap();
+        assert_eq!(shared.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(shared.max_turns, Some(5));
+        assert_eq!(shared.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn apply_global_defaults_does_not_override_manifest_shared() {
+        let mut manifest = Manifest::new(vec![Task::new("t", "p")]);
+        manifest.shared = Some(Shared {
+            model: Some("manifest-model".into()),
+            max_turns: Some(10),
+            ..Default::default()
+        });
+        let global = Shared {
+            model: Some("global-model".into()),
+            max_turns: Some(1),
+            timeout_secs: Some(60),
+            ..Default::default()
+        };
+        manifest.apply_global_defaults(&global);
+        let shared = manifest.shared.as_ref().unwrap();
+        assert_eq!(shared.model.as_deref(), Some("manifest-model"));
+        assert_eq!(shared.max_turns, Some(10));
+        assert_eq!(shared.timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn apply_global_defaults_prepends_pre_hooks() {
+        let mut manifest = Manifest::new(vec![Task::new("t", "p")]);
+        manifest.shared = Some(Shared {
+            pre_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+        let global = Shared {
+            pre_hooks: Some(vec!["echo global".into()]),
+            ..Default::default()
+        };
+        manifest.apply_global_defaults(&global);
+        assert_eq!(
+            manifest.shared.as_ref().unwrap().pre_hooks.as_deref(),
+            Some(["echo global".to_string(), "echo shared".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn apply_global_defaults_prepends_post_hooks() {
+        let mut manifest = Manifest::new(vec![Task::new("t", "p")]);
+        manifest.shared = Some(Shared {
+            post_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+        let global = Shared {
+            post_hooks: Some(vec!["echo global".into()]),
+            ..Default::default()
+        };
+        manifest.apply_global_defaults(&global);
+        assert_eq!(
+            manifest.shared.as_ref().unwrap().post_hooks.as_deref(),
+            Some(["echo global".to_string(), "echo shared".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn global_defaults_are_lowest_priority_in_full_resolution() {
+        // task > manifest shared > global defaults
+        let mut task = Task::new("t", "p");
+        task.model = Some("task-model".into());
+
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            model: Some("shared-model".into()),
+            max_turns: Some(7),
+            ..Default::default()
+        });
+
+        let global = Shared {
+            model: Some("global-model".into()),
+            max_turns: Some(1),
+            timeout_secs: Some(120),
+            ..Default::default()
+        };
+        manifest.apply_global_defaults(&global);
+
+        let resolved = manifest.resolve();
+        let t = &resolved.tasks[0];
+        // task wins over shared and global
+        assert_eq!(t.model.as_deref(), Some("task-model"));
+        // shared wins over global
+        assert_eq!(t.max_turns, Some(7));
+        // global fills in what neither task nor shared set
+        assert_eq!(t.timeout_secs, Some(120));
     }
 
     #[test]
