@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         binary: None,
         env: vec![],
         cleanup: CleanupPolicy::None,
+        event_sender: None,
     };
 
     let result = run(&manifest, &run_opts).await?;
