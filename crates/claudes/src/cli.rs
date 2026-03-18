@@ -106,6 +106,13 @@ pub struct RunArgs {
 /// Arguments for `claudes status`.
 #[derive(Debug, Parser)]
 pub struct StatusArgs {
+    /// Run ID to show (default: latest run).
+    pub run_id: Option<String>,
+
+    /// List all runs.
+    #[arg(long)]
+    pub list: bool,
+
     /// Output as JSON instead of a table.
     #[arg(long)]
     pub json: bool,
