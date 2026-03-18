@@ -4,7 +4,7 @@
 //! It reads a manifest, creates isolation environments, builds `QueryCommand`s
 //! from task fields, and executes them concurrently.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
@@ -58,6 +58,10 @@ pub struct RunOptions {
     pub project_dir: PathBuf,
     /// Force overwrite existing worktrees.
     pub force: bool,
+    /// Override the claude binary path (default: find `claude` in PATH).
+    pub binary: Option<PathBuf>,
+    /// Extra environment variables passed to every Claude process.
+    pub env: Vec<(String, String)>,
 }
 
 /// Execute a manifest.
@@ -73,10 +77,9 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 
     for task in &manifest.tasks {
         let task = task.clone();
-        let project_dir = options.project_dir.clone();
-        let force = options.force;
+        let options = options.clone();
 
-        join_set.spawn(async move { run_task(&task, &project_dir, force).await });
+        join_set.spawn(async move { run_task(&task, &options).await });
     }
 
     let mut results = Vec::new();
@@ -93,11 +96,11 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 }
 
 /// Execute a single task.
-async fn run_task(task: &Task, project_dir: &Path, force: bool) -> TaskResult {
+async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
     let start = std::time::Instant::now();
     let task_name = task.name.clone();
 
-    match run_task_inner(task, project_dir, force).await {
+    match run_task_inner(task, options).await {
         Ok((output, env)) => TaskResult {
             name: task_name,
             success: output.success,
@@ -114,7 +117,7 @@ async fn run_task(task: &Task, project_dir: &Path, force: bool) -> TaskResult {
                 stdout: String::new(),
                 stderr: e.to_string(),
                 duration: start.elapsed(),
-                work_dir: project_dir.to_path_buf(),
+                work_dir: options.project_dir.to_path_buf(),
             }
         }
     }
@@ -123,9 +126,11 @@ async fn run_task(task: &Task, project_dir: &Path, force: bool) -> TaskResult {
 /// Inner task execution — returns the command output and isolation env.
 async fn run_task_inner(
     task: &Task,
-    project_dir: &Path,
-    force: bool,
+    options: &RunOptions,
 ) -> Result<(claude_wrapper::exec::CommandOutput, IsolatedEnv)> {
+    let project_dir = &options.project_dir;
+    let force = options.force;
+
     // Set up isolation.
     let env = if force {
         // If force, try to clean up existing worktree first.
@@ -175,6 +180,13 @@ async fn run_task_inner(
 
     // Build the Claude client for this task's working directory.
     let mut builder = Claude::builder().working_dir(&env.work_dir);
+
+    if let Some(binary) = &options.binary {
+        builder = builder.binary(binary);
+    }
+    for (k, v) in &options.env {
+        builder = builder.env(k, v);
+    }
 
     if let Some(timeout) = task.timeout_secs {
         builder = builder.timeout_secs(timeout);

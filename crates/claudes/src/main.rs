@@ -47,6 +47,8 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         let options = claudes::RunOptions {
             project_dir,
             force: args.force,
+            binary: None,
+            env: vec![],
         };
 
         if args.dry_run {
@@ -88,6 +90,8 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
     let options = claudes::RunOptions {
         project_dir,
         force: args.force,
+        binary: None,
+        env: vec![],
     };
 
     execute_manifest(&manifest, &options, &args).await
