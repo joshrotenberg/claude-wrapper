@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::Manifest;
+use crate::manifest::{Isolation, Manifest};
 use crate::runner::RunResult;
 
 /// The default state directory, relative to the project root.
@@ -83,6 +83,10 @@ pub struct TaskState {
     /// Error message (if task failed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Path to the NDJSON log file for this task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
 }
 
 /// Task completion status.
@@ -142,12 +146,25 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
             // Try to parse cost/session/result from the JSON output.
             let (cost_usd, session_id, result_text) = parse_task_output(&t.stdout);
 
-            // Find the matching manifest task for branch info.
-            let branch = manifest
-                .tasks
-                .iter()
-                .find(|mt| mt.name == t.name)
-                .and_then(|mt| mt.branch.clone());
+            // Find the matching manifest task for branch and isolation info.
+            let task_manifest = manifest.tasks.iter().find(|mt| mt.name == t.name);
+            let branch = task_manifest.and_then(|mt| mt.branch.clone());
+
+            // Compute the log path based on isolation type.
+            let no_isolation = task_manifest
+                .map(|mt| matches!(mt.isolation, Some(Isolation::None) | None))
+                .unwrap_or(false);
+            let log_path = if no_isolation {
+                PathBuf::from(&t.work_dir)
+                    .join(".claudes")
+                    .join("logs")
+                    .join(format!("{}.jsonl", t.name))
+            } else {
+                PathBuf::from(&t.work_dir)
+                    .join(".claudes")
+                    .join("run.jsonl")
+            };
+            let log_path = Some(log_path.to_string_lossy().to_string());
 
             let status = if t.success {
                 TaskStatus::Success
@@ -173,6 +190,7 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
                 session_id,
                 result_text,
                 error,
+                log_path,
             }
         })
         .collect();
@@ -386,6 +404,11 @@ pub fn print_status(state: &RunState) {
             for line in err.lines().take(3) {
                 println!("    {line}");
             }
+        }
+        if let Some(ref log_path) = task.log_path
+            && std::path::Path::new(log_path).exists()
+        {
+            println!("    log: {log_path}");
         }
     }
 }

@@ -11,7 +11,7 @@ use claude_wrapper::streaming::StreamEvent;
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::isolation::{self, IsolatedEnv};
@@ -337,6 +337,38 @@ async fn run_task_inner(
         let task_name = task.name.clone();
         let sender = sender.clone();
 
+        // Determine the log path based on isolation type.
+        let log_path = if matches!(env.kind, isolation::IsolationKind::None) {
+            env.work_dir
+                .join(".claudes")
+                .join("logs")
+                .join(format!("{}.jsonl", task.name))
+        } else {
+            env.work_dir.join(".claudes").join("run.jsonl")
+        };
+
+        // Create log directory and open the append-only log file.
+        let mut log_file: Option<std::fs::File> = None;
+        if let Some(log_dir) = log_path.parent() {
+            match tokio::fs::create_dir_all(log_dir).await {
+                Ok(()) => {
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        Ok(f) => log_file = Some(f),
+                        Err(e) => {
+                            warn!(task = task.name, path = %log_path.display(), error = %e, "failed to open log file");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(task = task.name, path = %log_path.display(), error = %e, "failed to create log dir");
+                }
+            }
+        }
+
         // Signal that the task has started.
         let _ = sender.send(TaskEvent {
             task_name: task_name.clone(),
@@ -351,6 +383,21 @@ async fn run_task_inner(
         let mut result_json = String::new();
 
         let output = claude_wrapper::streaming::stream_query(&claude, &cmd, |event| {
+            // Write the raw JSON event to the NDJSON log file.
+            if let Some(ref mut file) = log_file {
+                match serde_json::to_string(&event.data) {
+                    Ok(json) => {
+                        use std::io::Write;
+                        if let Err(e) = writeln!(file, "{json}") {
+                            warn!(task = task_name, error = %e, "failed to write event to log");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(task = task_name, error = %e, "failed to serialize event for log");
+                    }
+                }
+            }
+
             // Capture the result event's JSON for the TaskResult stdout.
             if event.is_result() {
                 result_json = serde_json::to_string(&event.data).unwrap_or_default();
