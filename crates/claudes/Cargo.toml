@@ -19,6 +19,9 @@ clap = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "claudes"
 path = "src/main.rs"

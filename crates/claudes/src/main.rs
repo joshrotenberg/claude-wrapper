@@ -19,7 +19,7 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Run(args) => cmd_run(args).await,
         Command::Plan(args) => cmd_plan(args).await,
-        Command::Status => cmd_status().await,
+        Command::Status(args) => cmd_status(args).await,
         Command::Clean(args) => cmd_clean(args).await,
     }
 }
@@ -47,6 +47,9 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         let options = claudes::RunOptions {
             project_dir,
             force: args.force,
+            binary: None,
+            env: vec![],
+            cleanup: parse_cleanup(&args.cleanup),
         };
 
         if args.dry_run {
@@ -88,6 +91,9 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
     let options = claudes::RunOptions {
         project_dir,
         force: args.force,
+        binary: None,
+        env: vec![],
+        cleanup: claudes::CleanupPolicy::default(),
     };
 
     execute_manifest(&manifest, &options, &args).await
@@ -104,8 +110,16 @@ async fn execute_manifest(
         _ => OutputFormat::Text,
     };
 
+    let started_at = chrono::Utc::now();
+
     match claudes::run(manifest, options).await {
         Ok(result) => {
+            // Write state file.
+            let state = claudes::state::build_state(manifest, &result, started_at);
+            if let Err(e) = claudes::state::save(&options.project_dir, &state) {
+                tracing::warn!("failed to write state file: {e}");
+            }
+
             output::print_summary(&result, format);
             if result.all_succeeded() {
                 ExitCode::SUCCESS
@@ -157,9 +171,23 @@ async fn cmd_plan(args: claudes::cli::PlanArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn cmd_status() -> ExitCode {
-    eprintln!("status: not yet implemented");
-    ExitCode::SUCCESS
+async fn cmd_status(args: claudes::cli::StatusArgs) -> ExitCode {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    match claudes::state::load(&project_dir) {
+        Some(state) => {
+            if args.json {
+                claudes::state::print_status_json(&state);
+            } else {
+                claudes::state::print_status(&state);
+            }
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("no state file found (run `claudes run` first)");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
@@ -277,5 +305,13 @@ fn build_plan_options(
         append_system_prompt: append_system_prompt.map(String::from),
         isolation: isolation.map(String::from),
         ..Default::default()
+    }
+}
+
+fn parse_cleanup(s: &str) -> claudes::CleanupPolicy {
+    match s {
+        "on-success" => claudes::CleanupPolicy::OnSuccess,
+        "always" => claudes::CleanupPolicy::Always,
+        _ => claudes::CleanupPolicy::None,
     }
 }

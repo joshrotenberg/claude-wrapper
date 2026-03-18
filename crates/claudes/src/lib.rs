@@ -17,8 +17,9 @@ pub mod manifest;
 pub mod output;
 pub mod planner;
 pub mod runner;
+pub mod state;
 
 pub use error::{Error, Result};
 pub use manifest::{Isolation, Manifest, Task};
 pub use planner::{PlanOptions, plan};
-pub use runner::{RunOptions, RunResult, TaskResult, run};
+pub use runner::{CleanupPolicy, RunOptions, RunResult, TaskResult, run};
