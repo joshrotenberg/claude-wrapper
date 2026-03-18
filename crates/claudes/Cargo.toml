@@ -18,7 +18,6 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [[bin]]
 name = "claudes"
