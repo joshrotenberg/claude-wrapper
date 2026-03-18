@@ -352,6 +352,28 @@ async fn cmd_status(args: claudes::cli::StatusArgs) -> ExitCode {
 
 async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let clean_worktrees = true; // always clean worktrees by default
+    let clean_runs = args.runs || args.all;
+    let clean_branches = args.branches || args.all;
+
+    if clean_worktrees && clean_worktrees_impl(&project_dir, args.force).await == ExitCode::FAILURE
+    {
+        return ExitCode::FAILURE;
+    }
+
+    if clean_runs && clean_runs_impl(&project_dir) == ExitCode::FAILURE {
+        return ExitCode::FAILURE;
+    }
+
+    if clean_branches && clean_branches_impl(&project_dir).await == ExitCode::FAILURE {
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
+}
+
+async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {
     let worktrees_dir = project_dir.join(".worktrees");
 
     if !worktrees_dir.exists() {
@@ -375,7 +397,7 @@ async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
 
         let name = entry.file_name().to_string_lossy().to_string();
         let mut cmd_args = vec!["worktree", "remove"];
-        if args.force {
+        if force {
             cmd_args.push("--force");
         }
         let path_str = entry.path().to_string_lossy().to_string();
@@ -383,21 +405,21 @@ async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
 
         let output = tokio::process::Command::new("git")
             .args(&cmd_args)
-            .current_dir(&project_dir)
+            .current_dir(project_dir)
             .output()
             .await;
 
         match output {
             Ok(o) if o.status.success() => {
-                eprintln!("removed: {name}");
+                eprintln!("removed worktree: {name}");
                 removed += 1;
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                eprintln!("failed to remove {name}: {stderr}");
+                eprintln!("failed to remove worktree {name}: {stderr}");
             }
             Err(e) => {
-                eprintln!("failed to remove {name}: {e}");
+                eprintln!("failed to remove worktree {name}: {e}");
             }
         }
     }
@@ -408,6 +430,120 @@ async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
     }
 
     eprintln!("cleaned {removed} worktree(s)");
+    ExitCode::SUCCESS
+}
+
+fn clean_runs_impl(project_dir: &Path) -> ExitCode {
+    let runs_dir = project_dir.join(".claudes").join("runs");
+    let latest_file = project_dir.join(".claudes").join("latest");
+    let mut removed = 0;
+
+    if runs_dir.exists() {
+        let entries = match std::fs::read_dir(&runs_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("error reading .claudes/runs: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for entry in entries.flatten() {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                eprintln!(
+                    "failed to remove {}: {e}",
+                    entry.file_name().to_string_lossy()
+                );
+            } else {
+                removed += 1;
+            }
+        }
+    }
+
+    if latest_file.exists()
+        && let Err(e) = std::fs::remove_file(&latest_file)
+    {
+        eprintln!("failed to remove .claudes/latest: {e}");
+    }
+
+    eprintln!("cleaned {removed} run state file(s)");
+    ExitCode::SUCCESS
+}
+
+async fn clean_branches_impl(project_dir: &Path) -> ExitCode {
+    // List local branches matching claudes/*
+    let list_output = tokio::process::Command::new("git")
+        .args(["branch", "--list", "claudes/*"])
+        .current_dir(project_dir)
+        .output()
+        .await;
+
+    let list_output = match list_output {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("failed to list branches: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let branches_raw = String::from_utf8_lossy(&list_output.stdout);
+    let branches: Vec<&str> = branches_raw
+        .lines()
+        .map(|l| l.trim().trim_start_matches("* ").trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if branches.is_empty() {
+        eprintln!("no claudes/* branches to clean");
+        return ExitCode::SUCCESS;
+    }
+
+    // Get list of branches merged into main.
+    let merged_output = tokio::process::Command::new("git")
+        .args(["branch", "--merged", "main"])
+        .current_dir(project_dir)
+        .output()
+        .await;
+
+    let merged_set: std::collections::HashSet<String> = match merged_output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().trim_start_matches("* ").trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(e) => {
+            eprintln!("failed to check merged branches: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut removed = 0;
+    for branch in &branches {
+        if !merged_set.contains(*branch) {
+            eprintln!("skipping unmerged branch: {branch}");
+            continue;
+        }
+
+        let del_output = tokio::process::Command::new("git")
+            .args(["branch", "-d", branch])
+            .current_dir(project_dir)
+            .output()
+            .await;
+
+        match del_output {
+            Ok(o) if o.status.success() => {
+                eprintln!("deleted branch: {branch}");
+                removed += 1;
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                eprintln!("failed to delete branch {branch}: {stderr}");
+            }
+            Err(e) => {
+                eprintln!("failed to delete branch {branch}: {e}");
+            }
+        }
+    }
+
+    eprintln!("deleted {removed} merged claudes/* branch(es)");
     ExitCode::SUCCESS
 }
 

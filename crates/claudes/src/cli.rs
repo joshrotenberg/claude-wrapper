@@ -227,6 +227,14 @@ pub struct CleanArgs {
     /// Force remove even with uncommitted changes.
     #[arg(long)]
     pub force: bool,
+
+    /// Remove run state files from .claudes/runs/ and .claudes/latest.
+    #[arg(long)]
+    pub runs: bool,
+
+    /// Remove local claudes/* branches that have been merged into main.
+    #[arg(long)]
+    pub branches: bool,
 }
 
 /// Parse a timeout string like "30m", "1h", "3600" into seconds.
