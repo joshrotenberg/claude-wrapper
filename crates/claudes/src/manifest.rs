@@ -5,7 +5,7 @@
 //! What you see is what executes.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,25 @@ impl Manifest {
                 path.display()
             ))),
         }
+    }
+
+    /// Search for a manifest file in `dir`, returning the path to the first one found.
+    ///
+    /// Searched in order: `claudes.toml`, `.claudes.toml`, `claudes.json`, `.claudes.json`.
+    pub fn discover(dir: &Path) -> Option<PathBuf> {
+        const CANDIDATES: &[&str] = &[
+            "claudes.toml",
+            ".claudes.toml",
+            "claudes.json",
+            ".claudes.json",
+        ];
+        for name in CANDIDATES {
+            let path = dir.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Validate the manifest, returning errors for any problems.
@@ -1101,6 +1120,35 @@ prompt = "do it"
         let manifest = Manifest::new(vec![Task::new("t", "p")]);
         let json = serde_json::to_value(&manifest).unwrap();
         assert!(!json.as_object().unwrap().contains_key("shared"));
+    }
+
+    #[test]
+    fn discover_finds_files_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Nothing present — returns None.
+        assert!(Manifest::discover(base).is_none());
+
+        // .claudes.json present — found.
+        let json_hidden = base.join(".claudes.json");
+        std::fs::write(&json_hidden, "{}").unwrap();
+        assert_eq!(Manifest::discover(base).unwrap(), json_hidden);
+
+        // claudes.json present — takes priority over .claudes.json.
+        let json = base.join("claudes.json");
+        std::fs::write(&json, "{}").unwrap();
+        assert_eq!(Manifest::discover(base).unwrap(), json);
+
+        // .claudes.toml present — takes priority over claudes.json.
+        let toml_hidden = base.join(".claudes.toml");
+        std::fs::write(&toml_hidden, "").unwrap();
+        assert_eq!(Manifest::discover(base).unwrap(), toml_hidden);
+
+        // claudes.toml present — highest priority.
+        let toml = base.join("claudes.toml");
+        std::fs::write(&toml, "").unwrap();
+        assert_eq!(Manifest::discover(base).unwrap(), toml);
     }
 
     #[test]

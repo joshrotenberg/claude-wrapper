@@ -62,10 +62,58 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         return execute_manifest(&manifest, &options, &args).await;
     }
 
-    // Otherwise, generate a manifest from CLI args.
+    // Otherwise, generate a manifest from CLI args or auto-discover one.
     let prompts = collect_prompts(&args.prompt, args.stdin).await;
     if prompts.is_empty() {
-        eprintln!("error: no prompts provided (use -p or --stdin)");
+        // No -p prompts — try auto-discovering a project manifest.
+        if let Some(manifest_path) = claudes::manifest::Manifest::discover(&project_dir) {
+            let content = match std::fs::read_to_string(&manifest_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: cannot read manifest: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let manifest: claudes::Manifest =
+                if manifest_path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    match toml::from_str(&content) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("error: invalid manifest TOML: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    match serde_json::from_str(&content) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("error: invalid manifest JSON: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                };
+
+            let options = claudes::RunOptions {
+                project_dir,
+                force: args.force,
+                binary: None,
+                env: vec![],
+                cleanup: parse_cleanup(&args.cleanup),
+                event_sender: None,
+            };
+
+            if args.dry_run {
+                println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
+                return ExitCode::SUCCESS;
+            }
+
+            return execute_manifest(&manifest, &options, &args).await;
+        }
+
+        eprintln!(
+            "error: no prompts provided and no manifest file found \
+             (use -p, --manifest, or create claudes.toml)"
+        );
         return ExitCode::FAILURE;
     }
 
