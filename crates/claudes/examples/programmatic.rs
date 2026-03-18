@@ -7,7 +7,7 @@
 //! cargo run --example programmatic -p claudes
 //! ```
 
-use claudes::{Isolation, Manifest, RunOptions, Task, run};
+use claudes::{CleanupPolicy, Isolation, Manifest, RunOptions, Task, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         force: false,
         binary: None,
         env: vec![],
+        cleanup: CleanupPolicy::None,
     };
 
     let result = run(&manifest, &options).await?;

@@ -51,6 +51,18 @@ impl RunResult {
     }
 }
 
+/// When to automatically remove worktrees after execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CleanupPolicy {
+    /// Never auto-remove worktrees (default). Use `claudes clean` explicitly.
+    #[default]
+    None,
+    /// Remove worktrees only for tasks that succeeded. Keep failed ones for inspection.
+    OnSuccess,
+    /// Remove all worktrees after the run, regardless of outcome.
+    Always,
+}
+
 /// Options that control runner behavior.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -62,6 +74,8 @@ pub struct RunOptions {
     pub binary: Option<PathBuf>,
     /// Extra environment variables passed to every Claude process.
     pub env: Vec<(String, String)>,
+    /// When to auto-remove worktrees after execution.
+    pub cleanup: CleanupPolicy,
 }
 
 /// Execute a manifest.
@@ -88,6 +102,33 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
             Ok(task_result) => results.push(task_result),
             Err(join_err) => {
                 error!("task panicked: {join_err}");
+            }
+        }
+    }
+
+    // Auto-cleanup worktrees based on policy.
+    if options.cleanup != CleanupPolicy::None {
+        for task_result in &results {
+            let should_clean = match options.cleanup {
+                CleanupPolicy::Always => true,
+                CleanupPolicy::OnSuccess => task_result.success,
+                CleanupPolicy::None => false,
+            };
+            if should_clean {
+                let env = IsolatedEnv {
+                    work_dir: task_result.work_dir.clone(),
+                    kind: isolation::IsolationKind::Worktree {
+                        path: task_result.work_dir.clone(),
+                    },
+                };
+                if let Err(e) = isolation::cleanup(&options.project_dir, &env, false).await {
+                    // Non-fatal: log and continue.
+                    tracing::warn!(
+                        task = task_result.name,
+                        error = %e,
+                        "failed to clean up worktree"
+                    );
+                }
             }
         }
     }

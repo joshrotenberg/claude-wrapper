@@ -8,7 +8,7 @@
 //! cargo run --example manifest_file -p claudes -- /tmp/demo.json
 //! ```
 
-use claudes::{Manifest, RunOptions, run};
+use claudes::{CleanupPolicy, Manifest, RunOptions, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         force: false,
         binary: None,
         env: vec![],
+        cleanup: CleanupPolicy::None,
     };
 
     let result = run(&manifest, &options).await?;

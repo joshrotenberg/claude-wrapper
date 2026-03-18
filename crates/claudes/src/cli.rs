@@ -20,8 +20,8 @@ pub enum Command {
     /// Generate a manifest without executing.
     Plan(PlanArgs),
 
-    /// Show status of running/completed tasks.
-    Status,
+    /// Show status of the most recent run.
+    Status(StatusArgs),
 
     /// Remove worktrees and temporary state.
     Clean(CleanArgs),
@@ -97,6 +97,18 @@ pub struct RunArgs {
     /// Overwrite existing worktrees.
     #[arg(long)]
     pub force: bool,
+
+    /// Auto-cleanup worktrees after run (none|on-success|always; default: none).
+    #[arg(long, default_value = "none")]
+    pub cleanup: String,
+}
+
+/// Arguments for `claudes status`.
+#[derive(Debug, Parser)]
+pub struct StatusArgs {
+    /// Output as JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `claudes plan`.

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use claudes::planner::PlanOptions;
-use claudes::{Isolation, Manifest, RunOptions, Task, plan};
+use claudes::{CleanupPolicy, Isolation, Manifest, RunOptions, Task, plan};
 
 const FAKE_CLAUDE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -28,6 +28,7 @@ fn run_options(project_dir: PathBuf) -> RunOptions {
         force: false,
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "task complete".into())],
+        cleanup: CleanupPolicy::None,
     }
 }
 
@@ -154,6 +155,7 @@ async fn run_task_failure_reported() {
             ("FAKE_CLAUDE_EXIT_CODE".into(), "1".into()),
             ("FAKE_CLAUDE_ERROR_MSG".into(), "simulated failure".into()),
         ],
+        cleanup: CleanupPolicy::None,
     };
 
     let manifest = Manifest::new(vec![{
@@ -217,6 +219,7 @@ async fn planner_to_runner_roundtrip() {
         force: false,
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "planned result".into())],
+        cleanup: CleanupPolicy::None,
     };
 
     let plan_opts = PlanOptions {
@@ -246,6 +249,7 @@ async fn manifest_json_roundtrip_execution() {
         force: false,
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "from json".into())],
+        cleanup: CleanupPolicy::None,
     };
 
     // Create manifest, serialize to JSON, deserialize back, execute.

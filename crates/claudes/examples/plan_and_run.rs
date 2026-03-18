@@ -6,7 +6,7 @@
 //! cargo run --example plan_and_run -p claudes
 //! ```
 
-use claudes::{PlanOptions, RunOptions, plan, run};
+use claudes::{CleanupPolicy, PlanOptions, RunOptions, plan, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         force: false,
         binary: None,
         env: vec![],
+        cleanup: CleanupPolicy::None,
     };
 
     let result = run(&manifest, &run_opts).await?;
