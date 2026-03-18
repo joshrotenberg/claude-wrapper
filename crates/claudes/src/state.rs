@@ -235,7 +235,10 @@ pub fn print_status(state: &RunState) {
     }
     println!();
     let header_sep = "-".repeat(80);
-    println!("  {:<30} {:<10} {:>8}  {:>8}  Branch", "Task", "Status", "Time", "Cost");
+    println!(
+        "  {:<30} {:<10} {:>8}  {:>8}  Branch",
+        "Task", "Status", "Time", "Cost"
+    );
     println!("  {header_sep}");
 
     for task in &state.results {
