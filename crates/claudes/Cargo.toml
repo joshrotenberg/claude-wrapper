@@ -18,6 +18,7 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
