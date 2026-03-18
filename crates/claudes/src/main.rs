@@ -5,7 +5,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use claudes::cli::{Cli, Command, parse_timeout};
-use claudes::output::{self, OutputFormat};
+use claudes::output::{self, OutputFormat, Verbosity};
 use claudes::planner::PlanOptions;
 
 #[tokio::main]
@@ -113,6 +113,7 @@ async fn execute_manifest(
         _ => OutputFormat::Text,
     };
 
+    let verbosity = Verbosity::from(args.verbose);
     let started_at = chrono::Utc::now();
 
     // Set up streaming if we're in text mode.
@@ -120,7 +121,7 @@ async fn execute_manifest(
     let stream_handle = if format == OutputFormat::Text {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         options.event_sender = Some(tx);
-        Some(tokio::spawn(output::render_stream(rx)))
+        Some(tokio::spawn(output::render_stream(rx, verbosity)))
     } else {
         None
     };

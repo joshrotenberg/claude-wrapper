@@ -330,6 +330,18 @@ async fn run_task_inner(
     let output = if let Some(sender) = &options.event_sender {
         let task_name = task.name.clone();
         let sender = sender.clone();
+
+        // Signal that the task has started.
+        let _ = sender.send(TaskEvent {
+            task_name: task_name.clone(),
+            event: StreamEvent {
+                data: serde_json::json!({
+                    "type": "claudes_task_start",
+                    "task_name": task_name,
+                }),
+            },
+        });
+
         let mut result_json = String::new();
 
         let output = claude_wrapper::streaming::stream_query(&claude, &cmd, |event| {
