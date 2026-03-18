@@ -266,6 +266,7 @@ pub fn plan(options: &PlanOptions) -> Manifest {
                 isolation,
                 branch: Some(branch),
                 env: None,
+                pre_hooks: None,
                 post_hooks: None,
             }
         })
