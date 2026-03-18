@@ -1,0 +1,25 @@
+{
+  "_comment": "Content generation manifest: takes topic outlines and generates full blog posts. Two tasks run independently on different topics. Uses sonnet for fluent prose, no isolation since output files are written to distinct paths, and max_turns 10 to allow iterative drafting.",
+  "version": 1,
+  "created_at": "2026-03-18T10:00:00Z",
+  "tasks": [
+    {
+      "name": "blog-post-fermented-foods",
+      "prompt": "Read the outline file outlines/fermented-foods.md and write a complete, engaging blog post based on it. The post should be 800-1200 words, written for a general audience curious about nutrition and food science. Use a conversational but informative tone. Include a compelling introduction, well-developed body paragraphs that follow the outline structure, concrete examples, and a strong conclusion. Write the finished post to output/fermented-foods-post.md.",
+      "model": "sonnet",
+      "isolation": {
+        "type": "none"
+      },
+      "max_turns": 10
+    },
+    {
+      "name": "blog-post-urban-rewilding",
+      "prompt": "Read the outline file outlines/urban-rewilding.md and write a complete, engaging blog post based on it. The post should be 800-1200 words, written for a general audience interested in urban planning and ecology. Use a conversational but informative tone. Include a compelling introduction, well-developed body paragraphs that follow the outline structure, concrete examples, and a strong conclusion. Write the finished post to output/urban-rewilding-post.md.",
+      "model": "sonnet",
+      "isolation": {
+        "type": "none"
+      },
+      "max_turns": 10
+    }
+  ]
+}
