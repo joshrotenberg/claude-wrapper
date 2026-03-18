@@ -90,6 +90,15 @@ impl Manifest {
                     isolation: task.isolation.clone().or_else(|| shared.isolation.clone()),
                     branch: task.branch.clone().or_else(|| shared.branch.clone()),
                     env: task.env.clone().or_else(|| shared.env.clone()),
+                    pre_hooks: match (&shared.pre_hooks, &task.pre_hooks) {
+                        (Some(s), Some(t)) => {
+                            let mut merged = s.clone();
+                            merged.extend(t.iter().cloned());
+                            Some(merged)
+                        }
+                        (Some(s), None) => Some(s.clone()),
+                        (None, t) => t.clone(),
+                    },
                     post_hooks: match (&shared.post_hooks, &task.post_hooks) {
                         (Some(s), Some(t)) => {
                             let mut merged = s.clone();
@@ -150,8 +159,8 @@ impl Manifest {
 /// Manifest-level defaults applied to all tasks.
 ///
 /// All fields are optional. Task-level fields take precedence; if a task field
-/// is `None`, the value from `Shared` is used. `post_hooks` are an exception:
-/// shared hooks are **prepended** to any task-level hooks.
+/// is `None`, the value from `Shared` is used. `pre_hooks` and `post_hooks` are
+/// exceptions: shared hooks are **prepended** to any task-level hooks.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Shared {
     /// Model alias or full ID.
@@ -221,6 +230,11 @@ pub struct Shared {
     /// Environment variables.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+
+    /// Shell commands to run before each task starts.
+    /// These are **prepended** to any task-level pre_hooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_hooks: Option<Vec<String>>,
 
     /// Shell commands to run after each task completes successfully.
     /// These are **prepended** to any task-level post_hooks.
@@ -309,6 +323,10 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 
+    /// Shell commands to run before the task starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_hooks: Option<Vec<String>>,
+
     /// Shell commands to run after the task completes successfully.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_hooks: Option<Vec<String>>,
@@ -338,6 +356,7 @@ impl Task {
             isolation: None,
             branch: None,
             env: None,
+            pre_hooks: None,
             post_hooks: None,
         }
     }
@@ -372,6 +391,14 @@ impl Task {
             && budget <= 0.0
         {
             errors.push("max_budget_usd must be positive".into());
+        }
+
+        if let Some(hooks) = &self.pre_hooks {
+            for (i, hook) in hooks.iter().enumerate() {
+                if hook.is_empty() {
+                    errors.push(format!("pre_hooks[{i}] must not be empty"));
+                }
+            }
         }
 
         if let Some(hooks) = &self.post_hooks {
@@ -526,6 +553,12 @@ impl TaskBuilder {
     /// Set environment variables.
     pub fn env(mut self, env: HashMap<String, String>) -> Self {
         self.task.env = Some(env);
+        self
+    }
+
+    /// Set shell commands to run before the task starts.
+    pub fn pre_hooks(mut self, pre_hooks: Vec<String>) -> Self {
+        self.task.pre_hooks = Some(pre_hooks);
         self
     }
 
@@ -689,6 +722,7 @@ mod tests {
             .isolation(Isolation::None)
             .branch("feat/t")
             .env(env.clone())
+            .pre_hooks(vec!["echo ready".into()])
             .post_hooks(vec!["echo done".into()])
             .build();
 
@@ -723,6 +757,10 @@ mod tests {
         assert_eq!(task.branch.as_deref(), Some("feat/t"));
         assert_eq!(task.env, Some(env));
         assert_eq!(
+            task.pre_hooks.as_deref(),
+            Some(["echo ready".to_string()].as_slice())
+        );
+        assert_eq!(
             task.post_hooks.as_deref(),
             Some(["echo done".to_string()].as_slice())
         );
@@ -748,6 +786,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_empty_pre_hook_entry() {
+        let mut task = Task::new("t", "prompt");
+        task.pre_hooks = Some(vec!["echo ok".into(), "".into()]);
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("pre_hooks[1]")));
+    }
+
+    #[test]
+    fn validate_valid_pre_hooks() {
+        let mut task = Task::new("t", "prompt");
+        task.pre_hooks = Some(vec!["echo ok".into(), "cargo fmt".into()]);
+        let manifest = Manifest::new(vec![task]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
     fn validate_empty_post_hook_entry() {
         let mut task = Task::new("t", "prompt");
         task.post_hooks = Some(vec!["echo ok".into(), "".into()]);
@@ -762,6 +817,24 @@ mod tests {
         task.post_hooks = Some(vec!["echo ok".into(), "cargo fmt".into()]);
         let manifest = Manifest::new(vec![task]);
         assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn task_builder_pre_hooks() {
+        let task = TaskBuilder::new("t", "p")
+            .pre_hooks(vec!["echo ready".into()])
+            .build();
+        assert_eq!(
+            task.pre_hooks.as_deref(),
+            Some(["echo ready".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn skip_serializing_pre_hooks_when_none() {
+        let task = Task::new("minimal", "just a prompt");
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("pre_hooks"));
     }
 
     #[test]
@@ -844,6 +917,39 @@ mod tests {
         let resolved = manifest.resolve();
         assert_eq!(resolved.tasks[0].model.as_deref(), Some("opus"));
         assert_eq!(resolved.tasks[0].max_turns, None);
+    }
+
+    #[test]
+    fn resolve_shared_pre_hooks_prepended_to_task_hooks() {
+        let mut task = Task::new("t1", "do it");
+        task.pre_hooks = Some(vec!["echo task".into()]);
+
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            pre_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[0].pre_hooks.as_deref(),
+            Some(["echo shared".to_string(), "echo task".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn resolve_shared_pre_hooks_only_when_task_has_none() {
+        let mut manifest = Manifest::new(vec![Task::new("t1", "do it")]);
+        manifest.shared = Some(Shared {
+            pre_hooks: Some(vec!["echo shared".into()]),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[0].pre_hooks.as_deref(),
+            Some(["echo shared".to_string()].as_slice())
+        );
     }
 
     #[test]

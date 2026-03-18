@@ -305,6 +305,12 @@ async fn run_task_inner(
         .await?
     };
 
+    // Run pre-hooks before starting the session.
+    if let Some(hooks) = &task.pre_hooks {
+        info!(task = task.name, "running pre hooks");
+        run_hooks(&task.name, hooks, &env.work_dir, "pre").await?;
+    }
+
     info!(task = task.name, work_dir = %env.work_dir.display(), "running task");
 
     // Build the Claude client for this task's working directory.
@@ -370,20 +376,21 @@ async fn run_task_inner(
     if output.success
         && let Some(hooks) = &task.post_hooks
     {
-        run_post_hooks(&task.name, hooks, &env.work_dir).await?;
+        run_hooks(&task.name, hooks, &env.work_dir, "post").await?;
     }
 
     Ok((output, env))
 }
 
-/// Execute post-hooks for a task in the given working directory.
-async fn run_post_hooks(
+/// Execute hooks (pre or post) for a task in the given working directory.
+async fn run_hooks(
     task_name: &str,
     hooks: &[String],
     work_dir: &std::path::Path,
+    kind: &str,
 ) -> Result<()> {
     for hook in hooks {
-        info!(task = task_name, hook = hook, "running post hook");
+        info!(task = task_name, hook = hook, "running {kind} hook");
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(hook)
@@ -392,13 +399,13 @@ async fn run_post_hooks(
             .await
             .map_err(|e| Error::TaskFailed {
                 name: task_name.to_owned(),
-                message: format!("post hook '{hook}' failed to spawn: {e}"),
+                message: format!("{kind} hook '{hook}' failed to spawn: {e}"),
             })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             return Err(Error::TaskFailed {
                 name: task_name.to_owned(),
-                message: format!("post hook '{hook}' exited non-zero: {stderr}"),
+                message: format!("{kind} hook '{hook}' exited non-zero: {stderr}"),
             });
         }
     }
@@ -481,9 +488,49 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn pre_hooks_success() {
+        let dir = tempfile::tempdir().unwrap();
+        run_hooks("test-task", &["echo hello".into()], dir.path(), "pre")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_hooks_failure_returns_task_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "pre")
+            .await
+            .unwrap_err();
+        match err {
+            Error::TaskFailed { name, message } => {
+                assert_eq!(name, "test-task");
+                assert!(message.contains("exit 1"));
+            }
+            _ => panic!("expected Error::TaskFailed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_hooks_stops_on_first_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("sentinel");
+        let hooks = vec!["exit 1".into(), format!("touch {}", sentinel.display())];
+        let _ = run_hooks("test-task", &hooks, dir.path(), "pre").await;
+        assert!(!sentinel.exists(), "second hook should not have run");
+    }
+
+    #[tokio::test]
+    async fn pre_hooks_empty_list_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        run_hooks("test-task", &[], dir.path(), "pre")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn post_hooks_success() {
         let dir = tempfile::tempdir().unwrap();
-        run_post_hooks("test-task", &["echo hello".into()], dir.path())
+        run_hooks("test-task", &["echo hello".into()], dir.path(), "post")
             .await
             .unwrap();
     }
@@ -491,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn post_hooks_failure_returns_task_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_post_hooks("test-task", &["exit 1".into()], dir.path())
+        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "post")
             .await
             .unwrap_err();
         match err {
@@ -508,14 +555,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("sentinel");
         let hooks = vec!["exit 1".into(), format!("touch {}", sentinel.display())];
-        let _ = run_post_hooks("test-task", &hooks, dir.path()).await;
+        let _ = run_hooks("test-task", &hooks, dir.path(), "post").await;
         assert!(!sentinel.exists(), "second hook should not have run");
     }
 
     #[tokio::test]
     async fn post_hooks_empty_list_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        run_post_hooks("test-task", &[], dir.path()).await.unwrap();
+        run_hooks("test-task", &[], dir.path(), "post")
+            .await
+            .unwrap();
     }
 
     #[test]
