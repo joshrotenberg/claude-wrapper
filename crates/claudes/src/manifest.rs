@@ -148,6 +148,10 @@ pub struct Task {
     /// Environment variables.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+
+    /// Shell commands to run after the task completes successfully.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_hooks: Option<Vec<String>>,
 }
 
 impl Task {
@@ -174,6 +178,7 @@ impl Task {
             isolation: None,
             branch: None,
             env: None,
+            post_hooks: None,
         }
     }
 
@@ -207,6 +212,14 @@ impl Task {
             && budget <= 0.0
         {
             errors.push("max_budget_usd must be positive".into());
+        }
+
+        if let Some(hooks) = &self.post_hooks {
+            for (i, hook) in hooks.iter().enumerate() {
+                if hook.is_empty() {
+                    errors.push(format!("post_hooks[{i}] must not be empty"));
+                }
+            }
         }
 
         if errors.is_empty() {
@@ -353,6 +366,12 @@ impl TaskBuilder {
     /// Set environment variables.
     pub fn env(mut self, env: HashMap<String, String>) -> Self {
         self.task.env = Some(env);
+        self
+    }
+
+    /// Set shell commands to run after the task completes successfully.
+    pub fn post_hooks(mut self, post_hooks: Vec<String>) -> Self {
+        self.task.post_hooks = Some(post_hooks);
         self
     }
 
@@ -510,6 +529,7 @@ mod tests {
             .isolation(Isolation::None)
             .branch("feat/t")
             .env(env.clone())
+            .post_hooks(vec!["echo done".into()])
             .build();
 
         assert_eq!(task.model.as_deref(), Some("claude-opus-4-6"));
@@ -542,6 +562,10 @@ mod tests {
         assert!(matches!(task.isolation, Some(Isolation::None)));
         assert_eq!(task.branch.as_deref(), Some("feat/t"));
         assert_eq!(task.env, Some(env));
+        assert_eq!(
+            task.post_hooks.as_deref(),
+            Some(["echo done".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -561,6 +585,41 @@ mod tests {
         let manifest = Manifest::new(vec![task]);
         let errs = manifest.validate().unwrap_err();
         assert!(errs.iter().any(|e| e.contains("invalid effort")));
+    }
+
+    #[test]
+    fn validate_empty_post_hook_entry() {
+        let mut task = Task::new("t", "prompt");
+        task.post_hooks = Some(vec!["echo ok".into(), "".into()]);
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("post_hooks[1]")));
+    }
+
+    #[test]
+    fn validate_valid_post_hooks() {
+        let mut task = Task::new("t", "prompt");
+        task.post_hooks = Some(vec!["echo ok".into(), "cargo fmt".into()]);
+        let manifest = Manifest::new(vec![task]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn task_builder_post_hooks() {
+        let task = TaskBuilder::new("t", "p")
+            .post_hooks(vec!["echo done".into()])
+            .build();
+        assert_eq!(
+            task.post_hooks.as_deref(),
+            Some(["echo done".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn skip_serializing_post_hooks_when_none() {
+        let task = Task::new("minimal", "just a prompt");
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("post_hooks"));
     }
 
     #[test]
