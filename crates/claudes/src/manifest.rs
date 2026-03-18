@@ -52,6 +52,10 @@ pub struct Manifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared: Option<Shared>,
 
+    /// Named Shared presets that tasks can reference via their `profile` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<HashMap<String, Shared>>,
+
     /// One or more tasks to execute.
     pub tasks: Vec<Task>,
 }
@@ -63,86 +67,161 @@ impl Manifest {
             version: 1,
             created_at: Utc::now(),
             shared: None,
+            profiles: None,
             tasks,
         }
     }
 
-    /// Return a new `Manifest` where each task has been merged with `shared` defaults.
+    /// Return a new `Manifest` where each task has been merged with profile and shared defaults.
     ///
-    /// Task-level fields take precedence. `None` task fields inherit from `shared`.
-    /// `post_hooks` are special: shared hooks are prepended to task-level hooks.
+    /// Merge order: task fields > profile fields > shared fields.
+    /// `pre_hooks` and `post_hooks` are concatenated: shared hooks, then profile hooks, then task hooks.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a task references a profile that does not exist in `self.profiles`.
+    /// Always call [`Manifest::validate`] before `resolve` to catch this early.
     pub fn resolve(&self) -> Manifest {
+        fn merge_hooks(
+            s: Option<&Vec<String>>,
+            p: Option<&Vec<String>>,
+            t: Option<&Vec<String>>,
+        ) -> Option<Vec<String>> {
+            let mut merged: Vec<String> = Vec::new();
+            if let Some(hooks) = s {
+                merged.extend(hooks.iter().cloned());
+            }
+            if let Some(hooks) = p {
+                merged.extend(hooks.iter().cloned());
+            }
+            if let Some(hooks) = t {
+                merged.extend(hooks.iter().cloned());
+            }
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
+        }
+
         let tasks = self
             .tasks
             .iter()
             .map(|task| {
-                let Some(shared) = &self.shared else {
-                    return task.clone();
-                };
+                let profile: Option<&Shared> = task.profile.as_ref().map(|name| {
+                    self.profiles
+                        .as_ref()
+                        .and_then(|m| m.get(name.as_str()))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "task '{}' references unknown profile '{name}'; \
+                                 call validate() before resolve()",
+                                task.name
+                            )
+                        })
+                });
+                let shared = self.shared.as_ref();
+
                 Task {
                     name: task.name.clone(),
                     prompt: task.prompt.clone(),
                     prompt_file: task.prompt_file.clone(),
-                    model: task.model.clone().or_else(|| shared.model.clone()),
+                    profile: task.profile.clone(),
+                    model: task
+                        .model
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.model.clone()))
+                        .or_else(|| shared.and_then(|s| s.model.clone())),
                     fallback_model: task.fallback_model.clone(),
-                    max_turns: task.max_turns.or(shared.max_turns),
-                    timeout_secs: task.timeout_secs.or(shared.timeout_secs),
-                    max_budget_usd: task.max_budget_usd.or(shared.max_budget_usd),
+                    max_turns: task
+                        .max_turns
+                        .or_else(|| profile.and_then(|p| p.max_turns))
+                        .or_else(|| shared.and_then(|s| s.max_turns)),
+                    timeout_secs: task
+                        .timeout_secs
+                        .or_else(|| profile.and_then(|p| p.timeout_secs))
+                        .or_else(|| shared.and_then(|s| s.timeout_secs)),
+                    max_budget_usd: task
+                        .max_budget_usd
+                        .or_else(|| profile.and_then(|p| p.max_budget_usd))
+                        .or_else(|| shared.and_then(|s| s.max_budget_usd)),
                     permission_mode: task
                         .permission_mode
                         .clone()
-                        .or_else(|| shared.permission_mode.clone()),
+                        .or_else(|| profile.and_then(|p| p.permission_mode.clone()))
+                        .or_else(|| shared.and_then(|s| s.permission_mode.clone())),
                     allowed_tools: task
                         .allowed_tools
                         .clone()
-                        .or_else(|| shared.allowed_tools.clone()),
+                        .or_else(|| profile.and_then(|p| p.allowed_tools.clone()))
+                        .or_else(|| shared.and_then(|s| s.allowed_tools.clone())),
                     disallowed_tools: task
                         .disallowed_tools
                         .clone()
-                        .or_else(|| shared.disallowed_tools.clone()),
+                        .or_else(|| profile.and_then(|p| p.disallowed_tools.clone()))
+                        .or_else(|| shared.and_then(|s| s.disallowed_tools.clone())),
                     system_prompt: task
                         .system_prompt
                         .clone()
-                        .or_else(|| shared.system_prompt.clone()),
+                        .or_else(|| profile.and_then(|p| p.system_prompt.clone()))
+                        .or_else(|| shared.and_then(|s| s.system_prompt.clone())),
                     append_system_prompt: task
                         .append_system_prompt
                         .clone()
-                        .or_else(|| shared.append_system_prompt.clone()),
+                        .or_else(|| profile.and_then(|p| p.append_system_prompt.clone()))
+                        .or_else(|| shared.and_then(|s| s.append_system_prompt.clone())),
                     append_system_prompt_file: task
                         .append_system_prompt_file
                         .clone()
-                        .or_else(|| shared.append_system_prompt_file.clone()),
-                    effort: task.effort.clone().or_else(|| shared.effort.clone()),
+                        .or_else(|| shared.and_then(|s| s.append_system_prompt_file.clone())),
+                    effort: task
+                        .effort
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.effort.clone()))
+                        .or_else(|| shared.and_then(|s| s.effort.clone())),
                     no_session_persistence: task
                         .no_session_persistence
-                        .or(shared.no_session_persistence),
+                        .or_else(|| profile.and_then(|p| p.no_session_persistence))
+                        .or_else(|| shared.and_then(|s| s.no_session_persistence)),
                     mcp_config: task
                         .mcp_config
                         .clone()
-                        .or_else(|| shared.mcp_config.clone()),
-                    strict_mcp_config: task.strict_mcp_config.or(shared.strict_mcp_config),
-                    add_dirs: task.add_dirs.clone().or_else(|| shared.add_dirs.clone()),
-                    isolation: task.isolation.clone().or_else(|| shared.isolation.clone()),
-                    branch: task.branch.clone().or_else(|| shared.branch.clone()),
-                    env: task.env.clone().or_else(|| shared.env.clone()),
-                    pre_hooks: match (&shared.pre_hooks, &task.pre_hooks) {
-                        (Some(s), Some(t)) => {
-                            let mut merged = s.clone();
-                            merged.extend(t.iter().cloned());
-                            Some(merged)
-                        }
-                        (Some(s), None) => Some(s.clone()),
-                        (None, t) => t.clone(),
-                    },
-                    post_hooks: match (&shared.post_hooks, &task.post_hooks) {
-                        (Some(s), Some(t)) => {
-                            let mut merged = s.clone();
-                            merged.extend(t.iter().cloned());
-                            Some(merged)
-                        }
-                        (Some(s), None) => Some(s.clone()),
-                        (None, t) => t.clone(),
-                    },
+                        .or_else(|| profile.and_then(|p| p.mcp_config.clone()))
+                        .or_else(|| shared.and_then(|s| s.mcp_config.clone())),
+                    strict_mcp_config: task
+                        .strict_mcp_config
+                        .or_else(|| profile.and_then(|p| p.strict_mcp_config))
+                        .or_else(|| shared.and_then(|s| s.strict_mcp_config)),
+                    add_dirs: task
+                        .add_dirs
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.add_dirs.clone()))
+                        .or_else(|| shared.and_then(|s| s.add_dirs.clone())),
+                    isolation: task
+                        .isolation
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.isolation.clone()))
+                        .or_else(|| shared.and_then(|s| s.isolation.clone())),
+                    branch: task
+                        .branch
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.branch.clone()))
+                        .or_else(|| shared.and_then(|s| s.branch.clone())),
+                    env: task
+                        .env
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.env.clone()))
+                        .or_else(|| shared.and_then(|s| s.env.clone())),
+                    pre_hooks: merge_hooks(
+                        shared.and_then(|s| s.pre_hooks.as_ref()),
+                        profile.and_then(|p| p.pre_hooks.as_ref()),
+                        task.pre_hooks.as_ref(),
+                    ),
+                    post_hooks: merge_hooks(
+                        shared.and_then(|s| s.post_hooks.as_ref()),
+                        profile.and_then(|p| p.post_hooks.as_ref()),
+                        task.post_hooks.as_ref(),
+                    ),
                 }
             })
             .collect();
@@ -151,6 +230,7 @@ impl Manifest {
             version: self.version,
             created_at: self.created_at,
             shared: self.shared.clone(),
+            profiles: self.profiles.clone(),
             tasks,
         }
     }
@@ -368,6 +448,20 @@ impl Manifest {
         }
 
         for task in &self.tasks {
+            if let Some(profile_name) = &task.profile {
+                let exists = self
+                    .profiles
+                    .as_ref()
+                    .map(|m| m.contains_key(profile_name.as_str()))
+                    .unwrap_or(false);
+                if !exists {
+                    errors.push(format!(
+                        "task '{}' references unknown profile '{profile_name}'",
+                        task.name
+                    ));
+                }
+            }
+
             if let Err(task_errors) = task.validate() {
                 for e in task_errors {
                     errors.push(format!("task '{}': {}", task.name, e));
@@ -487,6 +581,10 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_file: Option<String>,
 
+    /// Named profile to apply to this task (resolved before execution).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
     /// Model alias or full ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -578,6 +676,7 @@ impl Task {
         Self {
             name: name.into(),
             prompt: prompt.into(),
+            profile: None,
             model: None,
             fallback_model: None,
             max_turns: None,
@@ -697,6 +796,12 @@ impl TaskBuilder {
         Self {
             task: Task::new(name, prompt),
         }
+    }
+
+    /// Set the named profile for this task.
+    pub fn profile(mut self, profile: impl Into<String>) -> Self {
+        self.task.profile = Some(profile.into());
+        self
     }
 
     /// Set the model alias or full model ID.
@@ -1677,5 +1782,100 @@ prompt = "do it"
         let resolved = manifest.resolve();
         assert_eq!(resolved.tasks[0].model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(resolved.tasks[0].max_turns, Some(5));
+    }
+
+    #[test]
+    fn resolve_task_with_profile() {
+        let mut task = Task::new("t1", "do it");
+        task.profile = Some("fast".into());
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            model: Some("opus".into()),
+            max_turns: Some(10),
+            ..Default::default()
+        });
+        manifest.profiles = Some({
+            let mut m = HashMap::new();
+            m.insert(
+                "fast".into(),
+                Shared {
+                    max_turns: Some(3),
+                    effort: Some("low".into()),
+                    ..Default::default()
+                },
+            );
+            m
+        });
+
+        let resolved = manifest.resolve();
+        let task = &resolved.tasks[0];
+        // Profile max_turns overrides shared max_turns.
+        assert_eq!(task.max_turns, Some(3));
+        // Profile effort is applied.
+        assert_eq!(task.effort.as_deref(), Some("low"));
+        // Model falls through to shared.
+        assert_eq!(task.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn resolve_profile_overrides_shared() {
+        let mut task = Task::new("t1", "do it");
+        task.profile = Some("fast".into());
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            max_turns: Some(10),
+            ..Default::default()
+        });
+        manifest.profiles = Some({
+            let mut m = HashMap::new();
+            m.insert(
+                "fast".into(),
+                Shared {
+                    max_turns: Some(3),
+                    ..Default::default()
+                },
+            );
+            m
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(resolved.tasks[0].max_turns, Some(3));
+    }
+
+    #[test]
+    fn resolve_task_overrides_profile() {
+        let mut task = Task::new("t1", "do it");
+        task.profile = Some("fast".into());
+        task.max_turns = Some(20);
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.profiles = Some({
+            let mut m = HashMap::new();
+            m.insert(
+                "fast".into(),
+                Shared {
+                    max_turns: Some(3),
+                    ..Default::default()
+                },
+            );
+            m
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(resolved.tasks[0].max_turns, Some(20));
+    }
+
+    #[test]
+    fn validate_missing_profile_error() {
+        let mut task = Task::new("t1", "do it");
+        task.profile = Some("nonexistent".into());
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("unknown profile")));
+    }
+
+    #[test]
+    fn validate_no_profiles_is_fine() {
+        let manifest = Manifest::new(vec![Task::new("t1", "do it")]);
+        assert!(manifest.validate().is_ok());
     }
 }

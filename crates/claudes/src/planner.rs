@@ -44,6 +44,8 @@ pub struct PlanOptions {
     pub isolation: Option<String>,
     /// Isolation base dir.
     pub isolation_base_dir: Option<String>,
+    /// Profile name to apply to all generated tasks.
+    pub profile: Option<String>,
 }
 
 impl PlanOptions {
@@ -92,6 +94,7 @@ pub struct PlanOptionsBuilder {
     no_session_persistence: Option<bool>,
     isolation: Option<String>,
     isolation_base_dir: Option<String>,
+    profile: Option<String>,
 }
 
 impl PlanOptionsBuilder {
@@ -196,6 +199,12 @@ impl PlanOptionsBuilder {
         self
     }
 
+    /// Profile name to apply to all generated tasks.
+    pub fn profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
     /// Build the [`PlanOptions`].
     pub fn build(self) -> PlanOptions {
         PlanOptions {
@@ -215,6 +224,7 @@ impl PlanOptionsBuilder {
             no_session_persistence: self.no_session_persistence,
             isolation: self.isolation,
             isolation_base_dir: self.isolation_base_dir,
+            profile: self.profile,
         }
     }
 }
@@ -248,6 +258,7 @@ pub fn plan(options: &PlanOptions) -> Manifest {
             Task {
                 name,
                 prompt: prompt.clone(),
+                profile: options.profile.clone(),
                 model: options.model.clone(),
                 fallback_model: options.fallback_model.clone(),
                 max_turns: options.max_turns,
@@ -496,6 +507,7 @@ mod tests {
         assert!(opts.no_session_persistence.is_none());
         assert!(opts.isolation.is_none());
         assert!(opts.isolation_base_dir.is_none());
+        assert!(opts.profile.is_none());
     }
 
     #[test]
