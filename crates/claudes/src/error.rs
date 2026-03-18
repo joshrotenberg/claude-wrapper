@@ -31,6 +31,10 @@ pub enum Error {
     /// JSON serialization/deserialization error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// TOML deserialization error.
+    #[error("toml error: {0}")]
+    Toml(#[from] toml::de::Error),
 }
 
 /// Result type alias for claudes operations.

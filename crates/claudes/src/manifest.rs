@@ -5,6 +5,7 @@
 //! What you see is what executes.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,24 @@ impl Manifest {
             created_at: self.created_at,
             shared: self.shared.clone(),
             tasks,
+        }
+    }
+
+    /// Parse a manifest from a TOML string.
+    pub fn from_toml(s: &str) -> Result<Manifest, crate::Error> {
+        Ok(toml::from_str(s)?)
+    }
+
+    /// Parse a manifest from a file, detecting format by extension (`.json` or `.toml`).
+    pub fn from_file(path: &Path) -> Result<Manifest, crate::Error> {
+        let contents = std::fs::read_to_string(path)?;
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => Ok(serde_json::from_str(&contents)?),
+            Some("toml") => Ok(toml::from_str(&contents)?),
+            _ => Err(crate::Error::InvalidManifest(format!(
+                "unknown file extension: {}",
+                path.display()
+            ))),
         }
     }
 
@@ -877,6 +896,98 @@ mod tests {
             resolved.tasks[0].post_hooks.as_deref(),
             Some(["echo shared".to_string()].as_slice())
         );
+    }
+
+    #[test]
+    fn from_toml_with_tasks() {
+        let toml = r#"
+version = 1
+created_at = "2026-03-18T10:30:00Z"
+
+[[tasks]]
+name = "fix-bug"
+prompt = "Fix the bug in main.rs"
+
+[[tasks]]
+name = "add-tests"
+prompt = "Add unit tests"
+"#;
+        let manifest = Manifest::from_toml(toml).unwrap();
+        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.tasks.len(), 2);
+        assert_eq!(manifest.tasks[0].name, "fix-bug");
+        assert_eq!(manifest.tasks[1].name, "add-tests");
+        assert!(manifest.shared.is_none());
+    }
+
+    #[test]
+    fn from_toml_with_shared_block() {
+        let toml = r#"
+version = 1
+created_at = "2026-03-18T10:30:00Z"
+
+[shared]
+model = "claude-opus-4-6"
+max_turns = 5
+
+[[tasks]]
+name = "t1"
+prompt = "do it"
+"#;
+        let manifest = Manifest::from_toml(toml).unwrap();
+        assert_eq!(manifest.tasks.len(), 1);
+        let shared = manifest.shared.as_ref().unwrap();
+        assert_eq!(shared.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(shared.max_turns, Some(5));
+    }
+
+    #[test]
+    fn from_toml_invalid_returns_error() {
+        let result = Manifest::from_toml("not valid toml [[[");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("toml error"));
+    }
+
+    #[test]
+    fn from_file_toml() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+        write!(
+            f,
+            r#"version = 1
+created_at = "2026-03-18T10:30:00Z"
+
+[[tasks]]
+name = "t1"
+prompt = "do it"
+"#
+        )
+        .unwrap();
+        let manifest = Manifest::from_file(f.path()).unwrap();
+        assert_eq!(manifest.tasks[0].name, "t1");
+    }
+
+    #[test]
+    fn from_file_json() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        write!(
+            f,
+            r#"{{"version":1,"created_at":"2026-03-18T10:30:00Z","tasks":[{{"name":"t1","prompt":"do it"}}]}}"#
+        )
+        .unwrap();
+        let manifest = Manifest::from_file(f.path()).unwrap();
+        assert_eq!(manifest.tasks[0].name, "t1");
+    }
+
+    #[test]
+    fn from_file_unknown_extension_errors() {
+        use std::io::Write;
+        let mut f = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        write!(f, "").unwrap();
+        let err = Manifest::from_file(f.path()).unwrap_err().to_string();
+        assert!(err.contains("unknown file extension"));
     }
 
     #[test]
