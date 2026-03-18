@@ -5,6 +5,7 @@ use std::io::Write;
 use tokio::sync::mpsc;
 
 use crate::runner::{RunResult, TaskEvent, TaskResult};
+use crate::state::is_timeout;
 
 /// Verbosity level for streaming output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -78,7 +79,13 @@ fn print_text_summary(result: &RunResult) {
 }
 
 fn print_task_result(out: &mut impl Write, task: &TaskResult) {
-    let status = if task.success { "complete" } else { "FAILED" };
+    let status = if task.success {
+        "complete"
+    } else if is_timeout(&task.stdout, &task.stderr) {
+        "TIMEOUT"
+    } else {
+        "FAILED"
+    };
     let duration = format!("{:.0}s", task.duration.as_secs_f64());
 
     let _ = writeln!(

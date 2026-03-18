@@ -93,6 +93,8 @@ pub enum TaskStatus {
     Success,
     /// Task failed.
     Failed,
+    /// Task hit the max_turns limit.
+    Timeout,
 }
 
 /// Summary statistics for the entire run.
@@ -104,6 +106,9 @@ pub struct RunSummary {
     pub succeeded: usize,
     /// Number of failed tasks.
     pub failed: usize,
+    /// Number of timed-out tasks (max_turns exceeded).
+    #[serde(default)]
+    pub timed_out: usize,
     /// Wall-clock duration in seconds (max of all tasks).
     pub wall_time_secs: f64,
     /// Total cost across all tasks (if available).
@@ -144,6 +149,14 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
                 .find(|mt| mt.name == t.name)
                 .and_then(|mt| mt.branch.clone());
 
+            let status = if t.success {
+                TaskStatus::Success
+            } else if is_timeout(&t.stdout, &t.stderr) {
+                TaskStatus::Timeout
+            } else {
+                TaskStatus::Failed
+            };
+
             let error = if t.success {
                 None
             } else {
@@ -152,11 +165,7 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
 
             TaskState {
                 name: t.name.clone(),
-                status: if t.success {
-                    TaskStatus::Success
-                } else {
-                    TaskStatus::Failed
-                },
+                status,
                 duration_secs: t.duration.as_secs_f64(),
                 work_dir: t.work_dir.to_string_lossy().to_string(),
                 branch,
@@ -184,10 +193,20 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
         .max_by(|a, b| a.partial_cmp(b).unwrap())
         .unwrap_or(0.0);
 
+    let timed_out = results
+        .iter()
+        .filter(|r| r.status == TaskStatus::Timeout)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == TaskStatus::Failed)
+        .count();
+
     let summary = RunSummary {
         total: result.tasks.len(),
         succeeded: result.success_count(),
-        failed: result.tasks.len() - result.success_count(),
+        failed,
+        timed_out,
         wall_time_secs: wall_time,
         total_cost_usd: total_cost,
     };
@@ -256,6 +275,22 @@ pub fn list_runs(project_dir: &Path) -> Vec<RunState> {
     runs
 }
 
+/// Detect whether a task result represents a timeout (max_turns exceeded).
+///
+/// Returns true if stderr contains "max_turns" or if the stdout JSON has
+/// `subtype == "error_max_turns"`.
+pub(crate) fn is_timeout(stdout: &str, stderr: &str) -> bool {
+    if stderr.contains("max_turns") {
+        return true;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout)
+        && v.get("subtype").and_then(|s| s.as_str()) == Some("error_max_turns")
+    {
+        return true;
+    }
+    false
+}
+
 /// Try to parse cost, session_id, and result text from claude JSON output.
 fn parse_task_output(stdout: &str) -> (Option<f64>, Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) else {
@@ -312,10 +347,14 @@ pub fn print_status(state: &RunState) {
         state.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
         state.completed_at.format("%H:%M:%S UTC"),
     );
-    println!(
+    let mut summary_line = format!(
         "Tasks: {}/{} succeeded | Wall time: {:.1}s",
         state.summary.succeeded, state.summary.total, state.summary.wall_time_secs,
     );
+    if state.summary.timed_out > 0 {
+        summary_line.push_str(&format!(" | {} timed out", state.summary.timed_out));
+    }
+    println!("{summary_line}");
     if let Some(cost) = state.summary.total_cost_usd {
         println!("Cost: ${cost:.4}");
     }
@@ -331,6 +370,7 @@ pub fn print_status(state: &RunState) {
         let status = match task.status {
             TaskStatus::Success => "ok",
             TaskStatus::Failed => "FAILED",
+            TaskStatus::Timeout => "TIMEOUT",
         };
         let cost = task
             .cost_usd
@@ -580,6 +620,43 @@ mod tests {
     fn list_runs_empty_when_no_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(list_runs(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn build_state_detects_timeout() {
+        let manifest = Manifest::new(vec![Task::new("timeout-task", "runs too long")]);
+
+        // Detected via stderr containing 'max_turns'.
+        let result_stderr = RunResult {
+            tasks: vec![TaskResult {
+                name: "timeout-task".into(),
+                success: false,
+                stdout: String::new(),
+                stderr: "reached max_turns limit".into(),
+                duration: Duration::from_secs(60),
+                work_dir: PathBuf::from("/tmp"),
+            }],
+        };
+        let state = build_state(&manifest, &result_stderr, Utc::now());
+        assert_eq!(state.results[0].status, TaskStatus::Timeout);
+        assert_eq!(state.summary.timed_out, 1);
+        assert_eq!(state.summary.failed, 0);
+
+        // Detected via stdout JSON subtype 'error_max_turns'.
+        let result_stdout = RunResult {
+            tasks: vec![TaskResult {
+                name: "timeout-task".into(),
+                success: false,
+                stdout: r#"{"subtype":"error_max_turns","result":""}"#.into(),
+                stderr: String::new(),
+                duration: Duration::from_secs(60),
+                work_dir: PathBuf::from("/tmp"),
+            }],
+        };
+        let state2 = build_state(&manifest, &result_stdout, Utc::now());
+        assert_eq!(state2.results[0].status, TaskStatus::Timeout);
+        assert_eq!(state2.summary.timed_out, 1);
+        assert_eq!(state2.summary.failed, 0);
     }
 
     #[test]
