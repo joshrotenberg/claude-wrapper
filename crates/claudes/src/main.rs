@@ -192,7 +192,19 @@ async fn cmd_plan(args: claudes::cli::PlanArgs) -> ExitCode {
 async fn cmd_status(args: claudes::cli::StatusArgs) -> ExitCode {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    match claudes::state::load(&project_dir) {
+    if args.list {
+        let runs = claudes::state::list_runs(&project_dir);
+        claudes::state::print_status_list(&runs);
+        return ExitCode::SUCCESS;
+    }
+
+    let state = if let Some(run_id) = &args.run_id {
+        claudes::state::load_run(&project_dir, run_id)
+    } else {
+        claudes::state::load(&project_dir)
+    };
+
+    match state {
         Some(state) => {
             if args.json {
                 claudes::state::print_status_json(&state);

@@ -159,6 +159,7 @@ impl RunOptionsBuilder {
             binary: self.binary,
             env: self.env,
             cleanup: self.cleanup,
+            event_sender: None,
         }
     }
 }
