@@ -217,6 +217,151 @@ impl Task {
     }
 }
 
+/// Builder for [`Task`].
+///
+/// Required fields (`name` and `prompt`) are passed to [`TaskBuilder::new`].
+/// All other fields are optional and set via chained setter methods.
+///
+/// # Example
+///
+/// ```
+/// use claudes::manifest::TaskBuilder;
+///
+/// let task = TaskBuilder::new("fix-bug", "Fix the bug in main.rs")
+///     .model("claude-opus-4-6")
+///     .max_turns(10)
+///     .build();
+///
+/// assert_eq!(task.name, "fix-bug");
+/// assert_eq!(task.model.as_deref(), Some("claude-opus-4-6"));
+/// assert_eq!(task.max_turns, Some(10));
+/// ```
+pub struct TaskBuilder {
+    task: Task,
+}
+
+impl TaskBuilder {
+    /// Create a new builder with the required `name` and `prompt`.
+    pub fn new(name: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            task: Task::new(name, prompt),
+        }
+    }
+
+    /// Set the model alias or full model ID.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.task.model = Some(model.into());
+        self
+    }
+
+    /// Set the fallback model.
+    pub fn fallback_model(mut self, fallback_model: impl Into<String>) -> Self {
+        self.task.fallback_model = Some(fallback_model.into());
+        self
+    }
+
+    /// Set the conversation turn limit.
+    pub fn max_turns(mut self, max_turns: u32) -> Self {
+        self.task.max_turns = Some(max_turns);
+        self
+    }
+
+    /// Set the process timeout in seconds.
+    pub fn timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.task.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    /// Set the spending cap in USD.
+    pub fn max_budget_usd(mut self, max_budget_usd: f64) -> Self {
+        self.task.max_budget_usd = Some(max_budget_usd);
+        self
+    }
+
+    /// Set the permission mode.
+    pub fn permission_mode(mut self, permission_mode: impl Into<String>) -> Self {
+        self.task.permission_mode = Some(permission_mode.into());
+        self
+    }
+
+    /// Set the tool allow list.
+    pub fn allowed_tools(mut self, allowed_tools: Vec<String>) -> Self {
+        self.task.allowed_tools = Some(allowed_tools);
+        self
+    }
+
+    /// Set the tool deny list.
+    pub fn disallowed_tools(mut self, disallowed_tools: Vec<String>) -> Self {
+        self.task.disallowed_tools = Some(disallowed_tools);
+        self
+    }
+
+    /// Replace the default system prompt entirely.
+    pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.task.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    /// Append to the default system prompt.
+    pub fn append_system_prompt(mut self, append_system_prompt: impl Into<String>) -> Self {
+        self.task.append_system_prompt = Some(append_system_prompt.into());
+        self
+    }
+
+    /// Set the effort level (`"low"`, `"medium"`, or `"high"`).
+    pub fn effort(mut self, effort: impl Into<String>) -> Self {
+        self.task.effort = Some(effort.into());
+        self
+    }
+
+    /// Disable session state persistence.
+    pub fn no_session_persistence(mut self, no_session_persistence: bool) -> Self {
+        self.task.no_session_persistence = Some(no_session_persistence);
+        self
+    }
+
+    /// Set the path to the MCP config file.
+    pub fn mcp_config(mut self, mcp_config: impl Into<String>) -> Self {
+        self.task.mcp_config = Some(mcp_config.into());
+        self
+    }
+
+    /// Only use MCP servers from the config file.
+    pub fn strict_mcp_config(mut self, strict_mcp_config: bool) -> Self {
+        self.task.strict_mcp_config = Some(strict_mcp_config);
+        self
+    }
+
+    /// Set additional accessible directories.
+    pub fn add_dirs(mut self, add_dirs: Vec<String>) -> Self {
+        self.task.add_dirs = Some(add_dirs);
+        self
+    }
+
+    /// Set the isolation strategy.
+    pub fn isolation(mut self, isolation: Isolation) -> Self {
+        self.task.isolation = Some(isolation);
+        self
+    }
+
+    /// Set the git branch name for this task.
+    pub fn branch(mut self, branch: impl Into<String>) -> Self {
+        self.task.branch = Some(branch.into());
+        self
+    }
+
+    /// Set environment variables.
+    pub fn env(mut self, env: HashMap<String, String>) -> Self {
+        self.task.env = Some(env);
+        self
+    }
+
+    /// Build the [`Task`].
+    pub fn build(self) -> Task {
+        self.task
+    }
+}
+
 /// Isolation strategy for task execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -332,6 +477,90 @@ mod tests {
         assert!(!obj.contains_key("model"));
         assert!(!obj.contains_key("isolation"));
         assert!(!obj.contains_key("env"));
+    }
+
+    #[test]
+    fn task_builder_required_fields() {
+        let task = TaskBuilder::new("my-task", "do something").build();
+        assert_eq!(task.name, "my-task");
+        assert_eq!(task.prompt, "do something");
+        assert!(task.model.is_none());
+        assert!(task.max_turns.is_none());
+    }
+
+    #[test]
+    fn task_builder_all_optional_fields() {
+        let env: HashMap<String, String> = [("KEY".into(), "val".into())].into();
+        let task = TaskBuilder::new("t", "p")
+            .model("claude-opus-4-6")
+            .fallback_model("claude-haiku-4-5-20251001")
+            .max_turns(5)
+            .timeout_secs(120)
+            .max_budget_usd(1.5)
+            .permission_mode("bypassPermissions")
+            .allowed_tools(vec!["Bash".into()])
+            .disallowed_tools(vec!["Write".into()])
+            .system_prompt("sys")
+            .append_system_prompt("append")
+            .effort("high")
+            .no_session_persistence(true)
+            .mcp_config("/etc/mcp.json")
+            .strict_mcp_config(true)
+            .add_dirs(vec!["/tmp".into()])
+            .isolation(Isolation::None)
+            .branch("feat/t")
+            .env(env.clone())
+            .build();
+
+        assert_eq!(task.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(
+            task.fallback_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(task.max_turns, Some(5));
+        assert_eq!(task.timeout_secs, Some(120));
+        assert_eq!(task.max_budget_usd, Some(1.5));
+        assert_eq!(task.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(
+            task.allowed_tools.as_deref(),
+            Some(["Bash".to_string()].as_slice())
+        );
+        assert_eq!(
+            task.disallowed_tools.as_deref(),
+            Some(["Write".to_string()].as_slice())
+        );
+        assert_eq!(task.system_prompt.as_deref(), Some("sys"));
+        assert_eq!(task.append_system_prompt.as_deref(), Some("append"));
+        assert_eq!(task.effort.as_deref(), Some("high"));
+        assert_eq!(task.no_session_persistence, Some(true));
+        assert_eq!(task.mcp_config.as_deref(), Some("/etc/mcp.json"));
+        assert_eq!(task.strict_mcp_config, Some(true));
+        assert_eq!(
+            task.add_dirs.as_deref(),
+            Some(["/tmp".to_string()].as_slice())
+        );
+        assert!(matches!(task.isolation, Some(Isolation::None)));
+        assert_eq!(task.branch.as_deref(), Some("feat/t"));
+        assert_eq!(task.env, Some(env));
+    }
+
+    #[test]
+    fn task_builder_produces_valid_task() {
+        let task = TaskBuilder::new("valid", "do the thing")
+            .effort("low")
+            .permission_mode("default")
+            .max_budget_usd(5.0)
+            .build();
+        let manifest = Manifest::new(vec![task]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn task_builder_invalid_effort_fails_validation() {
+        let task = TaskBuilder::new("t", "p").effort("turbo").build();
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("invalid effort")));
     }
 
     #[test]
