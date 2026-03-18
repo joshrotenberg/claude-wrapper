@@ -281,6 +281,7 @@ pub fn plan(options: &PlanOptions) -> Manifest {
                 env: None,
                 pre_hooks: None,
                 post_hooks: None,
+                finally_hooks: None,
             }
         })
         .collect();
