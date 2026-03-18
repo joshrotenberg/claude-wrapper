@@ -104,6 +104,10 @@ pub struct RunArgs {
     /// Auto-cleanup worktrees after run (none|on-success|always; default: none).
     #[arg(long, default_value = "none")]
     pub cleanup: String,
+
+    /// Increase output verbosity (repeat for more detail: -v, -vv).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 /// Arguments for `claudes status`.
