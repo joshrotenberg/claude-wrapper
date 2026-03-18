@@ -32,6 +32,8 @@ pub struct TaskResult {
     pub duration: Duration,
     /// Working directory where the task ran.
     pub work_dir: PathBuf,
+    /// Cost in USD aggregated from stream events (or parsed from stdout as fallback).
+    pub cost_usd: Option<f64>,
 }
 
 /// Result of executing an entire manifest.
@@ -230,14 +232,26 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
     let task_name = task.name.clone();
 
     match run_task_inner(task, options).await {
-        Ok((output, env)) => TaskResult {
-            name: task_name,
-            success: output.success,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            duration: start.elapsed(),
-            work_dir: env.work_dir,
-        },
+        Ok((output, env, stream_cost)) => {
+            let cost_usd = stream_cost.or_else(|| {
+                serde_json::from_str::<serde_json::Value>(&output.stdout)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("total_cost_usd")
+                            .or_else(|| v.get("cost_usd"))
+                            .and_then(|c| c.as_f64())
+                    })
+            });
+            TaskResult {
+                name: task_name,
+                success: output.success,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                duration: start.elapsed(),
+                work_dir: env.work_dir,
+                cost_usd,
+            }
+        }
         Err(e) => {
             error!(task = task_name, error = %e, "task failed");
             TaskResult {
@@ -247,16 +261,21 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                 stderr: e.to_string(),
                 duration: start.elapsed(),
                 work_dir: options.project_dir.to_path_buf(),
+                cost_usd: None,
             }
         }
     }
 }
 
-/// Inner task execution — returns the command output and isolation env.
+/// Inner task execution — returns the command output, isolation env, and stream-aggregated cost.
 async fn run_task_inner(
     task: &Task,
     options: &RunOptions,
-) -> Result<(claude_wrapper::exec::CommandOutput, IsolatedEnv)> {
+) -> Result<(
+    claude_wrapper::exec::CommandOutput,
+    IsolatedEnv,
+    Option<f64>,
+)> {
     let project_dir = &options.project_dir;
     let force = options.force;
 
@@ -333,7 +352,7 @@ async fn run_task_inner(
     let cmd = build_query_command(task);
 
     // Execute: streaming if event_sender is available, otherwise batch.
-    let output = if let Some(sender) = &options.event_sender {
+    let execution_result = if let Some(sender) = &options.event_sender {
         let task_name = task.name.clone();
         let sender = sender.clone();
 
@@ -381,6 +400,7 @@ async fn run_task_inner(
         });
 
         let mut result_json = String::new();
+        let mut stream_cost: Option<f64> = None;
 
         let output = claude_wrapper::streaming::stream_query(&claude, &cmd, |event| {
             // Write the raw JSON event to the NDJSON log file.
@@ -398,6 +418,11 @@ async fn run_task_inner(
                 }
             }
 
+            // Accumulate cost from stream events.
+            if let Some(cost) = event.cost_usd() {
+                stream_cost = Some(cost);
+            }
+
             // Capture the result event's JSON for the TaskResult stdout.
             if event.is_result() {
                 result_json = serde_json::to_string(&event.data).unwrap_or_default();
@@ -411,13 +436,17 @@ async fn run_task_inner(
 
         // stream_query returns empty stdout since it was consumed via handler.
         // Replace with the result event JSON so state parsing still works.
-        claude_wrapper::exec::CommandOutput {
+        let output = claude_wrapper::exec::CommandOutput {
             stdout: result_json,
             ..output
-        }
+        };
+        (output, env, stream_cost)
     } else {
-        cmd.execute(&claude).await?
+        let output = cmd.execute(&claude).await?;
+        (output, env, None)
     };
+
+    let (output, env, stream_cost) = execution_result;
 
     // Run post-hooks if the session succeeded.
     if output.success
@@ -426,7 +455,7 @@ async fn run_task_inner(
         run_hooks(&task.name, hooks, &env.work_dir, "post").await?;
     }
 
-    Ok((output, env))
+    Ok((output, env, stream_cost))
 }
 
 /// Execute hooks (pre or post) for a task in the given working directory.

@@ -87,6 +87,12 @@ fn print_text_summary(result: &RunResult) {
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap_or(0.0)
     );
+
+    let has_cost = result.tasks.iter().any(|t| t.cost_usd.is_some());
+    if has_cost {
+        let total_cost: f64 = result.tasks.iter().filter_map(|t| t.cost_usd).sum();
+        let _ = writeln!(out, "Total cost: ${total_cost:.2}");
+    }
 }
 
 fn print_task_result(out: &mut impl Write, task: &TaskResult) {
@@ -98,10 +104,14 @@ fn print_task_result(out: &mut impl Write, task: &TaskResult) {
         "FAILED"
     };
     let duration = format!("{:.0}s", task.duration.as_secs_f64());
+    let cost_str = task
+        .cost_usd
+        .map(|c| format!("  ${c:.2}"))
+        .unwrap_or_default();
 
     let _ = writeln!(
         out,
-        "  {name:<30} {status:<12} {duration}",
+        "  {name:<30} {status:<12} {duration}{cost_str}",
         name = task.name,
     );
 

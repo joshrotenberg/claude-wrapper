@@ -143,8 +143,9 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
         .tasks
         .iter()
         .map(|t| {
-            // Try to parse cost/session/result from the JSON output.
-            let (cost_usd, session_id, result_text) = parse_task_output(&t.stdout);
+            // Parse session/result from the JSON output; prefer stream-aggregated cost.
+            let (stdout_cost, session_id, result_text) = parse_task_output(&t.stdout);
+            let cost_usd = t.cost_usd.or(stdout_cost);
 
             // Find the matching manifest task for branch and isolation info.
             let task_manifest = manifest.tasks.iter().find(|mt| mt.name == t.name);
@@ -440,6 +441,7 @@ mod tests {
             },
             duration: Duration::from_secs(1),
             work_dir: PathBuf::from("/tmp"),
+            cost_usd: None,
         }
     }
 
@@ -460,6 +462,7 @@ mod tests {
                 stderr: String::new(),
                 duration: Duration::from_secs(5),
                 work_dir: PathBuf::from("/tmp/test"),
+                cost_usd: None,
             }],
         };
 
@@ -497,6 +500,7 @@ mod tests {
                     stderr: String::new(),
                     duration: Duration::from_secs(3),
                     work_dir: PathBuf::from("/tmp/ok"),
+                    cost_usd: None,
                 },
                 TaskResult {
                     name: "bad-task".into(),
@@ -505,6 +509,7 @@ mod tests {
                     stderr: "something went wrong".into(),
                     duration: Duration::from_secs(1),
                     work_dir: PathBuf::from("/tmp/bad"),
+                    cost_usd: None,
                 },
             ],
         };
@@ -531,6 +536,7 @@ mod tests {
                 stderr: String::new(),
                 duration: Duration::from_secs(2),
                 work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
             }],
         };
 
@@ -658,6 +664,7 @@ mod tests {
                 stderr: "reached max_turns limit".into(),
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
             }],
         };
         let state = build_state(&manifest, &result_stderr, Utc::now());
@@ -674,6 +681,7 @@ mod tests {
                 stderr: String::new(),
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
             }],
         };
         let state2 = build_state(&manifest, &result_stdout, Utc::now());
