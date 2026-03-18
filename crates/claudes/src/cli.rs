@@ -37,6 +37,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub manifest: Option<PathBuf>,
 
+    /// Run only the named task(s) from the manifest (repeatable).
+    #[arg(long)]
+    pub task: Vec<String>,
+
     /// Task prompt (repeatable for multiple tasks).
     #[arg(short, long)]
     pub prompt: Vec<String>,

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -37,13 +37,24 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let manifest: claudes::Manifest = match serde_json::from_str(&content) {
+        let mut manifest: claudes::Manifest = match serde_json::from_str(&content) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("error: invalid manifest JSON: {e}");
                 return ExitCode::FAILURE;
             }
         };
+
+        let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(e) = manifest.resolve_files(manifest_dir) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(e) = filter_tasks(&mut manifest, &args.task) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
 
         let options = claudes::RunOptions {
             project_dir,
@@ -74,7 +85,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let manifest: claudes::Manifest =
+            let mut manifest: claudes::Manifest =
                 if manifest_path.extension().and_then(|e| e.to_str()) == Some("toml") {
                     match toml::from_str(&content) {
                         Ok(m) => m,
@@ -92,6 +103,17 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                         }
                     }
                 };
+
+            let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+            if let Err(e) = manifest.resolve_files(manifest_dir) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+
+            if let Err(e) = filter_tasks(&mut manifest, &args.task) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
 
             let options = claudes::RunOptions {
                 project_dir,
@@ -437,4 +459,17 @@ fn parse_cleanup(s: &str) -> claudes::CleanupPolicy {
         "always" => claudes::CleanupPolicy::Always,
         _ => claudes::CleanupPolicy::None,
     }
+}
+
+fn filter_tasks(manifest: &mut claudes::Manifest, task_names: &[String]) -> Result<(), String> {
+    if task_names.is_empty() {
+        return Ok(());
+    }
+    for name in task_names {
+        if !manifest.tasks.iter().any(|t| &t.name == name) {
+            return Err(format!("no task named '{name}' in manifest"));
+        }
+    }
+    manifest.tasks.retain(|t| task_names.contains(&t.name));
+    Ok(())
 }
