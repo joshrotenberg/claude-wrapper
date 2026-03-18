@@ -353,7 +353,9 @@ async fn run_task_inner(
     };
 
     // Run post-hooks if the session succeeded.
-    if output.success && let Some(hooks) = &task.post_hooks {
+    if output.success
+        && let Some(hooks) = &task.post_hooks
+    {
         run_post_hooks(&task.name, hooks, &env.work_dir).await?;
     }
 
