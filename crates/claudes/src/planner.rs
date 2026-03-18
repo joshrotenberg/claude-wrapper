@@ -258,6 +258,8 @@ pub fn plan(options: &PlanOptions) -> Manifest {
                 disallowed_tools: options.disallowed_tools.clone(),
                 system_prompt: None,
                 append_system_prompt: options.append_system_prompt.clone(),
+                prompt_file: None,
+                append_system_prompt_file: None,
                 effort: options.effort.clone(),
                 no_session_persistence: options.no_session_persistence,
                 mcp_config: options.mcp_config.clone(),

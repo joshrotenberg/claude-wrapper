@@ -82,6 +82,7 @@ impl Manifest {
                 Task {
                     name: task.name.clone(),
                     prompt: task.prompt.clone(),
+                    prompt_file: task.prompt_file.clone(),
                     model: task.model.clone().or_else(|| shared.model.clone()),
                     fallback_model: task.fallback_model.clone(),
                     max_turns: task.max_turns.or(shared.max_turns),
@@ -107,6 +108,10 @@ impl Manifest {
                         .append_system_prompt
                         .clone()
                         .or_else(|| shared.append_system_prompt.clone()),
+                    append_system_prompt_file: task
+                        .append_system_prompt_file
+                        .clone()
+                        .or_else(|| shared.append_system_prompt_file.clone()),
                     effort: task.effort.clone().or_else(|| shared.effort.clone()),
                     no_session_persistence: task
                         .no_session_persistence
@@ -148,6 +153,77 @@ impl Manifest {
             shared: self.shared.clone(),
             tasks,
         }
+    }
+
+    /// Resolve file-based fields by reading their contents from disk.
+    ///
+    /// For each task, if `prompt_file` is set (and `prompt` is empty), reads the file relative
+    /// to `base_dir` and sets `prompt`. If `append_system_prompt_file` is set, reads the file and
+    /// sets `append_system_prompt`. The same applies to the `shared` block.
+    ///
+    /// Errors if both inline and `_file` variants are set for the same field, or if a referenced
+    /// file does not exist.
+    pub fn resolve_files(&mut self, base_dir: &Path) -> Result<(), crate::Error> {
+        // Resolve shared.append_system_prompt_file.
+        if let Some(shared) = self.shared.as_mut() {
+            if shared.append_system_prompt_file.is_some() && shared.append_system_prompt.is_some() {
+                return Err(crate::Error::InvalidManifest(
+                    "shared: cannot set both append_system_prompt and append_system_prompt_file"
+                        .into(),
+                ));
+            }
+            if let Some(file_path) = shared.append_system_prompt_file.take() {
+                let path = base_dir.join(&file_path);
+                if !path.exists() {
+                    return Err(crate::Error::InvalidManifest(format!(
+                        "shared: append_system_prompt_file '{}' not found",
+                        path.display()
+                    )));
+                }
+                shared.append_system_prompt = Some(std::fs::read_to_string(&path)?);
+            }
+        }
+
+        // Resolve per-task file fields.
+        for task in &mut self.tasks {
+            if task.prompt_file.is_some() && !task.prompt.is_empty() {
+                return Err(crate::Error::InvalidManifest(format!(
+                    "task '{}': cannot set both prompt and prompt_file",
+                    task.name
+                )));
+            }
+            if let Some(file_path) = task.prompt_file.take() {
+                let path = base_dir.join(&file_path);
+                if !path.exists() {
+                    return Err(crate::Error::InvalidManifest(format!(
+                        "task '{}': prompt_file '{}' not found",
+                        task.name,
+                        path.display()
+                    )));
+                }
+                task.prompt = std::fs::read_to_string(&path)?;
+            }
+
+            if task.append_system_prompt_file.is_some() && task.append_system_prompt.is_some() {
+                return Err(crate::Error::InvalidManifest(format!(
+                    "task '{}': cannot set both append_system_prompt and append_system_prompt_file",
+                    task.name
+                )));
+            }
+            if let Some(file_path) = task.append_system_prompt_file.take() {
+                let path = base_dir.join(&file_path);
+                if !path.exists() {
+                    return Err(crate::Error::InvalidManifest(format!(
+                        "task '{}': append_system_prompt_file '{}' not found",
+                        task.name,
+                        path.display()
+                    )));
+                }
+                task.append_system_prompt = Some(std::fs::read_to_string(&path)?);
+            }
+        }
+
+        Ok(())
     }
 
     /// Parse a manifest from a TOML string.
@@ -350,6 +426,10 @@ pub struct Shared {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub append_system_prompt: Option<String>,
 
+    /// Load append_system_prompt from a file (mutually exclusive with `append_system_prompt`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt_file: Option<String>,
+
     /// Effort level: low, medium, high.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -400,7 +480,12 @@ pub struct Task {
     pub name: String,
 
     /// The task prompt.
+    #[serde(default)]
     pub prompt: String,
+
+    /// Load the prompt from a file (mutually exclusive with `prompt`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
 
     /// Model alias or full ID.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -441,6 +526,10 @@ pub struct Task {
     /// Append to the default system prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub append_system_prompt: Option<String>,
+
+    /// Load append_system_prompt from a file (mutually exclusive with `append_system_prompt`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt_file: Option<String>,
 
     /// Effort level: low, medium, high.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -499,6 +588,8 @@ impl Task {
             disallowed_tools: None,
             system_prompt: None,
             append_system_prompt: None,
+            prompt_file: None,
+            append_system_prompt_file: None,
             effort: None,
             no_session_persistence: None,
             mcp_config: None,
@@ -520,8 +611,17 @@ impl Task {
             errors.push("name must not be empty".into());
         }
 
-        if self.prompt.is_empty() {
+        if self.prompt.is_empty() && self.prompt_file.is_none() {
             errors.push("prompt must not be empty".into());
+        }
+
+        if !self.prompt.is_empty() && self.prompt_file.is_some() {
+            errors.push("cannot set both prompt and prompt_file".into());
+        }
+
+        if self.append_system_prompt.is_some() && self.append_system_prompt_file.is_some() {
+            errors
+                .push("cannot set both append_system_prompt and append_system_prompt_file".into());
         }
 
         if let Some(effort) = &self.effort {
@@ -1420,6 +1520,145 @@ prompt = "do it"
         let toml = base.join("claudes.toml");
         std::fs::write(&toml, "").unwrap();
         assert_eq!(Manifest::discover(base).unwrap(), toml);
+    }
+
+    #[test]
+    fn validate_prompt_file_without_prompt_is_valid() {
+        let mut task = Task::new("t", "");
+        task.prompt_file = Some("prompt.txt".into());
+        let manifest = Manifest::new(vec![task]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_both_prompt_and_prompt_file_is_error() {
+        let mut task = Task::new("t", "inline");
+        task.prompt_file = Some("file.txt".into());
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("cannot set both prompt and prompt_file"))
+        );
+    }
+
+    #[test]
+    fn validate_both_append_system_prompt_variants_is_error() {
+        let mut task = Task::new("t", "prompt");
+        task.append_system_prompt = Some("inline".into());
+        task.append_system_prompt_file = Some("file.txt".into());
+        let manifest = Manifest::new(vec![task]);
+        let errs = manifest.validate().unwrap_err();
+        assert!(errs.iter().any(|e| {
+            e.contains("cannot set both append_system_prompt and append_system_prompt_file")
+        }));
+    }
+
+    #[test]
+    fn resolve_files_loads_prompt_from_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("task.txt")).unwrap();
+        write!(f, "do the thing").unwrap();
+
+        let mut task = Task::new("t", "");
+        task.prompt_file = Some("task.txt".into());
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(manifest.tasks[0].prompt, "do the thing");
+        assert!(manifest.tasks[0].prompt_file.is_none());
+    }
+
+    #[test]
+    fn resolve_files_errors_if_both_prompt_and_file_set() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("task.txt")).unwrap();
+        write!(f, "content").unwrap();
+
+        let mut task = Task::new("t", "inline");
+        task.prompt_file = Some("task.txt".into());
+        let mut manifest = Manifest::new(vec![task]);
+        let err = manifest.resolve_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("cannot set both prompt and prompt_file"));
+    }
+
+    #[test]
+    fn resolve_files_errors_if_prompt_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = Task::new("t", "");
+        task.prompt_file = Some("nonexistent.txt".into());
+        let mut manifest = Manifest::new(vec![task]);
+        let err = manifest.resolve_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn resolve_files_loads_append_system_prompt_from_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("sys.txt")).unwrap();
+        write!(f, "extra context").unwrap();
+
+        let mut task = Task::new("t", "prompt");
+        task.append_system_prompt_file = Some("sys.txt".into());
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(
+            manifest.tasks[0].append_system_prompt.as_deref(),
+            Some("extra context")
+        );
+        assert!(manifest.tasks[0].append_system_prompt_file.is_none());
+    }
+
+    #[test]
+    fn resolve_files_errors_if_both_append_system_prompts_set() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("sys.txt")).unwrap();
+        write!(f, "extra").unwrap();
+
+        let mut task = Task::new("t", "prompt");
+        task.append_system_prompt = Some("inline".into());
+        task.append_system_prompt_file = Some("sys.txt".into());
+        let mut manifest = Manifest::new(vec![task]);
+        let err = manifest.resolve_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("cannot set both append_system_prompt and append_system_prompt_file"));
+    }
+
+    #[test]
+    fn resolve_files_shared_append_system_prompt_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("shared_sys.txt")).unwrap();
+        write!(f, "shared context").unwrap();
+
+        let mut manifest = Manifest::new(vec![Task::new("t", "prompt")]);
+        manifest.shared = Some(Shared {
+            append_system_prompt_file: Some("shared_sys.txt".into()),
+            ..Default::default()
+        });
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(
+            manifest
+                .shared
+                .as_ref()
+                .unwrap()
+                .append_system_prompt
+                .as_deref(),
+            Some("shared context")
+        );
+        assert!(
+            manifest
+                .shared
+                .as_ref()
+                .unwrap()
+                .append_system_prompt_file
+                .is_none()
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -47,6 +47,17 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         };
         if let Some(ref g) = global {
             manifest.apply_global_defaults(g);
+        }
+
+        let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(e) = manifest.resolve_files(manifest_dir) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(e) = filter_tasks(&mut manifest, &args.task) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
         }
 
         let options = claudes::RunOptions {
@@ -98,6 +109,17 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 };
             if let Some(ref g) = global {
                 manifest.apply_global_defaults(g);
+            }
+
+            let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+            if let Err(e) = manifest.resolve_files(manifest_dir) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+
+            if let Err(e) = filter_tasks(&mut manifest, &args.task) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
             }
 
             let options = claudes::RunOptions {
@@ -450,4 +472,17 @@ fn parse_cleanup(s: &str) -> claudes::CleanupPolicy {
         "always" => claudes::CleanupPolicy::Always,
         _ => claudes::CleanupPolicy::None,
     }
+}
+
+fn filter_tasks(manifest: &mut claudes::Manifest, task_names: &[String]) -> Result<(), String> {
+    if task_names.is_empty() {
+        return Ok(());
+    }
+    for name in task_names {
+        if !manifest.tasks.iter().any(|t| &t.name == name) {
+            return Err(format!("no task named '{name}' in manifest"));
+        }
+    }
+    manifest.tasks.retain(|t| task_names.contains(&t.name));
+    Ok(())
 }
