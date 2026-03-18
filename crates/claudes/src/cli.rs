@@ -108,6 +108,10 @@ pub struct RunArgs {
     /// Increase output verbosity (repeat for more detail: -v, -vv).
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Disable colored output.
+    #[arg(long)]
+    pub no_color: bool,
 }
 
 /// Arguments for `claudes status`.

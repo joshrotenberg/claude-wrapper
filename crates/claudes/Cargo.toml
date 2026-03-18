@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = "3"

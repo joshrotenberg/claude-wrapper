@@ -169,7 +169,11 @@ async fn execute_manifest(
     let stream_handle = if format == OutputFormat::Text {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         options.event_sender = Some(tx);
-        Some(tokio::spawn(output::render_stream(rx, verbosity)))
+        Some(tokio::spawn(output::render_stream(
+            rx,
+            verbosity,
+            args.no_color,
+        )))
     } else {
         None
     };

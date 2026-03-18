@@ -1,11 +1,22 @@
 //! Output formatting for task execution results.
 
-use std::io::Write;
+use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
 
+use crossterm::style::{Color, Stylize};
 use tokio::sync::mpsc;
 
 use crate::runner::{RunResult, TaskEvent, TaskResult};
 use crate::state::is_timeout;
+
+const COLOR_PALETTE: &[Color] = &[
+    Color::Cyan,
+    Color::Green,
+    Color::Yellow,
+    Color::Magenta,
+    Color::Blue,
+    Color::Red,
+];
 
 /// Verbosity level for streaming output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -130,23 +141,50 @@ fn print_json_summary(result: &RunResult) {
 /// Render streaming events from tasks as they arrive.
 ///
 /// Runs until the channel is closed (all senders dropped).
-pub async fn render_stream(mut rx: mpsc::UnboundedReceiver<TaskEvent>, verbosity: Verbosity) {
+pub async fn render_stream(
+    mut rx: mpsc::UnboundedReceiver<TaskEvent>,
+    verbosity: Verbosity,
+    no_color: bool,
+) {
     if verbosity == Verbosity::Quiet {
         while rx.recv().await.is_some() {}
         return;
     }
 
     let stderr = std::io::stderr();
+    let use_color = !no_color && std::env::var_os("NO_COLOR").is_none() && stderr.is_terminal();
+
+    let mut color_map: HashMap<String, Color> = HashMap::new();
+    let mut color_index: usize = 0;
 
     while let Some(event) = rx.recv().await {
         let task = &event.task_name;
         let data = &event.event.data;
         let event_type = event.event.event_type().unwrap_or("");
 
+        let color_opt = if use_color {
+            if !color_map.contains_key(task.as_str()) {
+                let c = COLOR_PALETTE[color_index % COLOR_PALETTE.len()];
+                color_map.insert(task.clone(), c);
+                color_index += 1;
+            }
+            color_map.get(task.as_str()).copied()
+        } else {
+            None
+        };
+
+        let prefix = {
+            let padded = format!("{task:<20}");
+            match color_opt {
+                Some(color) => format!("{}", padded.with(color)),
+                None => padded,
+            }
+        };
+
         match event_type {
             "claudes_task_start" => {
                 let mut out = stderr.lock();
-                let _ = writeln!(out, "  | {task:<20} | starting");
+                let _ = writeln!(out, "  | {prefix} | starting");
             }
             "result" => {
                 let status = data
@@ -159,7 +197,7 @@ pub async fn render_stream(mut rx: mpsc::UnboundedReceiver<TaskEvent>, verbosity
                     .and_then(|c| c.as_f64());
                 let cost_str = cost.map(|c| format!(" ${c:.4}")).unwrap_or_default();
                 let mut out = stderr.lock();
-                let _ = writeln!(out, "  | {task:<20} | {status}{cost_str}");
+                let _ = writeln!(out, "  | {prefix} | {status}{cost_str}");
             }
             "assistant" if verbosity >= Verbosity::Verbose => {
                 if let Some(content) = data
@@ -196,15 +234,15 @@ pub async fn render_stream(mut rx: mpsc::UnboundedReceiver<TaskEvent>, verbosity
                                     .unwrap_or_default();
                                 let mut out = stderr.lock();
                                 if first_arg.is_empty() {
-                                    let _ = writeln!(out, "  | {task:<20} | {tool}");
+                                    let _ = writeln!(out, "  | {prefix} | {tool}");
                                 } else {
-                                    let _ = writeln!(out, "  | {task:<20} | {tool}({first_arg})");
+                                    let _ = writeln!(out, "  | {prefix} | {tool}({first_arg})");
                                 }
                             }
                             Some("text") if verbosity >= Verbosity::VeryVerbose => {
                                 if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                     let mut out = stderr.lock();
-                                    let _ = writeln!(out, "  | {task:<20} | {text}");
+                                    let _ = writeln!(out, "  | {prefix} | {text}");
                                 }
                             }
                             _ => {}
