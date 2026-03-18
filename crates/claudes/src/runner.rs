@@ -91,6 +91,78 @@ pub struct RunOptions {
     pub event_sender: Option<mpsc::UnboundedSender<TaskEvent>>,
 }
 
+/// Builder for [`RunOptions`].
+///
+/// `project_dir` is required and passed to [`RunOptionsBuilder::new`].
+/// All other fields are optional with sensible defaults.
+///
+/// # Example
+///
+/// ```no_run
+/// use claudes::runner::{CleanupPolicy, RunOptionsBuilder};
+///
+/// let options = RunOptionsBuilder::new("/path/to/project")
+///     .force(true)
+///     .cleanup(CleanupPolicy::OnSuccess)
+///     .build();
+/// ```
+#[derive(Debug)]
+pub struct RunOptionsBuilder {
+    project_dir: PathBuf,
+    force: bool,
+    binary: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    cleanup: CleanupPolicy,
+}
+
+impl RunOptionsBuilder {
+    /// Create a new builder with the required project directory.
+    pub fn new(project_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            project_dir: project_dir.into(),
+            force: false,
+            binary: None,
+            env: Vec::new(),
+            cleanup: CleanupPolicy::None,
+        }
+    }
+
+    /// Force overwrite existing worktrees.
+    pub fn force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
+    }
+
+    /// Override the claude binary path.
+    pub fn binary(mut self, binary: impl Into<PathBuf>) -> Self {
+        self.binary = Some(binary.into());
+        self
+    }
+
+    /// Add an extra environment variable passed to every Claude process.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set the cleanup policy for worktrees after execution.
+    pub fn cleanup(mut self, cleanup: CleanupPolicy) -> Self {
+        self.cleanup = cleanup;
+        self
+    }
+
+    /// Build the [`RunOptions`].
+    pub fn build(self) -> RunOptions {
+        RunOptions {
+            project_dir: self.project_dir,
+            force: self.force,
+            binary: self.binary,
+            env: self.env,
+            cleanup: self.cleanup,
+        }
+    }
+}
+
 /// Execute a manifest.
 pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult> {
     // Validate first.
@@ -350,5 +422,65 @@ fn parse_effort(s: &str) -> claude_wrapper::Effort {
         "low" => claude_wrapper::Effort::Low,
         "high" => claude_wrapper::Effort::High,
         _ => claude_wrapper::Effort::Medium,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_defaults() {
+        let opts = RunOptionsBuilder::new("/tmp/project").build();
+        assert_eq!(opts.project_dir, PathBuf::from("/tmp/project"));
+        assert!(!opts.force);
+        assert!(opts.binary.is_none());
+        assert!(opts.env.is_empty());
+        assert_eq!(opts.cleanup, CleanupPolicy::None);
+    }
+
+    #[test]
+    fn builder_force() {
+        let opts = RunOptionsBuilder::new("/tmp/project").force(true).build();
+        assert!(opts.force);
+    }
+
+    #[test]
+    fn builder_binary() {
+        let opts = RunOptionsBuilder::new("/tmp/project")
+            .binary("/usr/local/bin/claude")
+            .build();
+        assert_eq!(opts.binary, Some(PathBuf::from("/usr/local/bin/claude")));
+    }
+
+    #[test]
+    fn builder_env_repeatable() {
+        let opts = RunOptionsBuilder::new("/tmp/project")
+            .env("FOO", "bar")
+            .env("BAZ", "qux")
+            .build();
+        assert_eq!(
+            opts.env,
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "qux".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_cleanup() {
+        let opts = RunOptionsBuilder::new("/tmp/project")
+            .cleanup(CleanupPolicy::Always)
+            .build();
+        assert_eq!(opts.cleanup, CleanupPolicy::Always);
+    }
+
+    #[test]
+    fn builder_on_success_cleanup() {
+        let opts = RunOptionsBuilder::new("/tmp/project")
+            .cleanup(CleanupPolicy::OnSuccess)
+            .build();
+        assert_eq!(opts.cleanup, CleanupPolicy::OnSuccess);
     }
 }

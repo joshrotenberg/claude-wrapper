@@ -56,6 +56,169 @@ impl PlanOptions {
     }
 }
 
+/// Builder for [`PlanOptions`].
+///
+/// `prompt()` is the repeatable entry point — call it once per task.
+/// All other setters apply to every generated task as overrides.
+///
+/// # Example
+///
+/// ```
+/// use claudes::planner::PlanOptionsBuilder;
+///
+/// let opts = PlanOptionsBuilder::new()
+///     .prompt("Fix the pagination bug")
+///     .prompt("Add export endpoint")
+///     .model("claude-opus-4-5")
+///     .max_turns(20)
+///     .build();
+/// assert_eq!(opts.prompts.len(), 2);
+/// ```
+#[derive(Debug, Default)]
+pub struct PlanOptionsBuilder {
+    prompts: Vec<String>,
+    model: Option<String>,
+    fallback_model: Option<String>,
+    max_turns: Option<u32>,
+    timeout_secs: Option<u64>,
+    max_budget_usd: Option<f64>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
+    append_system_prompt: Option<String>,
+    mcp_config: Option<String>,
+    strict_mcp_config: Option<bool>,
+    no_session_persistence: Option<bool>,
+    isolation: Option<String>,
+    isolation_base_dir: Option<String>,
+}
+
+impl PlanOptionsBuilder {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a prompt (one task per call).
+    pub fn prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompts.push(prompt.into());
+        self
+    }
+
+    /// Model override.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Fallback model override.
+    pub fn fallback_model(mut self, fallback_model: impl Into<String>) -> Self {
+        self.fallback_model = Some(fallback_model.into());
+        self
+    }
+
+    /// Max turns override.
+    pub fn max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = Some(max_turns);
+        self
+    }
+
+    /// Timeout override (in seconds).
+    pub fn timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    /// Budget override.
+    pub fn max_budget_usd(mut self, max_budget_usd: f64) -> Self {
+        self.max_budget_usd = Some(max_budget_usd);
+        self
+    }
+
+    /// Effort override (`"low"`, `"medium"`, or `"high"`).
+    pub fn effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
+    }
+
+    /// Permission mode override.
+    pub fn permission_mode(mut self, permission_mode: impl Into<String>) -> Self {
+        self.permission_mode = Some(permission_mode.into());
+        self
+    }
+
+    /// Allowed tools override.
+    pub fn allowed_tools(mut self, allowed_tools: Vec<String>) -> Self {
+        self.allowed_tools = Some(allowed_tools);
+        self
+    }
+
+    /// Disallowed tools override.
+    pub fn disallowed_tools(mut self, disallowed_tools: Vec<String>) -> Self {
+        self.disallowed_tools = Some(disallowed_tools);
+        self
+    }
+
+    /// Append system prompt override.
+    pub fn append_system_prompt(mut self, append_system_prompt: impl Into<String>) -> Self {
+        self.append_system_prompt = Some(append_system_prompt.into());
+        self
+    }
+
+    /// MCP config override.
+    pub fn mcp_config(mut self, mcp_config: impl Into<String>) -> Self {
+        self.mcp_config = Some(mcp_config.into());
+        self
+    }
+
+    /// Strict MCP config override.
+    pub fn strict_mcp_config(mut self, strict_mcp_config: bool) -> Self {
+        self.strict_mcp_config = Some(strict_mcp_config);
+        self
+    }
+
+    /// No session persistence override.
+    pub fn no_session_persistence(mut self, no_session_persistence: bool) -> Self {
+        self.no_session_persistence = Some(no_session_persistence);
+        self
+    }
+
+    /// Isolation type override (`"worktree"`, `"clone"`, or `"none"`).
+    pub fn isolation(mut self, isolation: impl Into<String>) -> Self {
+        self.isolation = Some(isolation.into());
+        self
+    }
+
+    /// Isolation base directory override.
+    pub fn isolation_base_dir(mut self, isolation_base_dir: impl Into<String>) -> Self {
+        self.isolation_base_dir = Some(isolation_base_dir.into());
+        self
+    }
+
+    /// Build the [`PlanOptions`].
+    pub fn build(self) -> PlanOptions {
+        PlanOptions {
+            prompts: self.prompts,
+            model: self.model,
+            fallback_model: self.fallback_model,
+            max_turns: self.max_turns,
+            timeout_secs: self.timeout_secs,
+            max_budget_usd: self.max_budget_usd,
+            effort: self.effort,
+            permission_mode: self.permission_mode,
+            allowed_tools: self.allowed_tools,
+            disallowed_tools: self.disallowed_tools,
+            append_system_prompt: self.append_system_prompt,
+            mcp_config: self.mcp_config,
+            strict_mcp_config: self.strict_mcp_config,
+            no_session_persistence: self.no_session_persistence,
+            isolation: self.isolation,
+            isolation_base_dir: self.isolation_base_dir,
+        }
+    }
+}
+
 /// Generate a manifest from plan options.
 pub fn plan(options: &PlanOptions) -> Manifest {
     let tasks: Vec<Task> = options
@@ -229,5 +392,102 @@ mod tests {
         };
         let manifest = plan(&opts);
         assert!(matches!(manifest.tasks[0].isolation, Some(Isolation::None)));
+    }
+
+    #[test]
+    fn builder_single_prompt() {
+        let opts = PlanOptionsBuilder::new().prompt("Fix the bug").build();
+        assert_eq!(opts.prompts, vec!["Fix the bug"]);
+    }
+
+    #[test]
+    fn builder_multiple_prompts() {
+        let opts = PlanOptionsBuilder::new()
+            .prompt("Fix A")
+            .prompt("Fix B")
+            .prompt("Fix C")
+            .build();
+        assert_eq!(opts.prompts.len(), 3);
+        assert_eq!(opts.prompts[1], "Fix B");
+    }
+
+    #[test]
+    fn builder_defaults_are_none() {
+        let opts = PlanOptionsBuilder::new().prompt("task").build();
+        assert!(opts.model.is_none());
+        assert!(opts.fallback_model.is_none());
+        assert!(opts.max_turns.is_none());
+        assert!(opts.timeout_secs.is_none());
+        assert!(opts.max_budget_usd.is_none());
+        assert!(opts.effort.is_none());
+        assert!(opts.permission_mode.is_none());
+        assert!(opts.allowed_tools.is_none());
+        assert!(opts.disallowed_tools.is_none());
+        assert!(opts.append_system_prompt.is_none());
+        assert!(opts.mcp_config.is_none());
+        assert!(opts.strict_mcp_config.is_none());
+        assert!(opts.no_session_persistence.is_none());
+        assert!(opts.isolation.is_none());
+        assert!(opts.isolation_base_dir.is_none());
+    }
+
+    #[test]
+    fn builder_overrides() {
+        let opts = PlanOptionsBuilder::new()
+            .prompt("task")
+            .model("opus")
+            .fallback_model("sonnet")
+            .max_turns(10)
+            .timeout_secs(120)
+            .max_budget_usd(5.0)
+            .effort("high")
+            .permission_mode("bypassPermissions")
+            .allowed_tools(vec!["Edit".into()])
+            .disallowed_tools(vec!["Bash".into()])
+            .append_system_prompt("Be concise.")
+            .mcp_config("/path/to/mcp.json")
+            .strict_mcp_config(true)
+            .no_session_persistence(true)
+            .isolation("clone")
+            .isolation_base_dir(".clones")
+            .build();
+
+        assert_eq!(opts.model.as_deref(), Some("opus"));
+        assert_eq!(opts.fallback_model.as_deref(), Some("sonnet"));
+        assert_eq!(opts.max_turns, Some(10));
+        assert_eq!(opts.timeout_secs, Some(120));
+        assert_eq!(opts.max_budget_usd, Some(5.0));
+        assert_eq!(opts.effort.as_deref(), Some("high"));
+        assert_eq!(opts.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(
+            opts.allowed_tools.as_deref(),
+            Some(&["Edit".to_string()][..])
+        );
+        assert_eq!(
+            opts.disallowed_tools.as_deref(),
+            Some(&["Bash".to_string()][..])
+        );
+        assert_eq!(opts.append_system_prompt.as_deref(), Some("Be concise."));
+        assert_eq!(opts.mcp_config.as_deref(), Some("/path/to/mcp.json"));
+        assert_eq!(opts.strict_mcp_config, Some(true));
+        assert_eq!(opts.no_session_persistence, Some(true));
+        assert_eq!(opts.isolation.as_deref(), Some("clone"));
+        assert_eq!(opts.isolation_base_dir.as_deref(), Some(".clones"));
+    }
+
+    #[test]
+    fn builder_produces_valid_manifest() {
+        let opts = PlanOptionsBuilder::new()
+            .prompt("Fix the pagination bug")
+            .prompt("Add export endpoint")
+            .model("opus")
+            .max_turns(20)
+            .build();
+        let manifest = plan(&opts);
+        assert_eq!(manifest.tasks.len(), 2);
+        assert_eq!(manifest.tasks[0].prompt, "Fix the pagination bug");
+        assert_eq!(manifest.tasks[1].prompt, "Add export endpoint");
+        assert_eq!(manifest.tasks[0].model.as_deref(), Some("opus"));
+        assert_eq!(manifest.tasks[0].max_turns, Some(20));
     }
 }
