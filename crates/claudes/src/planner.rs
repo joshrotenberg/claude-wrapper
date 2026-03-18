@@ -275,18 +275,56 @@ pub fn plan(options: &PlanOptions) -> Manifest {
 
 /// Generate a task name from a prompt.
 ///
-/// Takes the first few words of the prompt and appends a short hash
-/// for uniqueness: `fix-the-pagination-bug-a3b2`
+/// Filters out English noise words and file path tokens, caps the slug at 25
+/// chars, and appends a 4-char hash for uniqueness: `fix-pagination-bug-a3b2`
 fn generate_task_name(prompt: &str) -> String {
-    let slug: String = prompt
-        .to_lowercase()
+    const NOISE_WORDS: &[&str] = &[
+        "in", "the", "a", "for", "to", "of", "and", "all", "from", "with",
+    ];
+    const FILE_EXTENSIONS: &[&str] = &[
+        ".rs", ".ts", ".py", ".js", ".go", ".java", ".cpp", ".c", ".h", ".tsx", ".jsx", ".toml",
+        ".json", ".yaml", ".yml", ".md",
+    ];
+
+    // Hash the full original prompt for uniqueness.
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    let hash = format!("{:04x}", hasher.finish() & 0xFFFF);
+
+    let lower = prompt.to_lowercase();
+    let slug_words: Vec<String> = lower
         .split_whitespace()
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .filter(|word| {
+            // Skip noise words.
+            if NOISE_WORDS.contains(word) {
+                return false;
+            }
+            // Skip file paths: tokens containing '/' or ending in a known extension.
+            let is_path =
+                word.contains('/') || FILE_EXTENSIONS.iter().any(|ext| word.ends_with(ext));
+            !is_path
+        })
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
         .collect();
+
+    // Build slug capped at 25 chars, adding only complete words.
+    let mut slug = String::new();
+    for word in &slug_words {
+        if slug.is_empty() {
+            // First word: take up to 25 chars.
+            slug.extend(word.chars().take(25));
+        } else if slug.len() + 1 + word.len() <= 25 {
+            slug.push('-');
+            slug.push_str(word);
+        } else {
+            break;
+        }
+    }
 
     let slug = slug.trim_matches('-').to_string();
     let slug = if slug.is_empty() {
@@ -294,10 +332,6 @@ fn generate_task_name(prompt: &str) -> String {
     } else {
         slug
     };
-
-    let mut hasher = DefaultHasher::new();
-    prompt.hash(&mut hasher);
-    let hash = format!("{:04x}", hasher.finish() & 0xFFFF);
 
     format!("{slug}-{hash}")
 }
@@ -308,10 +342,39 @@ mod tests {
 
     #[test]
     fn generate_name_from_prompt() {
+        // "the" and "in" are noise words; "list.rs" is a file path — all stripped.
         let name = generate_task_name("Fix the pagination bug in list.rs");
-        assert!(name.starts_with("fix-the-pagination-bug-in"));
+        assert!(name.starts_with("fix-pagination-bug"));
         assert!(name.len() > 10);
         // Should end with a 4-char hex hash.
+        let parts: Vec<&str> = name.rsplitn(2, '-').collect();
+        assert_eq!(parts[0].len(), 4);
+    }
+
+    #[test]
+    fn generate_name_strips_file_paths() {
+        // Path token "crates/claudes/src/planner.rs" contains '/' — stripped.
+        let name = generate_task_name("Fix the bug in crates/claudes/src/planner.rs");
+        assert!(name.starts_with("fix-bug-"));
+        let parts: Vec<&str> = name.rsplitn(2, '-').collect();
+        assert_eq!(parts[0].len(), 4);
+    }
+
+    #[test]
+    fn generate_name_long_prompt_slug_capped() {
+        // A long prompt should produce a slug no longer than 25 chars.
+        let long =
+            "Implement comprehensive authentication system for enterprise production deployment";
+        let name = generate_task_name(long);
+        let parts: Vec<&str> = name.rsplitn(2, '-').collect();
+        assert_eq!(parts[0].len(), 4, "hash should be 4 chars");
+        assert!(parts[1].len() <= 25, "slug should be at most 25 chars");
+    }
+
+    #[test]
+    fn generate_name_short_prompt() {
+        let name = generate_task_name("Fix bug");
+        assert!(name.starts_with("fix-bug-"));
         let parts: Vec<&str> = name.rsplitn(2, '-').collect();
         assert_eq!(parts[0].len(), 4);
     }
