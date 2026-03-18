@@ -449,13 +449,55 @@ async fn run_task_inner(
     let (output, env, stream_cost) = execution_result;
 
     // Run post-hooks if the session succeeded.
-    if output.success
+    let post_result = if output.success
         && let Some(hooks) = &task.post_hooks
     {
-        run_hooks(&task.name, hooks, &env.work_dir, "post").await?;
+        run_hooks(&task.name, hooks, &env.work_dir, "post").await
+    } else {
+        Ok(())
+    };
+
+    // Always run finally_hooks regardless of session/post_hook outcome.
+    if let Some(hooks) = &task.finally_hooks {
+        info!(task = task.name, "running finally hooks");
+        run_finally_hooks(&task.name, hooks, &env.work_dir).await;
     }
 
+    // Propagate post_hook errors after finally_hooks have run.
+    post_result?;
+
     Ok((output, env, stream_cost))
+}
+
+/// Run finally_hooks — always executes all hooks, logging failures without propagating.
+async fn run_finally_hooks(task_name: &str, hooks: &[String], work_dir: &std::path::Path) {
+    for hook in hooks {
+        info!(task = task_name, hook = hook, "running finally hook");
+        match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(hook)
+            .current_dir(work_dir)
+            .output()
+            .await
+        {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    task = task_name,
+                    hook = hook,
+                    "finally hook failed (continuing): {stderr}"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = task_name,
+                    hook = hook,
+                    "finally hook failed to spawn (continuing): {e}"
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Execute hooks (pre or post) for a task in the given working directory.

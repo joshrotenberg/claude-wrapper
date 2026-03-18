@@ -222,6 +222,11 @@ impl Manifest {
                         profile.and_then(|p| p.post_hooks.as_ref()),
                         task.post_hooks.as_ref(),
                     ),
+                    finally_hooks: merge_hooks(
+                        shared.and_then(|s| s.finally_hooks.as_ref()),
+                        profile.and_then(|p| p.finally_hooks.as_ref()),
+                        task.finally_hooks.as_ref(),
+                    ),
                 }
             })
             .collect();
@@ -565,6 +570,10 @@ pub struct Shared {
     /// These are **prepended** to any task-level post_hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_hooks: Option<Vec<String>>,
+
+    /// Shell commands that always run after task completion, regardless of outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finally_hooks: Option<Vec<String>>,
 }
 
 /// A fully resolved task. Every field is explicit.
@@ -668,6 +677,10 @@ pub struct Task {
     /// Shell commands to run after the task completes successfully.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_hooks: Option<Vec<String>>,
+
+    /// Shell commands that always run after task completion, regardless of outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finally_hooks: Option<Vec<String>>,
 }
 
 impl Task {
@@ -699,6 +712,7 @@ impl Task {
             env: None,
             pre_hooks: None,
             post_hooks: None,
+            finally_hooks: None,
         }
     }
 
@@ -921,6 +935,12 @@ impl TaskBuilder {
     /// Set shell commands to run after the task completes successfully.
     pub fn post_hooks(mut self, post_hooks: Vec<String>) -> Self {
         self.task.post_hooks = Some(post_hooks);
+        self
+    }
+
+    /// Set the finally hooks (always run, regardless of outcome).
+    pub fn finally_hooks(mut self, finally_hooks: Vec<String>) -> Self {
+        self.task.finally_hooks = Some(finally_hooks);
         self
     }
 
