@@ -89,6 +89,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub isolation: Option<String>,
 
+    /// Apply a named profile (from the manifest's profiles map) to all ad-hoc tasks.
+    #[arg(long)]
+    pub profile: Option<String>,
+
     /// Show generated manifest without executing.
     #[arg(long)]
     pub dry_run: bool,
@@ -187,6 +191,10 @@ pub struct PlanArgs {
     /// Override isolation (worktree|clone|none).
     #[arg(long)]
     pub isolation: Option<String>,
+
+    /// Apply a named profile (from the manifest's profiles map) to all ad-hoc tasks.
+    #[arg(long)]
+    pub profile: Option<String>,
 }
 
 /// Arguments for `claudes init`.

@@ -158,6 +158,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         args.disallowed_tools.as_deref(),
         args.append_system_prompt.as_deref(),
         args.isolation.as_deref(),
+        args.profile.as_deref(),
     );
 
     let mut manifest = claudes::plan(&plan_opts);
@@ -257,6 +258,7 @@ async fn cmd_plan(args: claudes::cli::PlanArgs) -> ExitCode {
         args.disallowed_tools.as_deref(),
         args.append_system_prompt.as_deref(),
         args.isolation.as_deref(),
+        args.profile.as_deref(),
     );
 
     let mut manifest = claudes::plan(&plan_opts);
@@ -440,6 +442,7 @@ fn build_plan_options(
     disallowed_tools: Option<&str>,
     append_system_prompt: Option<&str>,
     isolation: Option<&str>,
+    profile: Option<&str>,
 ) -> PlanOptions {
     let timeout_secs = timeout.and_then(|t| match parse_timeout(t) {
         Ok(s) => Some(s),
@@ -462,6 +465,7 @@ fn build_plan_options(
             .map(|s| s.split(',').map(|t| t.trim().to_string()).collect()),
         append_system_prompt: append_system_prompt.map(String::from),
         isolation: isolation.map(String::from),
+        profile: profile.map(String::from),
         ..Default::default()
     }
 }
