@@ -20,6 +20,9 @@ pub enum Command {
     /// Generate a manifest without executing.
     Plan(PlanArgs),
 
+    /// Generate a manifest template with stub tasks.
+    Init(InitArgs),
+
     /// Show status of the most recent run.
     Status(StatusArgs),
 
@@ -172,6 +175,26 @@ pub struct PlanArgs {
     /// Override isolation (worktree|clone|none).
     #[arg(long)]
     pub isolation: Option<String>,
+}
+
+/// Arguments for `claudes init`.
+#[derive(Debug, Parser)]
+pub struct InitArgs {
+    /// Number of task stubs to generate.
+    #[arg(long, default_value = "1")]
+    pub tasks: usize,
+
+    /// Set model on each task stub.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Set isolation on each task stub (worktree|clone|none).
+    #[arg(long)]
+    pub isolation: Option<String>,
+
+    /// Write manifest to file (default: stdout).
+    #[arg(short, long)]
+    pub out: Option<PathBuf>,
 }
 
 /// Arguments for `claudes clean`.

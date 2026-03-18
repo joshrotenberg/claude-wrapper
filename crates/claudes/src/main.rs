@@ -19,6 +19,7 @@ async fn main() -> ExitCode {
     match cli.command {
         Command::Run(args) => cmd_run(args).await,
         Command::Plan(args) => cmd_plan(args).await,
+        Command::Init(args) => cmd_init(args).await,
         Command::Status(args) => cmd_status(args).await,
         Command::Clean(args) => cmd_clean(args).await,
     }
@@ -174,6 +175,45 @@ async fn cmd_plan(args: claudes::cli::PlanArgs) -> ExitCode {
     );
 
     let manifest = claudes::plan(&plan_opts);
+    let json = serde_json::to_string_pretty(&manifest).unwrap();
+
+    if let Some(out_path) = &args.out {
+        if let Err(e) = std::fs::write(out_path, &json) {
+            eprintln!("error: cannot write manifest: {e}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!("manifest written to {}", out_path.display());
+    } else {
+        println!("{json}");
+    }
+
+    ExitCode::SUCCESS
+}
+
+async fn cmd_init(args: claudes::cli::InitArgs) -> ExitCode {
+    let isolation = args.isolation.as_deref().map(|s| match s {
+        "none" => claudes::Isolation::None,
+        "clone" => claudes::Isolation::Clone {
+            base_dir: ".worktrees".into(),
+        },
+        _ => claudes::Isolation::Worktree {
+            base_dir: ".worktrees".into(),
+        },
+    });
+
+    let tasks: Vec<claudes::Task> = (1..=args.tasks)
+        .map(|i| {
+            let mut task = claudes::Task::new(
+                format!("task-{i}"),
+                "TODO: describe what this task should do",
+            );
+            task.model = args.model.clone();
+            task.isolation = isolation.clone();
+            task
+        })
+        .collect();
+
+    let manifest = claudes::Manifest::new(tasks);
     let json = serde_json::to_string_pretty(&manifest).unwrap();
 
     if let Some(out_path) = &args.out {
