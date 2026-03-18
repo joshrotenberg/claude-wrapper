@@ -50,6 +50,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
             binary: None,
             env: vec![],
             cleanup: parse_cleanup(&args.cleanup),
+            event_sender: None,
         };
 
         if args.dry_run {
@@ -94,6 +95,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
         binary: None,
         env: vec![],
         cleanup: claudes::CleanupPolicy::default(),
+        event_sender: None,
     };
 
     execute_manifest(&manifest, &options, &args).await
@@ -112,25 +114,41 @@ async fn execute_manifest(
 
     let started_at = chrono::Utc::now();
 
-    match claudes::run(manifest, options).await {
-        Ok(result) => {
-            // Write state file.
-            let state = claudes::state::build_state(manifest, &result, started_at);
-            if let Err(e) = claudes::state::save(&options.project_dir, &state) {
-                tracing::warn!("failed to write state file: {e}");
-            }
+    // Set up streaming if we're in text mode.
+    let mut options = options.clone();
+    let stream_handle = if format == OutputFormat::Text {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        options.event_sender = Some(tx);
+        Some(tokio::spawn(output::render_stream(rx)))
+    } else {
+        None
+    };
 
-            output::print_summary(&result, format);
-            if result.all_succeeded() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+    let result = match claudes::run(manifest, &options).await {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
         }
+    };
+
+    // Drop the sender so the renderer finishes.
+    options.event_sender = None;
+    if let Some(handle) = stream_handle {
+        let _ = handle.await;
+    }
+
+    // Write state file.
+    let state = claudes::state::build_state(manifest, &result, started_at);
+    if let Err(e) = claudes::state::save(&options.project_dir, &state) {
+        tracing::warn!("failed to write state file: {e}");
+    }
+
+    output::print_summary(&result, format);
+    if result.all_succeeded() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

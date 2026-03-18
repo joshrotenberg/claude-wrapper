@@ -29,6 +29,7 @@ fn run_options(project_dir: PathBuf) -> RunOptions {
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "task complete".into())],
         cleanup: CleanupPolicy::None,
+        event_sender: None,
     }
 }
 
@@ -156,6 +157,7 @@ async fn run_task_failure_reported() {
             ("FAKE_CLAUDE_ERROR_MSG".into(), "simulated failure".into()),
         ],
         cleanup: CleanupPolicy::None,
+        event_sender: None,
     };
 
     let manifest = Manifest::new(vec![{
@@ -220,6 +222,7 @@ async fn planner_to_runner_roundtrip() {
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "planned result".into())],
         cleanup: CleanupPolicy::None,
+        event_sender: None,
     };
 
     let plan_opts = PlanOptions {
@@ -250,6 +253,7 @@ async fn manifest_json_roundtrip_execution() {
         binary: Some(fake_binary()),
         env: vec![("FAKE_CLAUDE_OUTPUT".into(), "from json".into())],
         cleanup: CleanupPolicy::None,
+        event_sender: None,
     };
 
     // Create manifest, serialize to JSON, deserialize back, execute.

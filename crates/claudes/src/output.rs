@@ -2,7 +2,9 @@
 
 use std::io::Write;
 
-use crate::runner::{RunResult, TaskResult};
+use tokio::sync::mpsc;
+
+use crate::runner::{RunResult, TaskEvent, TaskResult};
 
 /// Format style for output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,4 +91,56 @@ fn print_json_summary(result: &RunResult) {
     });
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
+/// Render streaming events from tasks as they arrive.
+///
+/// Runs until the channel is closed (all senders dropped).
+pub async fn render_stream(mut rx: mpsc::UnboundedReceiver<TaskEvent>) {
+    let stderr = std::io::stderr();
+
+    while let Some(event) = rx.recv().await {
+        let task = &event.task_name;
+        let data = &event.event.data;
+
+        // Filter to interesting events: tool use, result, errors.
+        let event_type = event.event.event_type().unwrap_or("");
+
+        match event_type {
+            "result" => {
+                let status = data
+                    .get("subtype")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let cost = data
+                    .get("total_cost_usd")
+                    .or_else(|| data.get("cost_usd"))
+                    .and_then(|c| c.as_f64());
+                let cost_str = cost.map(|c| format!(" ${c:.4}")).unwrap_or_default();
+
+                let mut out = stderr.lock();
+                let _ = writeln!(out, "  | {task:<20} | {status}{cost_str}");
+            }
+            "assistant" => {
+                // Extract tool use from assistant messages.
+                if let Some(content) = data
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            let tool = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            let mut out = stderr.lock();
+                            let _ = writeln!(out, "  | {task:<20} | {tool}");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

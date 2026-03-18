@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use claude_wrapper::streaming::StreamEvent;
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
@@ -63,6 +65,15 @@ pub enum CleanupPolicy {
     Always,
 }
 
+/// A tagged event from a running task, sent via the event channel.
+#[derive(Debug, Clone)]
+pub struct TaskEvent {
+    /// Which task produced this event.
+    pub task_name: String,
+    /// The stream event from claude.
+    pub event: StreamEvent,
+}
+
 /// Options that control runner behavior.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -76,6 +87,8 @@ pub struct RunOptions {
     pub env: Vec<(String, String)>,
     /// When to auto-remove worktrees after execution.
     pub cleanup: CleanupPolicy,
+    /// Channel for streaming events from tasks. If `None`, events are not streamed.
+    pub event_sender: Option<mpsc::UnboundedSender<TaskEvent>>,
 }
 
 /// Execute a manifest.
@@ -236,7 +249,42 @@ async fn run_task_inner(
     let claude = builder.build()?;
 
     // Build the query command from task fields using the consuming builder pattern.
-    let mut cmd = QueryCommand::new(&task.prompt).output_format(OutputFormat::Json);
+    let cmd = build_query_command(task);
+
+    // Execute: streaming if event_sender is available, otherwise batch.
+    let output = if let Some(sender) = &options.event_sender {
+        let task_name = task.name.clone();
+        let sender = sender.clone();
+        let mut result_json = String::new();
+
+        let output = claude_wrapper::streaming::stream_query(&claude, &cmd, |event| {
+            // Capture the result event's JSON for the TaskResult stdout.
+            if event.is_result() {
+                result_json = serde_json::to_string(&event.data).unwrap_or_default();
+            }
+            let _ = sender.send(TaskEvent {
+                task_name: task_name.clone(),
+                event,
+            });
+        })
+        .await?;
+
+        // stream_query returns empty stdout since it was consumed via handler.
+        // Replace with the result event JSON so state parsing still works.
+        claude_wrapper::exec::CommandOutput {
+            stdout: result_json,
+            ..output
+        }
+    } else {
+        cmd.execute(&claude).await?
+    };
+
+    Ok((output, env))
+}
+
+/// Build a QueryCommand from a Task's fields.
+fn build_query_command(task: &Task) -> QueryCommand {
+    let mut cmd = QueryCommand::new(&task.prompt).output_format(OutputFormat::StreamJson);
 
     if let Some(model) = &task.model {
         cmd = cmd.model(model);
@@ -283,10 +331,7 @@ async fn run_task_inner(
         }
     }
 
-    // Execute.
-    let output = cmd.execute(&claude).await?;
-
-    Ok((output, env))
+    cmd
 }
 
 fn parse_permission_mode(s: &str) -> claude_wrapper::PermissionMode {
