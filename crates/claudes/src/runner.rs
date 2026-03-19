@@ -172,7 +172,9 @@ impl RunOptionsBuilder {
 
 /// Execute a manifest.
 pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult> {
-    // Validate first.
+    // Desugar chains into depends_on, then validate and resolve.
+    let mut manifest = manifest.clone();
+    manifest.desugar_chains();
     manifest
         .validate()
         .map_err(|errors| Error::InvalidManifest(errors.join("; ")))?;
@@ -238,6 +240,16 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         let layers = manifest
             .topological_order()
             .map_err(Error::InvalidManifest)?;
+
+        let layer_summary: Vec<Vec<&str>> = layers
+            .iter()
+            .map(|layer| layer.iter().map(|t| t.name.as_str()).collect())
+            .collect();
+        info!(
+            layers = layers.len(),
+            graph = ?layer_summary,
+            "dependency graph"
+        );
 
         let mut failed_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
 
