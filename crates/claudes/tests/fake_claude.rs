@@ -468,6 +468,31 @@ async fn run_with_finally_hooks_on_failure() {
     );
 }
 
+/// Finally-hooks run even when pre-hooks fail.
+#[tokio::test]
+#[ignore]
+async fn run_with_finally_hooks_on_pre_hook_failure() {
+    let dir = temp_git_repo();
+    let sentinel = dir.path().join("finally_ran");
+
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("prehook-fail-finally", "do something");
+        t.isolation = Some(Isolation::None);
+        t.pre_hooks = Some(vec!["exit 1".into()]);
+        t.finally_hooks = Some(vec![format!("touch {}", sentinel.display())]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(!result.tasks[0].success, "task should fail due to pre_hook");
+    assert!(
+        sentinel.exists(),
+        "finally_hook should have run despite pre_hook failure"
+    );
+}
+
 /// Manifest with a shared model block — resolved tasks inherit the model.
 #[tokio::test]
 #[ignore]
