@@ -19,6 +19,8 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+tower-mcp = { workspace = true }
+schemars = { workspace = true }
 crossterm = "0.28"
 
 [dev-dependencies]
