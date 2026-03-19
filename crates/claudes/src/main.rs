@@ -23,6 +23,7 @@ async fn main() -> ExitCode {
         Command::Status(args) => cmd_status(args).await,
         Command::Clean(args) => cmd_clean(args).await,
         Command::Fix(args) => cmd_fix(args).await,
+        Command::Metrics(args) => cmd_metrics(args).await,
     }
 }
 
@@ -514,6 +515,30 @@ async fn cmd_fix(args: claudes::cli::FixArgs) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+async fn cmd_metrics(args: claudes::cli::MetricsArgs) -> ExitCode {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut runs = claudes::state::list_runs(&project_dir);
+
+    if let Some(n) = args.last {
+        runs.truncate(n);
+    }
+
+    if runs.is_empty() {
+        eprintln!("no runs found (run `claudes run` first)");
+        return ExitCode::FAILURE;
+    }
+
+    let metrics = claudes::state::compute_metrics(&runs);
+
+    if args.json {
+        claudes::state::print_metrics_json(&metrics);
+    } else {
+        claudes::state::print_metrics(&metrics);
+    }
+
+    ExitCode::SUCCESS
 }
 
 async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {

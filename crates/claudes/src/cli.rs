@@ -31,6 +31,9 @@ pub enum Command {
 
     /// Re-run failed or timed-out tasks from a previous run.
     Fix(FixArgs),
+
+    /// Aggregate stats from run history.
+    Metrics(MetricsArgs),
 }
 
 /// Arguments for `claudes run`.
@@ -238,6 +241,18 @@ pub struct CleanArgs {
     /// Remove local claudes/* branches that have been merged into main.
     #[arg(long)]
     pub branches: bool,
+}
+
+/// Arguments for `claudes metrics`.
+#[derive(Debug, Parser)]
+pub struct MetricsArgs {
+    /// Limit to the last N runs.
+    #[arg(long)]
+    pub last: Option<usize>,
+
+    /// Output as JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `claudes fix`.
