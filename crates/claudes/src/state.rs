@@ -87,6 +87,18 @@ pub struct TaskState {
     /// Path to the NDJSON log file for this task.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
+
+    /// Number of conversation turns used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns_used: Option<u32>,
+
+    /// Number of files modified (from git diff).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_modified: Option<u32>,
+
+    /// Total lines changed — insertions + deletions (from git diff).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines_changed: Option<u32>,
 }
 
 /// Task completion status.
@@ -279,6 +291,12 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
                 Some(t.stderr.clone()).filter(|s| !s.is_empty())
             };
 
+            // Parse turns from result JSON.
+            let turns_used = serde_json::from_str::<serde_json::Value>(&t.stdout)
+                .ok()
+                .and_then(|v| v.get("num_turns").and_then(|n| n.as_u64()))
+                .map(|n| n as u32);
+
             TaskState {
                 name: t.name.clone(),
                 status,
@@ -290,6 +308,9 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
                 result_text,
                 error,
                 log_path,
+                turns_used,
+                files_modified: t.files_modified,
+                lines_changed: t.lines_changed,
             }
         })
         .collect();
@@ -540,6 +561,8 @@ mod tests {
             duration: Duration::from_secs(1),
             work_dir: PathBuf::from("/tmp"),
             cost_usd: None,
+            files_modified: None,
+            lines_changed: None,
         }
     }
 
@@ -568,6 +591,8 @@ mod tests {
                 duration: Duration::from_secs(5),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
         let state = build_state(&manifest, &result, Utc::now());
@@ -594,6 +619,8 @@ mod tests {
                     duration: Duration::from_secs(4),
                     work_dir: PathBuf::from("/tmp"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
                 TaskResult {
                     name: "bad".into(),
@@ -603,6 +630,8 @@ mod tests {
                     duration: Duration::from_secs(2),
                     work_dir: PathBuf::from("/tmp"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
             ],
         };
@@ -635,6 +664,8 @@ mod tests {
                 duration: Duration::from_secs(5),
                 work_dir: PathBuf::from("/tmp/test"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
 
@@ -673,6 +704,8 @@ mod tests {
                     duration: Duration::from_secs(3),
                     work_dir: PathBuf::from("/tmp/ok"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
                 TaskResult {
                     name: "bad-task".into(),
@@ -682,6 +715,8 @@ mod tests {
                     duration: Duration::from_secs(1),
                     work_dir: PathBuf::from("/tmp/bad"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
             ],
         };
@@ -709,6 +744,8 @@ mod tests {
                 duration: Duration::from_secs(2),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
 
@@ -837,6 +874,8 @@ mod tests {
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
         let state = build_state(&manifest, &result_stderr, Utc::now());
@@ -854,6 +893,8 @@ mod tests {
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
         let state2 = build_state(&manifest, &result_stdout, Utc::now());

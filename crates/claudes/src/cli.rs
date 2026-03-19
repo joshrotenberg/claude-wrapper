@@ -276,6 +276,10 @@ pub struct GenerateArgs {
     /// Read additional context from stdin.
     #[arg(long)]
     pub stdin: bool,
+
+    /// Skip reading project context (claudes.toml, PROMPTING.md, CLAUDE.md).
+    #[arg(long)]
+    pub no_context: bool,
 }
 
 /// Arguments for `claudes fix`.
