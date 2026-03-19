@@ -632,6 +632,44 @@ impl Manifest {
             paths
         }
 
+        // Build a set of (a, b) pairs where a and b are sequenced via depends_on
+        // (directly or transitively). For any such pair, an overlap is intentional.
+        let mut sequenced: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        // Build adjacency map: name -> list of names it depends on.
+        let mut dep_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for task in &self.tasks {
+            let deps: Vec<&str> = task
+                .depends_on
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            dep_map.insert(&task.name, deps);
+        }
+
+        // For each task, do a BFS/DFS to collect all transitive dependencies.
+        for task in &self.tasks {
+            let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut stack: Vec<&str> = dep_map.get(task.name.as_str()).cloned().unwrap_or_default();
+            while let Some(dep) = stack.pop() {
+                if visited.insert(dep)
+                    && let Some(transitive) = dep_map.get(dep)
+                {
+                    stack.extend(transitive.iter().copied());
+                }
+            }
+            for ancestor in visited {
+                // task depends on ancestor (directly or transitively) — they are sequenced.
+                let a = task.name.clone();
+                let b = ancestor.to_string();
+                sequenced.insert((a.clone(), b.clone()));
+                sequenced.insert((b, a));
+            }
+        }
+
         let mut path_to_tasks: HashMap<String, Vec<&str>> = HashMap::new();
         for task in &self.tasks {
             for path in extract_paths(&task.prompt) {
@@ -641,15 +679,30 @@ impl Manifest {
 
         let mut warnings: Vec<String> = path_to_tasks
             .into_iter()
-            .filter(|(_, tasks)| tasks.len() >= 2)
-            .map(|(path, mut tasks)| {
+            .filter_map(|(path, mut tasks)| {
+                if tasks.len() < 2 {
+                    return None;
+                }
                 tasks.sort();
+                // Collect the subset of tasks that are NOT sequenced with all others.
+                // Warn only when at least one pair of tasks is unsequenced.
+                let unsequenced_pairs: Vec<(&str, &str)> = tasks
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, a)| tasks[i + 1..].iter().map(move |b| (*a, *b)))
+                    .filter(|(a, b)| !sequenced.contains(&(a.to_string(), b.to_string())))
+                    .collect();
+                if unsequenced_pairs.is_empty() {
+                    return None;
+                }
                 let names = tasks
                     .iter()
                     .map(|n| format!("'{n}'"))
                     .collect::<Vec<_>>()
                     .join(" and ");
-                format!("tasks {names} both reference '{path}' — consider sequencing them")
+                Some(format!(
+                    "tasks {names} both reference '{path}' — consider sequencing them"
+                ))
             })
             .collect();
         warnings.sort();
@@ -2387,6 +2440,65 @@ prompt = "do it"
         assert!(
             warnings.is_empty(),
             "expected no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_suppressed_when_direct_depends_on() {
+        let manifest = Manifest::new(vec![Task::new("task-a", "Fix the bug in src/lib.rs"), {
+            let mut t = Task::new("task-b", "Add tests in src/lib.rs");
+            t.depends_on = Some(vec!["task-a".into()]);
+            t
+        }]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings for sequenced tasks, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_suppressed_when_transitive_depends_on() {
+        // task-c -> task-b -> task-a: all pairs are sequenced
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Edit src/lib.rs"),
+            {
+                let mut t = Task::new("task-b", "Edit src/lib.rs");
+                t.depends_on = Some(vec!["task-a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("task-c", "Edit src/lib.rs");
+                t.depends_on = Some(vec!["task-b".into()]);
+                t
+            },
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings for transitively sequenced tasks, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_warns_for_unsequenced_pair_among_sequenced() {
+        // task-b depends on task-a, but task-c is independent — task-a/task-c and task-b/task-c
+        // pairs should still warn.
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Edit src/lib.rs"),
+            {
+                let mut t = Task::new("task-b", "Edit src/lib.rs");
+                t.depends_on = Some(vec!["task-a".into()]);
+                t
+            },
+            Task::new("task-c", "Edit src/lib.rs"),
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("src/lib.rs") && w.contains("task-c")),
+            "expected overlap warning involving task-c, got: {warnings:?}"
         );
     }
 

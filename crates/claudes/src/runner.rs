@@ -182,6 +182,17 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
     let manifest = manifest.resolve();
 
     let run_id = crate::state::generate_run_id();
+
+    // Clean any stale breadcrumbs from a prior run with the same ID.
+    let breadcrumb_run_dir = options
+        .project_dir
+        .join(".claudes")
+        .join("breadcrumbs")
+        .join(&run_id);
+    if breadcrumb_run_dir.exists() {
+        let _ = std::fs::remove_dir_all(&breadcrumb_run_dir);
+    }
+
     let task_names: Vec<String> = manifest.tasks.iter().map(|t| t.name.clone()).collect();
     if let Err(e) = crate::state::write_running(&options.project_dir, &run_id, &task_names) {
         warn!("failed to write running indicator: {e}");
@@ -296,7 +307,7 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                 // Collect breadcrumbs from dependency tasks.
                 let mut task = task.clone();
                 if let Some(deps) = &task.depends_on {
-                    let breadcrumb_context = collect_breadcrumbs(deps, &task_work_dirs);
+                    let breadcrumb_context = collect_breadcrumbs(deps, &task_work_dirs, &run_id);
                     if !breadcrumb_context.is_empty() {
                         info!(
                             task = task.name,
@@ -322,9 +333,19 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                         task = task.name,
                         "appending breadcrumb instruction (has dependents)"
                     );
+                    // Ensure the task can write the breadcrumb file.
+                    if let Some(ref mut tools) = task.allowed_tools
+                        && !tools.iter().any(|t| t == "Write")
+                    {
+                        tools.push("Write".to_string());
+                        tools.push("Bash(mkdir *)".to_string());
+                    }
+                    if let Some(ref mut tools) = task.disallowed_tools {
+                        tools.retain(|t| t != "Write");
+                    }
                     task.prompt.push_str(&format!(
                         "\n\nWhen done, write a breadcrumb file at \
-                         .claudes/breadcrumbs/{}.md summarizing: \
+                         .claudes/breadcrumbs/{run_id}/{}.md summarizing: \
                          what you did, key decisions made, and files modified. \
                          Keep it concise.",
                         task.name
@@ -857,11 +878,12 @@ async fn run_hook(
 
 /// Collect breadcrumb files from dependency task worktrees.
 ///
-/// Looks for `.claudes/breadcrumbs/{dep-name}.md` in each dependency's work directory.
+/// Looks for `.claudes/breadcrumbs/{run-id}/{dep-name}.md` in each dependency's work directory.
 /// Returns concatenated breadcrumb content, or empty string if none found.
 fn collect_breadcrumbs(
     deps: &[String],
     task_work_dirs: &std::collections::HashMap<String, PathBuf>,
+    run_id: &str,
 ) -> String {
     let mut parts = Vec::new();
     for dep in deps {
@@ -869,6 +891,7 @@ fn collect_breadcrumbs(
             let breadcrumb_path = work_dir
                 .join(".claudes")
                 .join("breadcrumbs")
+                .join(run_id)
                 .join(format!("{dep}.md"));
             match std::fs::read_to_string(&breadcrumb_path) {
                 Ok(content) if !content.trim().is_empty() => {
