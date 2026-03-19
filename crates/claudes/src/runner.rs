@@ -231,7 +231,20 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
     let start = std::time::Instant::now();
     let task_name = task.name.clone();
 
-    match run_task_inner(task, options).await {
+    let result = run_task_inner(task, options).await;
+
+    // Always run finally_hooks regardless of session outcome.
+    // We need the work_dir — from the result if Ok, or from isolation setup.
+    let work_dir = match &result {
+        Ok((_, env, _)) => env.work_dir.clone(),
+        Err(_) => options.project_dir.clone(),
+    };
+    if let Some(hooks) = &task.finally_hooks {
+        info!(task = task_name, "running finally hooks");
+        run_finally_hooks(&task_name, hooks, &work_dir).await;
+    }
+
+    match result {
         Ok((output, env, stream_cost)) => {
             let cost_usd = stream_cost.or_else(|| {
                 serde_json::from_str::<serde_json::Value>(&output.stdout)
@@ -449,22 +462,11 @@ async fn run_task_inner(
     let (output, env, stream_cost) = execution_result;
 
     // Run post-hooks if the session succeeded.
-    let post_result = if output.success
+    if output.success
         && let Some(hooks) = &task.post_hooks
     {
-        run_hooks(&task.name, hooks, &env.work_dir, "post").await
-    } else {
-        Ok(())
-    };
-
-    // Always run finally_hooks regardless of session/post_hook outcome.
-    if let Some(hooks) = &task.finally_hooks {
-        info!(task = task.name, "running finally hooks");
-        run_finally_hooks(&task.name, hooks, &env.work_dir).await;
+        run_hooks(&task.name, hooks, &env.work_dir, "post").await?;
     }
-
-    // Propagate post_hook errors after finally_hooks have run.
-    post_result?;
 
     Ok((output, env, stream_cost))
 }
