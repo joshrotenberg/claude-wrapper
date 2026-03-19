@@ -1057,6 +1057,66 @@ async fn event_sender_receives_events() {
 }
 
 // ============================================================================
+// Default isolation
+// ============================================================================
+
+/// Task with no isolation field set defaults to worktree isolation.
+#[tokio::test]
+#[ignore]
+async fn default_isolation_creates_worktree() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    // No isolation field set — should default to worktree.
+    let manifest = Manifest::new(vec![Task::new("default-iso", "do something")]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+
+    // Worktree should have been created at the default location.
+    let wt_dir = dir.path().join(".worktrees").join("default-iso");
+    assert!(
+        wt_dir.exists(),
+        "worktree directory should exist with default isolation"
+    );
+    assert_eq!(result.tasks[0].work_dir, wt_dir);
+
+    // Clean up.
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt_dir)
+        .current_dir(dir.path())
+        .status();
+}
+
+/// Explicit isolation: none still works as an opt-out.
+#[tokio::test]
+#[ignore]
+async fn explicit_none_isolation_runs_in_place() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("explicit-none", "do something");
+        t.isolation = Some(Isolation::None);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+
+    // No worktree should be created.
+    let wt_dir = dir.path().join(".worktrees").join("explicit-none");
+    assert!(
+        !wt_dir.exists(),
+        "no worktree should exist with explicit isolation: none"
+    );
+
+    // Task ran in the project dir.
+    assert_eq!(result.tasks[0].work_dir, dir.path());
+}
+
+// ============================================================================
 // Error cases
 // ============================================================================
 
