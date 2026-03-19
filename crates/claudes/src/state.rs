@@ -24,6 +24,9 @@ pub const RUNS_SUBDIR: &str = "runs";
 /// File holding the most recent run ID.
 pub const LATEST_FILE: &str = "latest";
 
+/// File written during an active run; removed on completion.
+pub const RUNNING_FILE: &str = "running.json";
+
 /// Persisted state from a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
@@ -469,6 +472,38 @@ fn parse_task_output(stdout: &str) -> (Option<f64>, Option<String>, Option<Strin
     (cost, session_id, result_text)
 }
 
+/// Write `.claudes/running.json` to mark a run as in progress.
+pub fn write_running(
+    project_dir: &Path,
+    run_id: &str,
+    task_names: &[String],
+) -> std::io::Result<()> {
+    let state_dir = project_dir.join(STATE_DIR);
+    std::fs::create_dir_all(&state_dir)?;
+    let running_path = state_dir.join(RUNNING_FILE);
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let json = serde_json::json!({
+        "run_id": run_id,
+        "started_at": started_at,
+        "tasks": task_names,
+    });
+    let content = serde_json::to_string_pretty(&json)
+        .map_err(|e| std::io::Error::other(format!("json error: {e}")))?;
+    std::fs::write(running_path, content)
+}
+
+/// Remove `.claudes/running.json` after a run completes.
+pub fn clear_running(project_dir: &Path) {
+    let _ = std::fs::remove_file(project_dir.join(STATE_DIR).join(RUNNING_FILE));
+}
+
+/// Load `.claudes/running.json` if it exists.
+pub fn load_running(project_dir: &Path) -> Option<serde_json::Value> {
+    let path = project_dir.join(STATE_DIR).join(RUNNING_FILE);
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 /// Print a summary table of all runs.
 pub fn print_status_list(runs: &[RunState]) {
     if runs.is_empty() {
@@ -498,6 +533,23 @@ pub fn print_status_list(runs: &[RunState]) {
 
 /// Print state as a human-readable table.
 pub fn print_status(state: &RunState) {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(running) = load_running(&cwd)
+    {
+        let run_id = running
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let tasks: Vec<&str> = running
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|t| t.as_str()).collect())
+            .unwrap_or_default();
+        let n = tasks.len();
+        let names = tasks.join(", ");
+        println!("In progress: {run_id} ({n} tasks: {names})");
+        println!();
+    }
     println!(
         "Run: {} | {} -> {}",
         state.run_id,
