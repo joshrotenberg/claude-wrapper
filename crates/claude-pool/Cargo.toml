@@ -6,11 +6,14 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Slot pool orchestration library for Claude CLI"
+description = "Slot pool orchestration library for Claude CLI (DEPRECATED: use claudes instead)"
 documentation = "https://docs.rs/claude-pool"
 readme = "README.md"
 keywords = ["claude", "mcp", "pool", "ai", "orchestration"]
 categories = ["development-tools", "asynchronous"]
+
+[badges]
+maintenance = { status = "deprecated" }
 
 [dependencies]
 claude-wrapper = { workspace = true }

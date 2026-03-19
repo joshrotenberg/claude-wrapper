@@ -1,3 +1,4 @@
+#![deprecated(since = "0.5.0", note = "use the claudes crate instead")]
 //! claude-pool-mcp: thin MCP server exposing claude-pool as tools.
 //!
 //! Every tool maps 1:1 to a pool method. No business logic, no planning,

@@ -1,5 +1,7 @@
 //! Coordinator/worker orchestration for Claude Code.
 //!
+//! **Deprecated**: Use the `claudes` crate instead for parallel task execution.
+//!
 //! `claude-pool` manages N Claude CLI instances behind a pool. A **coordinator**
 //! (an interactive Claude session with the pool MCP server in its `.mcp.json`)
 //! dispatches work to **worker** slots, monitors results, reviews outputs, and
