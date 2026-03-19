@@ -103,6 +103,10 @@ fn plan_tasks() -> Tool {
                 model: input.model,
                 isolation: input.isolation,
                 effort: input.effort,
+                // Headless runs must have a non-default permission mode or edits
+                // will be blocked waiting for human approval that never comes.
+                permission_mode: Some("bypassPermissions".into()),
+                no_session_persistence: Some(true),
                 ..Default::default()
             };
             let manifest = crate::plan(&opts);
@@ -128,13 +132,19 @@ fn run_manifest() -> Tool {
                 }
             };
             let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+            // Set up event sender so log files get written even without a renderer.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::TaskEvent>();
+            // Drain events in background (no rendering, just enables log writing in runner).
+            tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
             let options = crate::RunOptions {
                 project_dir: project_dir.clone(),
                 force: input.force.unwrap_or(false),
                 binary: None,
                 env: vec![],
                 cleanup: crate::CleanupPolicy::default(),
-                event_sender: None,
+                event_sender: Some(tx),
             };
             let started_at = chrono::Utc::now();
             match crate::run(&manifest, &options).await {
