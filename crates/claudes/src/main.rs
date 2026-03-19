@@ -20,14 +20,14 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Run(args)) => cmd_run(args).await,
         Some(Command::Plan(args)) => cmd_plan(args).await,
+        Some(Command::Generate(args)) => cmd_generate(args).await,
         Some(Command::Init(args)) => cmd_init(args).await,
+        Some(Command::Run(args)) => cmd_run(args).await,
         Some(Command::Status(args)) => cmd_status(args).await,
-        Some(Command::Clean(args)) => cmd_clean(args).await,
         Some(Command::Fix(args)) => cmd_fix(args).await,
         Some(Command::Metrics(args)) => cmd_metrics(args).await,
-        Some(Command::Generate(args)) => cmd_generate(args).await,
+        Some(Command::Clean(args)) => cmd_clean(args).await,
         Some(Command::Serve(args)) => cmd_serve(args).await,
         None => cmd_interactive().await,
     }
