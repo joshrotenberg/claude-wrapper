@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use claude_wrapper::{Claude, QueryCommand};
 use claudes::cli::{Cli, Command, parse_timeout};
 use claudes::output::{self, OutputFormat, Verbosity};
 use claudes::planner::PlanOptions;
@@ -24,6 +25,7 @@ async fn main() -> ExitCode {
         Command::Clean(args) => cmd_clean(args).await,
         Command::Fix(args) => cmd_fix(args).await,
         Command::Metrics(args) => cmd_metrics(args).await,
+        Command::Generate(args) => cmd_generate(args).await,
     }
 }
 
@@ -539,6 +541,106 @@ async fn cmd_metrics(args: claudes::cli::MetricsArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+async fn cmd_generate(args: claudes::cli::GenerateArgs) -> ExitCode {
+    let mut user_prompt = args.prompt.clone();
+
+    if args.stdin {
+        let mut input = String::new();
+        if let Ok(n) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            && n > 0
+        {
+            let trimmed = input.trim().to_string();
+            if !trimmed.is_empty() {
+                user_prompt.push('\n');
+                user_prompt.push_str(&trimmed);
+            }
+        }
+    }
+
+    let claude = match Claude::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot find claude binary: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    const SYSTEM_PROMPT: &str = "\
+You generate claudes manifest JSON for running Claude Code tasks in parallel.
+
+Output ONLY valid JSON. No markdown, no explanation, no code fences.
+
+Schema (all optional fields may be omitted):
+{
+  \"version\": 1,
+  \"created_at\": \"<current ISO 8601 datetime>\",
+  \"tasks\": [
+    {
+      \"name\": \"<kebab-case-name>\",
+      \"prompt\": \"<detailed description of exactly what to do>\",
+      \"isolation\": {\"type\": \"worktree\", \"base_dir\": \".worktrees\"},
+      \"model\": \"<optional: claude-sonnet-4-6 or claude-opus-4-6>\",
+      \"max_turns\": null,
+      \"post_hooks\": [\"<optional shell commands run after task succeeds>\"]
+    }
+  ]
+}
+
+Best practices:
+- Use descriptive kebab-case task names (e.g. \"fix-login-bug\", \"add-unit-tests\")
+- Set isolation to worktree so tasks run in parallel without conflicts
+- Write detailed prompts with enough context to complete the task independently
+- Add post_hooks for tasks that should commit and push changes
+- Keep tasks independent; avoid multiple tasks editing the same files";
+
+    let mut query = QueryCommand::new(&user_prompt)
+        .system_prompt(SYSTEM_PROMPT)
+        .no_session_persistence();
+
+    if let Some(ref model) = args.model {
+        query = query.model(model);
+    }
+
+    let result = match query.execute_json(&claude).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: Claude query failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let raw = result.result.trim();
+
+    // Strip markdown code fences if Claude wrapped the output despite instructions.
+    let json_str = if raw.starts_with("```") {
+        let lines: Vec<&str> = raw.lines().collect();
+        lines[1..lines.len().saturating_sub(1)].join("\n")
+    } else {
+        raw.to_string()
+    };
+
+    match serde_json::from_str::<claudes::Manifest>(&json_str) {
+        Ok(manifest) => {
+            let json = serde_json::to_string_pretty(&manifest).unwrap();
+            if let Some(out_path) = &args.out {
+                if let Err(e) = std::fs::write(out_path, &json) {
+                    eprintln!("error: cannot write manifest: {e}");
+                    return ExitCode::FAILURE;
+                }
+                eprintln!("manifest written to {}", out_path.display());
+            } else {
+                println!("{json}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{raw}");
+            eprintln!("error: response is not a valid manifest: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {
