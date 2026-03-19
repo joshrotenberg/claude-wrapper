@@ -185,7 +185,20 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         warn!("failed to write running indicator: {e}");
     }
 
-    info!(tasks = manifest.tasks.len(), "executing manifest");
+    let task_names: Vec<&str> = manifest.tasks.iter().map(|t| t.name.as_str()).collect();
+    let model = manifest
+        .shared
+        .as_ref()
+        .and_then(|s| s.model.as_deref())
+        .or_else(|| manifest.tasks.first().and_then(|t| t.model.as_deref()))
+        .unwrap_or("default");
+    info!(
+        tasks = manifest.tasks.len(),
+        model = model,
+        task_names = ?task_names,
+        project_dir = %options.project_dir.display(),
+        "executing manifest"
+    );
 
     let mut join_set = JoinSet::new();
 
@@ -235,7 +248,26 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         }
     }
 
-    Ok(RunResult { tasks: results })
+    let result = RunResult { tasks: results };
+
+    let wall_time = result
+        .tasks
+        .iter()
+        .map(|t| t.duration.as_secs_f64())
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(0.0);
+    let total_cost: f64 = result.tasks.iter().filter_map(|t| t.cost_usd).sum();
+
+    info!(
+        total = result.tasks.len(),
+        succeeded = result.success_count(),
+        failed = result.tasks.len() - result.success_count(),
+        wall_time_secs = format!("{wall_time:.1}"),
+        total_cost_usd = format!("{total_cost:.4}"),
+        "run complete"
+    );
+
+    Ok(result)
 }
 
 /// Execute a single task.
@@ -286,12 +318,30 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
             // Get file stats from git diff in the worktree.
             let (files_modified, lines_changed) = parse_git_diff_stat(&env.work_dir).await;
 
+            let duration = start.elapsed();
+            let success = output.success;
+            if success {
+                info!(
+                    task = task_name,
+                    duration_secs = format!("{:.1}", duration.as_secs_f64()),
+                    cost_usd = cost_usd.unwrap_or(0.0),
+                    files_modified = files_modified.unwrap_or(0),
+                    "task complete"
+                );
+            } else {
+                error!(
+                    task = task_name,
+                    duration_secs = format!("{:.1}", duration.as_secs_f64()),
+                    "task failed"
+                );
+            }
+
             TaskResult {
                 name: task_name,
-                success: output.success,
+                success,
                 stdout: output.stdout,
                 stderr: output.stderr,
-                duration: start.elapsed(),
+                duration,
                 work_dir: env.work_dir,
                 cost_usd,
                 files_modified,
@@ -474,6 +524,46 @@ async fn run_task_inner(
                 }
             }
 
+            // Log stream events at DEBUG level.
+            match event.event_type() {
+                Some("assistant") => {
+                    if let Some(content) = event
+                        .data
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in content {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                let tool = block
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("unknown");
+                                tracing::debug!(task = task_name, tool = tool, "tool call");
+                            }
+                        }
+                    }
+                }
+                Some("rate_limit_event") => {
+                    tracing::debug!(task = task_name, "rate limited");
+                }
+                Some("result") => {
+                    let cost = event.cost_usd();
+                    let subtype = event
+                        .data
+                        .get("subtype")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    tracing::debug!(
+                        task = task_name,
+                        subtype = subtype,
+                        cost_usd = cost,
+                        "session result"
+                    );
+                }
+                _ => {}
+            }
+
             // Accumulate cost from stream events.
             if let Some(cost) = event.cost_usd() {
                 stream_cost = Some(cost);
@@ -574,6 +664,7 @@ async fn run_hook(
     kind: &str,
 ) -> Result<()> {
     info!(task = task_name, hook = hook, "running {kind} hook");
+    let start = std::time::Instant::now();
     let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(hook)
@@ -584,13 +675,31 @@ async fn run_hook(
             name: task_name.to_owned(),
             message: format!("{kind} hook '{hook}' failed to spawn: {e}"),
         })?;
+    let exit_code = output.status.code().unwrap_or(-1);
+    let duration_ms = start.elapsed().as_millis();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        error!(
+            task = task_name,
+            hook = hook,
+            kind = kind,
+            exit_code = exit_code,
+            duration_ms = duration_ms,
+            "{kind} hook failed"
+        );
         return Err(Error::TaskFailed {
             name: task_name.to_owned(),
             message: format!("{kind} hook '{hook}' exited non-zero: {stderr}"),
         });
     }
+    tracing::debug!(
+        task = task_name,
+        hook = hook,
+        kind = kind,
+        exit_code = exit_code,
+        duration_ms = duration_ms,
+        "{kind} hook succeeded"
+    );
     Ok(())
 }
 
