@@ -641,7 +641,8 @@ impl QueryCommand {
             args.push("--tmux".to_string());
         }
 
-        // Prompt is the positional argument at the end
+        // Separator to prevent flags like --allowed-tools from consuming the prompt.
+        args.push("--".to_string());
         args.push(self.prompt.clone());
 
         args
@@ -679,7 +680,7 @@ mod tests {
     fn test_basic_query_args() {
         let cmd = QueryCommand::new("hello world");
         let args = cmd.args();
-        assert_eq!(args, vec!["--print", "hello world"]);
+        assert_eq!(args, vec!["--print", "--", "hello world"]);
     }
 
     #[test]
@@ -714,8 +715,32 @@ mod tests {
         assert!(args.contains(&"high".to_string()));
         assert!(args.contains(&"--max-turns".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
-        // Prompt is last
+        // Prompt is last, preceded by -- separator
         assert_eq!(args.last().unwrap(), "explain this");
+        assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
+    fn test_separator_before_prompt_prevents_greedy_flag_parsing() {
+        // Regression: --allowed-tools was consuming the prompt as a tool name
+        // when the prompt appeared after it without a -- separator.
+        let cmd = QueryCommand::new("fix the bug")
+            .allowed_tools(["Read", "Edit", "Bash(cargo *)"])
+            .output_format(OutputFormat::StreamJson);
+        let args = cmd.args();
+        // -- separator must appear before the prompt
+        let sep_pos = args.iter().position(|a| a == "--").unwrap();
+        let prompt_pos = args.iter().position(|a| a == "fix the bug").unwrap();
+        assert_eq!(prompt_pos, sep_pos + 1, "prompt must follow -- separator");
+        // --allowed-tools value must appear before the separator
+        let tools_pos = args
+            .iter()
+            .position(|a| a.contains("Bash(cargo *)"))
+            .unwrap();
+        assert!(
+            tools_pos < sep_pos,
+            "allowed-tools must come before -- separator"
+        );
     }
 
     #[test]
