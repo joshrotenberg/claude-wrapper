@@ -22,6 +22,7 @@ async fn main() -> ExitCode {
         Command::Init(args) => cmd_init(args).await,
         Command::Status(args) => cmd_status(args).await,
         Command::Clean(args) => cmd_clean(args).await,
+        Command::Fix(args) => cmd_fix(args).await,
     }
 }
 
@@ -383,6 +384,136 @@ async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+async fn cmd_fix(args: claudes::cli::FixArgs) -> ExitCode {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let state = if let Some(ref run_id) = args.run {
+        claudes::state::load_run(&project_dir, run_id)
+    } else {
+        claudes::state::load(&project_dir)
+    };
+
+    let state = match state {
+        Some(s) => s,
+        None => {
+            eprintln!("error: no run state found (run `claudes run` first)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let tasks_to_fix: Vec<&claudes::state::TaskState> = state
+        .results
+        .iter()
+        .filter(|t| {
+            if args.task.is_empty() {
+                matches!(
+                    t.status,
+                    claudes::state::TaskStatus::Failed | claudes::state::TaskStatus::Timeout
+                )
+            } else {
+                args.task.contains(&t.name)
+            }
+        })
+        .collect();
+
+    if tasks_to_fix.is_empty() {
+        eprintln!("no failed or timed-out tasks to fix");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut all_succeeded = true;
+
+    for task_state in tasks_to_fix {
+        eprintln!("fixing task: {}", task_state.name);
+
+        let original_task = state
+            .manifest
+            .tasks
+            .iter()
+            .find(|t| t.name == task_state.name);
+
+        let original_prompt = original_task
+            .map(|t| t.prompt.as_str())
+            .unwrap_or("[unknown]");
+
+        let error_context = task_state
+            .error
+            .as_deref()
+            .unwrap_or("task timed out or failed with no error output");
+
+        let mut fix_prompt = format!(
+            "The previous task failed. Original prompt: {original_prompt}. \
+             Error: {error_context}. Fix the issue."
+        );
+        if let Some(ref guidance) = args.prompt {
+            fix_prompt.push_str(&format!(" {guidance}"));
+        }
+
+        let mut fix_task = original_task
+            .cloned()
+            .unwrap_or_else(|| claudes::Task::new(&task_state.name, ""));
+        fix_task.prompt = fix_prompt;
+        fix_task.isolation = Some(claudes::Isolation::None);
+
+        let fix_manifest = claudes::Manifest::new(vec![fix_task]);
+
+        let work_dir = PathBuf::from(&task_state.work_dir);
+        if !work_dir.exists() {
+            eprintln!(
+                "error: work_dir for task '{}' no longer exists: {}",
+                task_state.name, task_state.work_dir
+            );
+            all_succeeded = false;
+            continue;
+        }
+
+        let started_at = chrono::Utc::now();
+
+        let mut options = claudes::RunOptions {
+            project_dir: work_dir,
+            force: args.force,
+            binary: None,
+            env: vec![],
+            cleanup: claudes::CleanupPolicy::default(),
+            event_sender: None,
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        options.event_sender = Some(tx);
+        let stream_handle =
+            tokio::spawn(output::render_stream(rx, output::Verbosity::Default, false));
+
+        let result = match claudes::run(&fix_manifest, &options).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                all_succeeded = false;
+                continue;
+            }
+        };
+
+        options.event_sender = None;
+        let _ = stream_handle.await;
+
+        let fix_state = claudes::state::build_state(&fix_manifest, &result, started_at);
+        if let Err(e) = claudes::state::save(&project_dir, &fix_state) {
+            tracing::warn!("failed to write fix state file: {e}");
+        }
+
+        output::print_summary(&result, output::OutputFormat::Text);
+
+        if !result.all_succeeded() {
+            all_succeeded = false;
+        }
+    }
+
+    if all_succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {
