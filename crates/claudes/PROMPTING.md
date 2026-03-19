@@ -124,6 +124,33 @@ Example of a bad parallel split: "Refactor `parse()` to return `Result`" and "Ad
 `parse()` when input is empty" — both rewrite the same function's control flow and will conflict.
 Run one, then the other.
 
+### Handling merge conflicts after a batch
+
+When multiple tasks run in parallel from the same HEAD, merging them sequentially causes rebase
+conflicts on later branches. This is expected. Some tips:
+
+- **Merge PRs in dependency order.** If task B builds on task A's output, merge A first.
+- **Lock files (Cargo.lock, package-lock.json, yarn.lock):** On conflict, take either side and
+  regenerate: `git checkout --theirs Cargo.lock && cargo check && git add Cargo.lock`. The
+  regenerated lock file will be correct. This pattern applies to any lock file — swap `cargo check`
+  for `npm install`, `yarn install`, etc.
+- **Additive conflicts (new match arms, new enum variants):** These are "keep both" merges and
+  resolve quickly. Most batch conflicts are this type.
+- **Structural conflicts:** If two branches restructured the same function differently, manual
+  resolution is required. This is the planning problem described above — avoid it by sequencing.
+- **Global post_hooks** in `~/.config/claudes/defaults.toml` can help keep lock files consistent
+  in each worktree before pushing, reducing the chance of conflicts:
+
+```toml
+[shared]
+post_hooks = ["cargo check --quiet"]
+```
+
+- **Enable merge queues** on repos used with claudes. GitHub merge queues automatically rebase
+  each PR on top of previously merged PRs and run CI before merging. This catches conflicts and
+  broken builds before they hit main, and lets you merge claudes PRs in rapid succession without
+  manual rebasing. See [GitHub merge queue docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+
 ---
 
 ## 5. Common Post-Hook Failures
