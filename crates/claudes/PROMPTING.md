@@ -21,6 +21,11 @@ Every task prompt should include:
   (Summary, files changed, Test plan).
 - **Verification steps** — List the exact commands to run before the task is done. "Run
   `cargo fmt --check` and `cargo test --lib` and confirm they pass."
+- **Rust 2024 if-let chains** — For Rust projects, include in the system prompt: "Use Rust 2024
+  if-let chains: write `if let Some(x) = y && condition {` instead of nested if-let/if blocks."
+  This prevents `collapsible_if` clippy failures that post-hooks will catch.
+- **`finally_hooks` for cleanup** — Include `finally_hooks` for cleanup that must run regardless
+  of whether the task succeeds or fails (e.g., removing temp files, resetting state).
 
 ---
 
@@ -97,34 +102,75 @@ Start narrow. A code-editing task rarely needs every tool.
 
 ---
 
-## 4. Annotated Example
+## 4. Parallel vs Sequential
+
+Not all tasks can safely run in parallel. The key distinction is whether tasks touch the same
+logical unit.
+
+**Additive changes are usually safe to parallelize.** Adding a new function, a new struct field,
+or a new test to a file does not conflict with another task doing the same thing in a different
+location. Merge is mechanical.
+
+**Structural changes to the same function must be sequenced.** If two tasks both modify how a
+function branches — different control flow, different return types, different error handling — they
+will produce conflicting diffs on the same lines. No amount of tooling resolves this cleanly. One
+task must finish before the other starts.
+
+**This is a planning problem, not a tooling problem.** It applies to any parallel work system, not
+just `claudes`. When scheduling tasks, ask: do any of these tasks modify the same function body?
+If yes, sequence them.
+
+Example of a bad parallel split: "Refactor `parse()` to return `Result`" and "Add early-return to
+`parse()` when input is empty" — both rewrite the same function's control flow and will conflict.
+Run one, then the other.
+
+---
+
+## 5. Common Post-Hook Failures
+
+`post_hooks` catch verification failures that the model's self-report misses. Common failures:
+
+- **`collapsible_if` clippy lint** — The model wrote nested `if let` / `if` blocks instead of a
+  Rust 2024 if-let chain. Fix: add the if-let chain instruction to the system prompt (see Prompt
+  Checklist above). Or run `claudes fix` to retry the failing task.
+
+- **`cargo fmt` failures** — The model usually ran `cargo fmt` but missed a file, or a generated
+  file was not formatted. Fix: identify the unformatted file from the hook output and run
+  `cargo fmt` on it, or let `claudes fix` handle it.
+
+These failures surface as non-zero exit codes from `post_hooks`. The run is marked failed and the
+worktree is preserved for inspection.
+
+---
+
+## 6. Annotated Example
 
 ```json
 {
   "version": 1,
+
+  "shared": {
+    "append_system_prompt": "This is a Rust 2024 project. Use if-let chains: write `if let Some(x) = y && condition {` instead of nested if-let/if blocks. Do NOT modify any file not explicitly named in the task prompt.",
+    "allowed_tools": [
+      "Read",
+      "Edit",
+      "Bash(cargo *)",
+      "Bash(git *)",
+      "Bash(gh pr *)"
+    ],
+    "disallowed_tools": ["Write"],
+    "post_hooks": [
+      "cargo fmt --check",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo test --lib"
+    ]
+  },
+
   "tasks": [
     {
       "name": "fix-token-expiry",
 
-      "prompt": "Fix the off-by-one error in token expiry in `src/auth/token.rs`.\n\nOnly modify `src/auth/token.rs` and `tests/auth/token_test.rs`. Do NOT touch any other file.\n\nCommit with message `fix(auth): correct token expiry check`.\n\nThen run:\n  gh pr create --title 'fix(auth): correct token expiry check' --body '## Summary\n- Fixed off-by-one in token expiry\n- Modified: src/auth/token.rs, tests/auth/token_test.rs\n\n## Test plan\n- [ ] cargo test --lib passes\n- [ ] cargo clippy clean'\n\nDo NOT create a PR until all verification steps pass.",
-
-      "allowed_tools": [
-        "Read",
-        "Edit",
-        "Bash(cargo *)",
-        "Bash(git *)",
-        "Bash(gh pr *)"
-      ],
-
-      "disallowed_tools": ["Write"],
-
-      "append_system_prompt": "Do NOT modify any file not explicitly named in the task prompt.",
-
-      "post_hooks": [
-        "cargo fmt --check",
-        "cargo clippy --all-targets -- -D warnings",
-        "cargo test --lib"
-      ]
+      "prompt": "Fix the off-by-one error in token expiry in `src/auth/token.rs`.\n\nOnly modify `src/auth/token.rs` and `tests/auth/token_test.rs`. Do NOT touch any other file.\n\nCommit with message `fix(auth): correct token expiry check`.\n\nThen run:\n  gh pr create --title 'fix(auth): correct token expiry check' --body '## Summary\n- Fixed off-by-one in token expiry\n- Modified: src/auth/token.rs, tests/auth/token_test.rs\n\n## Test plan\n- [ ] cargo test --lib passes\n- [ ] cargo clippy clean'\n\nDo NOT create a PR until all verification steps pass."
     }
   ]
 }
@@ -132,10 +178,10 @@ Start narrow. A code-editing task rarely needs every tool.
 
 Key points in this example:
 
+- `shared` block holds config that applies to every task — avoids repeating it per task
+- `shared.append_system_prompt` includes the Rust 2024 if-let chain instruction
+- `shared.post_hooks` enforce verification without relying on the model's self-report
 - `name` is descriptive, not auto-generated
 - Prompt names every file that may be touched
 - Prompt specifies the exact commit message and PR body format
-- `allowed_tools` is scoped to read, edit, cargo, git, and gh — nothing else
 - `disallowed_tools` blocks `Write` to prevent creating files
-- `append_system_prompt` reinforces the file restriction at the system level
-- `post_hooks` enforce verification without relying on the model's self-report
