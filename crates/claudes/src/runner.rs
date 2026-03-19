@@ -474,7 +474,7 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
     };
     if let Some(hooks) = &task.finally_hooks {
         info!(task = task_name, "running finally hooks");
-        run_finally_hooks(&task_name, hooks, &work_dir).await;
+        run_finally_hooks(&task_name, hooks, &work_dir, options.event_sender.as_ref()).await;
     }
 
     match result {
@@ -606,7 +606,14 @@ async fn run_task_inner(
     // Run pre-hooks before starting the session.
     if let Some(hooks) = &task.pre_hooks {
         info!(task = task.name, "running pre hooks");
-        run_hooks(&task.name, hooks, &env.work_dir, "pre").await?;
+        run_hooks(
+            &task.name,
+            hooks,
+            &env.work_dir,
+            "pre",
+            options.event_sender.as_ref(),
+        )
+        .await?;
     }
 
     info!(task = task.name, work_dir = %env.work_dir.display(), "running task");
@@ -771,19 +778,45 @@ async fn run_task_inner(
     if output.success
         && let Some(hooks) = &task.post_hooks
     {
-        run_hooks(&task.name, hooks, &env.work_dir, "post").await?;
+        run_hooks(
+            &task.name,
+            hooks,
+            &env.work_dir,
+            "post",
+            options.event_sender.as_ref(),
+        )
+        .await?;
     }
 
     Ok((output, env, stream_cost))
 }
 
 /// Run finally_hooks — always executes all hooks, logging failures without propagating.
-async fn run_finally_hooks(task_name: &str, hooks: &[String], work_dir: &std::path::Path) {
+async fn run_finally_hooks(
+    task_name: &str,
+    hooks: &[String],
+    work_dir: &std::path::Path,
+    event_sender: Option<&mpsc::UnboundedSender<TaskEvent>>,
+) {
     let span = tracing::info_span!("finally_hooks", task = task_name);
     async {
         for hook in hooks {
             info!(task = task_name, hook = hook, "running finally hook");
-            match tokio::process::Command::new("sh")
+            if let Some(sender) = event_sender {
+                let _ = sender.send(TaskEvent {
+                    task_name: task_name.to_owned(),
+                    event: StreamEvent {
+                        data: serde_json::json!({
+                            "type": "claudes_hook_start",
+                            "task_name": task_name,
+                            "kind": "finally",
+                            "command": hook,
+                        }),
+                    },
+                });
+            }
+            let start = std::time::Instant::now();
+            let exit_code = match tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(hook)
                 .current_dir(work_dir)
@@ -797,6 +830,7 @@ async fn run_finally_hooks(task_name: &str, hooks: &[String], work_dir: &std::pa
                         hook = hook,
                         "finally hook failed (continuing): {stderr}"
                     );
+                    output.status.code().unwrap_or(-1)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -804,8 +838,24 @@ async fn run_finally_hooks(task_name: &str, hooks: &[String], work_dir: &std::pa
                         hook = hook,
                         "finally hook failed to spawn (continuing): {e}"
                     );
+                    -1
                 }
-                _ => {}
+                Ok(output) => output.status.code().unwrap_or(0),
+            };
+            let duration_ms = start.elapsed().as_millis();
+            if let Some(sender) = event_sender {
+                let _ = sender.send(TaskEvent {
+                    task_name: task_name.to_owned(),
+                    event: StreamEvent {
+                        data: serde_json::json!({
+                            "type": "claudes_hook_complete",
+                            "task_name": task_name,
+                            "kind": "finally",
+                            "exit_code": exit_code,
+                            "duration_ms": duration_ms,
+                        }),
+                    },
+                });
             }
         }
     }
@@ -819,10 +869,11 @@ async fn run_hooks(
     hooks: &[String],
     work_dir: &std::path::Path,
     kind: &str,
+    event_sender: Option<&mpsc::UnboundedSender<TaskEvent>>,
 ) -> Result<()> {
     for hook in hooks {
         let span = tracing::info_span!("hook", task = task_name, kind = kind, hook = hook.as_str());
-        run_hook(task_name, hook, work_dir, kind)
+        run_hook(task_name, hook, work_dir, kind, event_sender)
             .instrument(span)
             .await?;
     }
@@ -835,8 +886,22 @@ async fn run_hook(
     hook: &str,
     work_dir: &std::path::Path,
     kind: &str,
+    event_sender: Option<&mpsc::UnboundedSender<TaskEvent>>,
 ) -> Result<()> {
     info!(task = task_name, hook = hook, "running {kind} hook");
+    if let Some(sender) = event_sender {
+        let _ = sender.send(TaskEvent {
+            task_name: task_name.to_owned(),
+            event: StreamEvent {
+                data: serde_json::json!({
+                    "type": "claudes_hook_start",
+                    "task_name": task_name,
+                    "kind": kind,
+                    "command": hook,
+                }),
+            },
+        });
+    }
     let start = std::time::Instant::now();
     let output = tokio::process::Command::new("sh")
         .arg("-c")
@@ -850,6 +915,20 @@ async fn run_hook(
         })?;
     let exit_code = output.status.code().unwrap_or(-1);
     let duration_ms = start.elapsed().as_millis();
+    if let Some(sender) = event_sender {
+        let _ = sender.send(TaskEvent {
+            task_name: task_name.to_owned(),
+            event: StreamEvent {
+                data: serde_json::json!({
+                    "type": "claudes_hook_complete",
+                    "task_name": task_name,
+                    "kind": kind,
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                }),
+            },
+        });
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         error!(
@@ -1029,7 +1108,7 @@ mod tests {
     #[tokio::test]
     async fn pre_hooks_success() {
         let dir = tempfile::tempdir().unwrap();
-        run_hooks("test-task", &["echo hello".into()], dir.path(), "pre")
+        run_hooks("test-task", &["echo hello".into()], dir.path(), "pre", None)
             .await
             .unwrap();
     }
@@ -1037,7 +1116,7 @@ mod tests {
     #[tokio::test]
     async fn pre_hooks_failure_returns_task_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "pre")
+        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "pre", None)
             .await
             .unwrap_err();
         match err {
@@ -1054,14 +1133,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("sentinel");
         let hooks = vec!["exit 1".into(), format!("touch {}", sentinel.display())];
-        let _ = run_hooks("test-task", &hooks, dir.path(), "pre").await;
+        let _ = run_hooks("test-task", &hooks, dir.path(), "pre", None).await;
         assert!(!sentinel.exists(), "second hook should not have run");
     }
 
     #[tokio::test]
     async fn pre_hooks_empty_list_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        run_hooks("test-task", &[], dir.path(), "pre")
+        run_hooks("test-task", &[], dir.path(), "pre", None)
             .await
             .unwrap();
     }
@@ -1069,15 +1148,21 @@ mod tests {
     #[tokio::test]
     async fn post_hooks_success() {
         let dir = tempfile::tempdir().unwrap();
-        run_hooks("test-task", &["echo hello".into()], dir.path(), "post")
-            .await
-            .unwrap();
+        run_hooks(
+            "test-task",
+            &["echo hello".into()],
+            dir.path(),
+            "post",
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn post_hooks_failure_returns_task_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "post")
+        let err = run_hooks("test-task", &["exit 1".into()], dir.path(), "post", None)
             .await
             .unwrap_err();
         match err {
@@ -1094,14 +1179,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("sentinel");
         let hooks = vec!["exit 1".into(), format!("touch {}", sentinel.display())];
-        let _ = run_hooks("test-task", &hooks, dir.path(), "post").await;
+        let _ = run_hooks("test-task", &hooks, dir.path(), "post", None).await;
         assert!(!sentinel.exists(), "second hook should not have run");
     }
 
     #[tokio::test]
     async fn post_hooks_empty_list_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        run_hooks("test-task", &[], dir.path(), "post")
+        run_hooks("test-task", &[], dir.path(), "post", None)
             .await
             .unwrap();
     }

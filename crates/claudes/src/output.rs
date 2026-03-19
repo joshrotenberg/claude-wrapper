@@ -535,6 +535,18 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
                     footer.finish_with_message("");
                 }
             }
+            "claudes_hook_start" => {
+                if let Some(pb) = bars.get(task.as_str()) {
+                    let kind = data.get("kind").and_then(|k| k.as_str()).unwrap_or("hook");
+                    let command = data.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                    let msg = if command.is_empty() {
+                        format!("{kind}_hook")
+                    } else {
+                        format!("{kind}_hook: {}", truncate(command, 50))
+                    };
+                    pb.set_message(msg);
+                }
+            }
             "assistant" => {
                 if let Some(content) = data
                     .get("message")
@@ -547,7 +559,7 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
                                 .get("name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("unknown");
-                            let first_arg = extract_tool_arg(block);
+                            let first_arg = extract_tool_arg(tool, block);
                             let msg = if first_arg.is_empty() {
                                 tool.to_string()
                             } else {
@@ -640,12 +652,27 @@ pub async fn render_ndjson(mut rx: mpsc::UnboundedReceiver<TaskEvent>) {
 // Helpers
 // ============================================================================
 
-/// Extract the first tool argument from a tool_use block, with path stripping.
-fn extract_tool_arg(block: &serde_json::Value) -> String {
-    block
-        .get("input")
-        .and_then(|i| i.as_object())
-        .and_then(|obj| obj.values().next())
+/// Extract the most meaningful tool argument from a tool_use block, with path stripping.
+fn extract_tool_arg(tool_name: &str, block: &serde_json::Value) -> String {
+    let preferred_key = match tool_name {
+        "Read" | "Edit" | "Write" => Some("file_path"),
+        "Grep" | "Glob" => Some("pattern"),
+        "Bash" => Some("command"),
+        "WebSearch" => Some("query"),
+        "WebFetch" => Some("url"),
+        _ => None,
+    };
+
+    let input = block.get("input").and_then(|i| i.as_object());
+
+    let value = if let Some(key) = preferred_key {
+        input.and_then(|obj| obj.get(key))
+    } else {
+        // Fall back to first string-typed value, skipping numeric values.
+        input.and_then(|obj| obj.values().find(|v| v.is_string()))
+    };
+
+    value
         .map(|v| {
             let s = if let Some(s) = v.as_str() {
                 s.to_string()
