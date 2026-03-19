@@ -665,8 +665,52 @@ pub fn print_status(state: &RunState) {
         let branch = task.branch.as_deref().unwrap_or("-");
         let time = format!("{:.1}s", task.duration_secs);
 
-        let name = &task.name;
-        println!("  {name:<30} {status_display} {time:>8}  {cost:>8}  {branch}");
+        let name_raw: String = if task.name.chars().count() > 30 {
+            let truncated: String = task.name.chars().take(27).collect();
+            format!("{truncated}...")
+        } else {
+            task.name.clone()
+        };
+        let name_display = if use_color {
+            match task.status {
+                TaskStatus::Success => format!(
+                    "{:<30}",
+                    name_raw
+                        .as_str()
+                        .with(Color::Rgb {
+                            r: 0,
+                            g: 255,
+                            b: 128
+                        })
+                        .to_string()
+                ),
+                TaskStatus::Failed => format!(
+                    "{:<30}",
+                    name_raw
+                        .as_str()
+                        .with(Color::Rgb {
+                            r: 255,
+                            g: 80,
+                            b: 80
+                        })
+                        .to_string()
+                ),
+                TaskStatus::Timeout => format!(
+                    "{:<30}",
+                    name_raw
+                        .as_str()
+                        .with(Color::Rgb {
+                            r: 255,
+                            g: 255,
+                            b: 0
+                        })
+                        .to_string()
+                ),
+            }
+        } else {
+            format!("{name_raw:<30}")
+        };
+        println!("  {name_display} {status_display} {time:>8}  {cost:>8}  {branch}");
 
         if let Some(err) = &task.error
             && let Some(first_line) = err.lines().next()

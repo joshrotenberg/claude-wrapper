@@ -133,11 +133,14 @@ fn print_task_result(out: &mut impl Write, task: &TaskResult) {
         .map(|c| format!("  ${c:.2}"))
         .unwrap_or_default();
 
-    let _ = writeln!(
-        out,
-        "  {name:<30} {status:<12} {duration}{cost_str}",
-        name = task.name,
-    );
+    let name: String = if task.name.chars().count() > 30 {
+        let truncated: String = task.name.chars().take(27).collect();
+        format!("{truncated}...")
+    } else {
+        task.name.clone()
+    };
+
+    let _ = writeln!(out, "  {name:<30} {status:<12} {duration}{cost_str}",);
 
     if !task.success && !task.stderr.is_empty() {
         for line in task.stderr.lines().take(5) {
@@ -209,7 +212,13 @@ pub async fn render_stream(
         };
 
         let prefix = {
-            let padded = format!("{task:<20}");
+            let task_display: String = if task.chars().count() > 20 {
+                let truncated: String = task.chars().take(17).collect();
+                format!("{truncated}...")
+            } else {
+                task.clone()
+            };
+            let padded = format!("{task_display:<20}");
             match color_opt {
                 Some(color) => format!("{}", padded.with(color)),
                 None => padded,
@@ -283,10 +292,14 @@ pub async fn render_stream(
                                         } else {
                                             s
                                         };
-                                        // Also strip .worktrees/<task-name>/ prefix.
+                                        // Strip .worktrees/<task-name>/ prefix (relative or absolute).
                                         let s = if let Some(rest) = s.strip_prefix(".worktrees/") {
                                             rest.split_once('/')
                                                 .map_or(s.clone(), |(_, after)| after.to_string())
+                                        } else if let Some(idx) = s.find("/.worktrees/") {
+                                            let rest = &s[idx + "/.worktrees/".len()..];
+                                            rest.split_once('/')
+                                                .map_or(s.clone(), |(_, p)| p.to_string())
                                         } else {
                                             s
                                         };
