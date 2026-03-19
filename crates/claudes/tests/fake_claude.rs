@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use claudes::manifest::Shared;
 use claudes::planner::PlanOptions;
 use claudes::{CleanupPolicy, Isolation, Manifest, RunOptions, Task, plan};
 
@@ -353,4 +354,186 @@ async fn force_overwrites_existing_worktree() {
         .arg(&wt_dir)
         .current_dir(dir.path())
         .status();
+}
+
+/// Task with post_hooks that succeed — task is reported as succeeded.
+#[tokio::test]
+#[ignore]
+async fn run_with_post_hooks_success() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("post-hook-ok", "do something");
+        t.isolation = Some(Isolation::None);
+        t.post_hooks = Some(vec!["echo ok".into()]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+    assert!(result.tasks[0].success);
+}
+
+/// Task with post_hooks that fail — task is marked failed.
+#[tokio::test]
+#[ignore]
+async fn run_with_post_hooks_failure() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("post-hook-fail", "do something");
+        t.isolation = Some(Isolation::None);
+        t.post_hooks = Some(vec!["exit 1".into()]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(!result.all_succeeded());
+    assert!(!result.tasks[0].success);
+}
+
+/// Task with pre_hooks that succeed — task is reported as succeeded.
+#[tokio::test]
+#[ignore]
+async fn run_with_pre_hooks() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("pre-hook-ok", "do something");
+        t.isolation = Some(Isolation::None);
+        t.pre_hooks = Some(vec!["echo setup".into()]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+    assert!(result.tasks[0].success);
+}
+
+/// Task with pre_hooks that fail — task fails without running the session.
+#[tokio::test]
+#[ignore]
+async fn run_with_pre_hooks_failure_skips_session() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("pre-hook-fail", "do something");
+        t.isolation = Some(Isolation::None);
+        t.pre_hooks = Some(vec!["exit 1".into()]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(!result.all_succeeded());
+    assert!(!result.tasks[0].success);
+    // Session never ran, so fake-claude output is absent.
+    assert!(!result.tasks[0].stdout.contains("task complete"));
+}
+
+/// Task that fails still executes finally_hooks — sentinel file should exist.
+#[tokio::test]
+#[ignore]
+async fn run_with_finally_hooks_on_failure() {
+    let dir = temp_git_repo();
+    let sentinel = dir.path().join("sentinel");
+
+    let options = RunOptions {
+        project_dir: dir.path().to_path_buf(),
+        force: false,
+        binary: Some(fake_binary()),
+        env: vec![
+            ("FAKE_CLAUDE_EXIT_CODE".into(), "1".into()),
+            ("FAKE_CLAUDE_ERROR_MSG".into(), "simulated failure".into()),
+        ],
+        cleanup: CleanupPolicy::None,
+        event_sender: None,
+    };
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("finally-task", "do something");
+        t.isolation = Some(Isolation::None);
+        t.finally_hooks = Some(vec![format!("touch {}", sentinel.display())]);
+        t
+    }]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(!result.tasks[0].success);
+    assert!(
+        sentinel.exists(),
+        "finally_hook should have created the sentinel file"
+    );
+}
+
+/// Manifest with a shared model block — resolved tasks inherit the model.
+#[tokio::test]
+#[ignore]
+async fn run_with_shared_block() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let mut manifest = Manifest::new(vec![{
+        let mut t = Task::new("shared-task", "do something");
+        t.isolation = Some(Isolation::None);
+        t
+    }]);
+    manifest.shared = Some(Shared {
+        model: Some("test-model".into()),
+        ..Default::default()
+    });
+
+    // Shared model propagates to the task after resolution.
+    let resolved = manifest.resolve();
+    assert_eq!(resolved.tasks[0].model.as_deref(), Some("test-model"));
+
+    // Manifest executes successfully.
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+}
+
+/// Manifest::from_file parses a TOML manifest file correctly (unit test, no execution).
+#[test]
+#[ignore]
+fn run_from_toml_manifest() {
+    use std::io::Write;
+
+    let mut f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+    write!(
+        f,
+        r#"version = 1
+created_at = "2026-03-18T10:30:00Z"
+
+[shared]
+model = "claude-opus-4-6"
+
+[[tasks]]
+name = "t1"
+prompt = "do the thing"
+"#
+    )
+    .unwrap();
+
+    let manifest = Manifest::from_file(f.path()).unwrap();
+    assert_eq!(manifest.tasks.len(), 1);
+    assert_eq!(manifest.tasks[0].name, "t1");
+    assert_eq!(manifest.tasks[0].prompt, "do the thing");
+    assert_eq!(
+        manifest.shared.as_ref().unwrap().model.as_deref(),
+        Some("claude-opus-4-6")
+    );
+}
+
+/// Manifest::discover finds claudes.toml in a directory (unit test, no execution).
+#[test]
+#[ignore]
+fn manifest_autodiscovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("claudes.toml");
+    std::fs::write(&manifest_path, "").unwrap();
+
+    let found = Manifest::discover(dir.path());
+    assert_eq!(found, Some(manifest_path));
 }
