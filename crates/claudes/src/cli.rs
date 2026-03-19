@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "claudes", version, about)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,6 +124,10 @@ pub struct RunArgs {
     /// Auto-cleanup worktrees after run (none|on-success|always; default: none).
     #[arg(long, default_value = "none")]
     pub cleanup: String,
+
+    /// Skill files to inject into the system prompt (repeatable).
+    #[arg(long)]
+    pub skill: Vec<String>,
 
     /// Disable colored output.
     #[arg(long)]

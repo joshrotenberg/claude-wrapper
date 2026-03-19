@@ -313,6 +313,21 @@ impl Manifest {
                         task.finally_hooks.as_ref(),
                     ),
                     depends_on: task.depends_on.clone(),
+                    skills: merge_hooks(
+                        shared.and_then(|s| s.skills.as_ref()),
+                        profile.and_then(|p| p.skills.as_ref()),
+                        task.skills.as_ref(),
+                    ),
+                    settings: task
+                        .settings
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.settings.clone()))
+                        .or_else(|| shared.and_then(|s| s.settings.clone())),
+                    setting_sources: task
+                        .setting_sources
+                        .clone()
+                        .or_else(|| profile.and_then(|p| p.setting_sources.clone()))
+                        .or_else(|| shared.and_then(|s| s.setting_sources.clone())),
                 }
             })
             .collect();
@@ -393,6 +408,75 @@ impl Manifest {
                 }
                 task.append_system_prompt = Some(std::fs::read_to_string(&path)?);
             }
+        }
+
+        self.resolve_skills(base_dir)?;
+
+        Ok(())
+    }
+
+    /// Load skill file contents and append them to `append_system_prompt` for each task.
+    ///
+    /// Skill paths are resolved relative to `base_dir`. Skills from the shared block and
+    /// the task's referenced profile are prepended to task-level skills (same order as hooks).
+    /// The loaded content is appended to any existing `append_system_prompt`.
+    ///
+    /// This is called automatically by [`Manifest::resolve_files`].
+    pub fn resolve_skills(&mut self, base_dir: &Path) -> Result<(), crate::Error> {
+        let shared_skills = self
+            .shared
+            .as_ref()
+            .and_then(|s| s.skills.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let profiles = self.profiles.clone();
+
+        for task in &mut self.tasks {
+            let profile_skills: Vec<String> = task
+                .profile
+                .as_ref()
+                .and_then(|name| {
+                    profiles
+                        .as_ref()
+                        .and_then(|m| m.get(name.as_str()))
+                        .and_then(|p| p.skills.as_ref())
+                })
+                .cloned()
+                .unwrap_or_default();
+            let task_skills = task.skills.as_ref().cloned().unwrap_or_default();
+
+            let all_skills: Vec<&String> = shared_skills
+                .iter()
+                .chain(profile_skills.iter())
+                .chain(task_skills.iter())
+                .collect();
+
+            if all_skills.is_empty() {
+                continue;
+            }
+
+            let mut skill_content = String::new();
+            for skill_path in &all_skills {
+                let path = base_dir.join(skill_path.as_str());
+                if !path.exists() {
+                    return Err(crate::Error::InvalidManifest(format!(
+                        "task '{}': skill file '{}' not found",
+                        task.name,
+                        path.display()
+                    )));
+                }
+                if !skill_content.is_empty() {
+                    skill_content.push('\n');
+                }
+                skill_content.push_str(&std::fs::read_to_string(&path)?);
+            }
+
+            let existing = task.append_system_prompt.take().unwrap_or_default();
+            task.append_system_prompt = Some(if existing.is_empty() {
+                skill_content
+            } else {
+                format!("{existing}\n{skill_content}")
+            });
         }
 
         Ok(())
@@ -863,6 +947,20 @@ pub struct Shared {
     /// Shell commands that always run after task completion, regardless of outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finally_hooks: Option<Vec<String>>,
+
+    /// Skill files (markdown/text) whose contents are appended to the system prompt.
+    /// Shared skills are prepended to any task-level skills.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+
+    /// Path to a Claude CLI settings JSON file (maps to `--settings`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
+
+    /// Comma-separated list of setting sources to load, e.g. `"project"` or `"user,project"`
+    /// (maps to `--setting-sources`). Useful in CI to skip user-level settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting_sources: Option<String>,
 }
 
 /// A fully resolved task. Every field is explicit.
@@ -975,6 +1073,19 @@ pub struct Task {
     /// If any dependency fails, this task is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
+
+    /// Skill files (markdown/text) whose contents are appended to the system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+
+    /// Path to a Claude CLI settings JSON file (maps to `--settings`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
+
+    /// Comma-separated list of setting sources to load, e.g. `"project"` or `"user,project"`
+    /// (maps to `--setting-sources`). Useful in CI to skip user-level settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting_sources: Option<String>,
 }
 
 impl Task {
@@ -1008,6 +1119,9 @@ impl Task {
             post_hooks: None,
             finally_hooks: None,
             depends_on: None,
+            skills: None,
+            settings: None,
+            setting_sources: None,
         }
     }
 
@@ -1236,6 +1350,24 @@ impl TaskBuilder {
     /// Set the finally hooks (always run, regardless of outcome).
     pub fn finally_hooks(mut self, finally_hooks: Vec<String>) -> Self {
         self.task.finally_hooks = Some(finally_hooks);
+        self
+    }
+
+    /// Set skill files to inject into the system prompt.
+    pub fn skills(mut self, skills: Vec<String>) -> Self {
+        self.task.skills = Some(skills);
+        self
+    }
+
+    /// Set the Claude CLI settings file path.
+    pub fn settings(mut self, settings: impl Into<String>) -> Self {
+        self.task.settings = Some(settings.into());
+        self
+    }
+
+    /// Set the Claude CLI setting sources.
+    pub fn setting_sources(mut self, setting_sources: impl Into<String>) -> Self {
+        self.task.setting_sources = Some(setting_sources.into());
         self
     }
 
