@@ -11,7 +11,7 @@ use claude_wrapper::streaming::StreamEvent;
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::isolation::{self, IsolatedEnv};
@@ -240,6 +240,22 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 
 /// Execute a single task.
 async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
+    let isolation_type = match &task.isolation {
+        None | Some(crate::manifest::Isolation::None) => "none",
+        Some(crate::manifest::Isolation::Clone { .. }) => "clone",
+        Some(crate::manifest::Isolation::Worktree { .. }) => "worktree",
+    };
+    let span = tracing::info_span!(
+        "task",
+        name = %task.name,
+        model = task.model.as_deref().unwrap_or(""),
+        isolation = isolation_type,
+    );
+    run_task_impl(task, options).instrument(span).await
+}
+
+/// Inner task execution body.
+async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
     let start = std::time::Instant::now();
     let task_name = task.name.clone();
 
@@ -492,33 +508,38 @@ async fn run_task_inner(
 
 /// Run finally_hooks — always executes all hooks, logging failures without propagating.
 async fn run_finally_hooks(task_name: &str, hooks: &[String], work_dir: &std::path::Path) {
-    for hook in hooks {
-        info!(task = task_name, hook = hook, "running finally hook");
-        match tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(hook)
-            .current_dir(work_dir)
-            .output()
-            .await
-        {
-            Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!(
-                    task = task_name,
-                    hook = hook,
-                    "finally hook failed (continuing): {stderr}"
-                );
+    let span = tracing::info_span!("finally_hooks", task = task_name);
+    async {
+        for hook in hooks {
+            info!(task = task_name, hook = hook, "running finally hook");
+            match tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(hook)
+                .current_dir(work_dir)
+                .output()
+                .await
+            {
+                Ok(output) if !output.status.success() => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!(
+                        task = task_name,
+                        hook = hook,
+                        "finally hook failed (continuing): {stderr}"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = task_name,
+                        hook = hook,
+                        "finally hook failed to spawn (continuing): {e}"
+                    );
+                }
+                _ => {}
             }
-            Err(e) => {
-                tracing::warn!(
-                    task = task_name,
-                    hook = hook,
-                    "finally hook failed to spawn (continuing): {e}"
-                );
-            }
-            _ => {}
         }
     }
+    .instrument(span)
+    .await;
 }
 
 /// Execute hooks (pre or post) for a task in the given working directory.
@@ -529,24 +550,38 @@ async fn run_hooks(
     kind: &str,
 ) -> Result<()> {
     for hook in hooks {
-        info!(task = task_name, hook = hook, "running {kind} hook");
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(hook)
-            .current_dir(work_dir)
-            .output()
-            .await
-            .map_err(|e| Error::TaskFailed {
-                name: task_name.to_owned(),
-                message: format!("{kind} hook '{hook}' failed to spawn: {e}"),
-            })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(Error::TaskFailed {
-                name: task_name.to_owned(),
-                message: format!("{kind} hook '{hook}' exited non-zero: {stderr}"),
-            });
-        }
+        let span = tracing::info_span!("hook", task = task_name, kind = kind, hook = hook.as_str());
+        run_hook(task_name, hook, work_dir, kind)
+            .instrument(span)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Execute a single hook command.
+async fn run_hook(
+    task_name: &str,
+    hook: &str,
+    work_dir: &std::path::Path,
+    kind: &str,
+) -> Result<()> {
+    info!(task = task_name, hook = hook, "running {kind} hook");
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(hook)
+        .current_dir(work_dir)
+        .output()
+        .await
+        .map_err(|e| Error::TaskFailed {
+            name: task_name.to_owned(),
+            message: format!("{kind} hook '{hook}' failed to spawn: {e}"),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(Error::TaskFailed {
+            name: task_name.to_owned(),
+            message: format!("{kind} hook '{hook}' exited non-zero: {stderr}"),
+        });
     }
     Ok(())
 }
