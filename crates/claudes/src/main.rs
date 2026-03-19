@@ -595,8 +595,65 @@ Best practices:
 - Add post_hooks for tasks that should commit and push changes
 - Keep tasks independent; avoid multiple tasks editing the same files";
 
+    // Gather project context unless --no-context.
+    let mut full_system_prompt = SYSTEM_PROMPT.to_string();
+
+    if !args.no_context {
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut context_parts: Vec<String> = Vec::new();
+
+        if let Some(manifest_path) = claudes::manifest::Manifest::discover(&project_dir)
+            && let Ok(content) = std::fs::read_to_string(&manifest_path)
+        {
+            let parsed: Option<claudes::Manifest> =
+                if manifest_path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    toml::from_str(&content).ok()
+                } else {
+                    serde_json::from_str(&content).ok()
+                };
+            if let Some(manifest) = parsed {
+                let mut info: Vec<String> = Vec::new();
+                if let Some(profiles) = &manifest.profiles {
+                    let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+                    info.push(format!("Available profiles: {}", names.join(", ")));
+                }
+                if manifest.shared.is_some() {
+                    info.push("Shared defaults present (tasks inherit them).".into());
+                }
+                if !info.is_empty() {
+                    context_parts.push(format!(
+                        "From {}:\n{}",
+                        manifest_path.display(),
+                        info.join("\n")
+                    ));
+                }
+            }
+        }
+
+        let prompting_path = project_dir.join("crates/claudes/PROMPTING.md");
+        if prompting_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&prompting_path)
+        {
+            let truncated: String = content.lines().take(100).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("Best practices:\n{truncated}"));
+        }
+
+        let claude_md = project_dir.join("CLAUDE.md");
+        if claude_md.exists()
+            && let Ok(content) = std::fs::read_to_string(&claude_md)
+        {
+            let excerpt: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("Project context:\n{excerpt}"));
+        }
+
+        if !context_parts.is_empty() {
+            full_system_prompt.push_str("\n\nProject context:\n");
+            full_system_prompt.push_str(&context_parts.join("\n\n"));
+        }
+    }
+
     let mut query = QueryCommand::new(&user_prompt)
-        .system_prompt(SYSTEM_PROMPT)
+        .system_prompt(&full_system_prompt)
         .no_session_persistence();
 
     if let Some(ref model) = args.model {

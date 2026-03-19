@@ -34,6 +34,10 @@ pub struct TaskResult {
     pub work_dir: PathBuf,
     /// Cost in USD aggregated from stream events (or parsed from stdout as fallback).
     pub cost_usd: Option<f64>,
+    /// Number of files modified (from git diff in worktree).
+    pub files_modified: Option<u32>,
+    /// Total lines changed — insertions + deletions.
+    pub lines_changed: Option<u32>,
 }
 
 /// Result of executing an entire manifest.
@@ -255,6 +259,9 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                             .and_then(|c| c.as_f64())
                     })
             });
+            // Get file stats from git diff in the worktree.
+            let (files_modified, lines_changed) = parse_git_diff_stat(&env.work_dir).await;
+
             TaskResult {
                 name: task_name,
                 success: output.success,
@@ -263,6 +270,8 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                 duration: start.elapsed(),
                 work_dir: env.work_dir,
                 cost_usd,
+                files_modified,
+                lines_changed,
             }
         }
         Err(e) => {
@@ -275,6 +284,8 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                 duration: start.elapsed(),
                 work_dir: options.project_dir.to_path_buf(),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }
         }
     }
@@ -582,6 +593,41 @@ fn build_query_command(task: &Task) -> QueryCommand {
     }
 
     cmd
+}
+
+/// Parse `git diff --stat HEAD` output to get files modified and lines changed.
+async fn parse_git_diff_stat(work_dir: &std::path::Path) -> (Option<u32>, Option<u32>) {
+    let output = match tokio::process::Command::new("git")
+        .args(["diff", "--stat", "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return (None, None),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Last line looks like: " 3 files changed, 77 insertions(+), 14 deletions(-)"
+    let last_line = stdout.lines().last().unwrap_or("");
+    let mut files = None;
+    let mut lines: u32 = 0;
+    let mut has_lines = false;
+
+    for part in last_line.split(',') {
+        let n: u32 = match part.split_whitespace().next().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if part.contains("file") {
+            files = Some(n);
+        } else if part.contains("insertion") || part.contains("deletion") {
+            lines += n;
+            has_lines = true;
+        }
+    }
+
+    (files, if has_lines { Some(lines) } else { None })
 }
 
 fn parse_permission_mode(s: &str) -> claude_wrapper::PermissionMode {
