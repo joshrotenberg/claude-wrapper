@@ -37,6 +37,9 @@ pub enum Command {
 
     /// Generate a manifest from a prompt using Claude.
     Generate(GenerateArgs),
+
+    /// Start the MCP server (stdio transport).
+    Serve(ServeArgs),
 }
 
 /// Arguments for `claudes run`.
@@ -281,6 +284,10 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub no_context: bool,
 }
+
+/// Arguments for `claudes serve`.
+#[derive(Debug, Parser)]
+pub struct ServeArgs {}
 
 /// Arguments for `claudes fix`.
 #[derive(Debug, Parser)]

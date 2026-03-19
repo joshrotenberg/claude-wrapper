@@ -14,6 +14,7 @@ pub mod cli;
 pub mod error;
 pub mod isolation;
 pub mod manifest;
+pub mod mcp;
 pub mod output;
 pub mod planner;
 pub mod runner;

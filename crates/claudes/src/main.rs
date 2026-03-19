@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use tower_mcp::McpRouter;
+use tower_mcp::transport::StdioTransport;
 use tracing_subscriber::EnvFilter;
 
 use claude_wrapper::{Claude, QueryCommand};
@@ -26,6 +28,7 @@ async fn main() -> ExitCode {
         Command::Fix(args) => cmd_fix(args).await,
         Command::Metrics(args) => cmd_metrics(args).await,
         Command::Generate(args) => cmd_generate(args).await,
+        Command::Serve(args) => cmd_serve(args).await,
     }
 }
 
@@ -698,6 +701,23 @@ Best practices:
             ExitCode::FAILURE
         }
     }
+}
+
+async fn cmd_serve(_args: claudes::cli::ServeArgs) -> ExitCode {
+    let router = McpRouter::new()
+        .server_info("claudes", env!("CARGO_PKG_VERSION"))
+        .instructions(
+            "Manifest-driven execution engine for Claude Code sessions. \
+             Use plan_tasks to generate a manifest, run_manifest to execute it, \
+             task_status and list_runs to inspect results, and clean to remove worktrees.",
+        )
+        .tools(claudes::mcp::tools());
+
+    if let Err(e) = StdioTransport::new(router).run().await {
+        eprintln!("error: MCP server failed: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {
