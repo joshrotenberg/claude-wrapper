@@ -120,6 +120,104 @@ pub struct RunSummary {
     pub total_cost_usd: Option<f64>,
 }
 
+/// Aggregated metrics across multiple runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunMetrics {
+    /// Total number of runs included.
+    pub total_runs: usize,
+    /// Total number of tasks across all runs.
+    pub total_tasks: usize,
+    /// Number of tasks that succeeded.
+    pub succeeded: usize,
+    /// Number of tasks that failed.
+    pub failed: usize,
+    /// Number of tasks that timed out.
+    pub timed_out: usize,
+    /// Total cost across all runs (None if no cost data available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
+    /// Average cost per task (None if no cost data available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_cost_per_task: Option<f64>,
+    /// Average wall-clock duration per run in seconds.
+    pub avg_duration_secs: f64,
+}
+
+/// Compute aggregated metrics across a slice of runs.
+pub fn compute_metrics(runs: &[RunState]) -> RunMetrics {
+    let total_runs = runs.len();
+    let total_tasks: usize = runs.iter().map(|r| r.summary.total).sum();
+    let succeeded: usize = runs.iter().map(|r| r.summary.succeeded).sum();
+    let failed: usize = runs.iter().map(|r| r.summary.failed).sum();
+    let timed_out: usize = runs.iter().map(|r| r.summary.timed_out).sum();
+
+    let costs: Vec<f64> = runs
+        .iter()
+        .filter_map(|r| r.summary.total_cost_usd)
+        .collect();
+    let total_cost_usd = if costs.is_empty() {
+        None
+    } else {
+        Some(costs.iter().sum())
+    };
+    let avg_cost_per_task = if let Some(total) = total_cost_usd
+        && total_tasks > 0
+    {
+        Some(total / total_tasks as f64)
+    } else {
+        None
+    };
+
+    let avg_duration_secs = if total_runs == 0 {
+        0.0
+    } else {
+        runs.iter().map(|r| r.summary.wall_time_secs).sum::<f64>() / total_runs as f64
+    };
+
+    RunMetrics {
+        total_runs,
+        total_tasks,
+        succeeded,
+        failed,
+        timed_out,
+        total_cost_usd,
+        avg_cost_per_task,
+        avg_duration_secs,
+    }
+}
+
+/// Print metrics as a human-readable table.
+pub fn print_metrics(metrics: &RunMetrics) {
+    println!("Runs:       {}", metrics.total_runs);
+    println!("Tasks:      {}", metrics.total_tasks);
+    println!(
+        "Succeeded:  {} ({:.0}%)",
+        metrics.succeeded,
+        if metrics.total_tasks > 0 {
+            metrics.succeeded as f64 / metrics.total_tasks as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!("Failed:     {}", metrics.failed);
+    println!("Timed out:  {}", metrics.timed_out);
+    if let Some(cost) = metrics.total_cost_usd {
+        println!("Total cost: ${cost:.4}");
+    }
+    if let Some(avg) = metrics.avg_cost_per_task {
+        println!("Avg cost/task: ${avg:.4}");
+    }
+    println!("Avg duration: {:.1}s", metrics.avg_duration_secs);
+}
+
+/// Print metrics as JSON.
+pub fn print_metrics_json(metrics: &RunMetrics) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(metrics).unwrap_or_default()
+    );
+}
+
 /// Generate a run ID like "run-a3b2f1" (prefix + 6 hex chars from timestamp).
 /// Generate a run ID with embedded timestamp for sorting and readability.
 ///
@@ -443,6 +541,80 @@ mod tests {
             work_dir: PathBuf::from("/tmp"),
             cost_usd: None,
         }
+    }
+
+    #[test]
+    fn compute_metrics_empty() {
+        let m = compute_metrics(&[]);
+        assert_eq!(m.total_runs, 0);
+        assert_eq!(m.total_tasks, 0);
+        assert_eq!(m.succeeded, 0);
+        assert_eq!(m.failed, 0);
+        assert_eq!(m.timed_out, 0);
+        assert_eq!(m.total_cost_usd, None);
+        assert_eq!(m.avg_cost_per_task, None);
+        assert_eq!(m.avg_duration_secs, 0.0);
+    }
+
+    #[test]
+    fn compute_metrics_single_run() {
+        let manifest = Manifest::new(vec![Task::new("t", "p")]);
+        let result = RunResult {
+            tasks: vec![TaskResult {
+                name: "t".into(),
+                success: true,
+                stdout: r#"{"total_cost_usd":0.10}"#.into(),
+                stderr: String::new(),
+                duration: Duration::from_secs(5),
+                work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
+            }],
+        };
+        let state = build_state(&manifest, &result, Utc::now());
+        let m = compute_metrics(&[state]);
+        assert_eq!(m.total_runs, 1);
+        assert_eq!(m.total_tasks, 1);
+        assert_eq!(m.succeeded, 1);
+        assert_eq!(m.failed, 0);
+        assert_eq!(m.timed_out, 0);
+        assert!((m.total_cost_usd.unwrap() - 0.10).abs() < 1e-9);
+        assert!((m.avg_cost_per_task.unwrap() - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_metrics_multiple_runs() {
+        let manifest = Manifest::new(vec![Task::new("ok", "succeeds"), Task::new("bad", "fails")]);
+        let result = RunResult {
+            tasks: vec![
+                TaskResult {
+                    name: "ok".into(),
+                    success: true,
+                    stdout: "{}".into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(4),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                },
+                TaskResult {
+                    name: "bad".into(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "oops".into(),
+                    duration: Duration::from_secs(2),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                },
+            ],
+        };
+        let s1 = build_state(&manifest, &result, Utc::now());
+        let s2 = build_state(&manifest, &result, Utc::now());
+        let m = compute_metrics(&[s1, s2]);
+        assert_eq!(m.total_runs, 2);
+        assert_eq!(m.total_tasks, 4);
+        assert_eq!(m.succeeded, 2);
+        assert_eq!(m.failed, 2);
+        assert_eq!(m.timed_out, 0);
+        assert_eq!(m.total_cost_usd, None);
     }
 
     #[test]
