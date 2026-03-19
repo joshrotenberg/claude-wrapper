@@ -227,6 +227,11 @@ impl Manifest {
                         profile.and_then(|p| p.finally_hooks.as_ref()),
                         task.finally_hooks.as_ref(),
                     ),
+                    skills: merge_hooks(
+                        shared.and_then(|s| s.skills.as_ref()),
+                        profile.and_then(|p| p.skills.as_ref()),
+                        task.skills.as_ref(),
+                    ),
                 }
             })
             .collect();
@@ -306,6 +311,75 @@ impl Manifest {
                 }
                 task.append_system_prompt = Some(std::fs::read_to_string(&path)?);
             }
+        }
+
+        self.resolve_skills(base_dir)?;
+
+        Ok(())
+    }
+
+    /// Load skill file contents and append them to `append_system_prompt` for each task.
+    ///
+    /// Skill paths are resolved relative to `base_dir`. Skills from the shared block and
+    /// the task's referenced profile are prepended to task-level skills (same order as hooks).
+    /// The loaded content is appended to any existing `append_system_prompt`.
+    ///
+    /// This is called automatically by [`Manifest::resolve_files`].
+    pub fn resolve_skills(&mut self, base_dir: &Path) -> Result<(), crate::Error> {
+        let shared_skills = self
+            .shared
+            .as_ref()
+            .and_then(|s| s.skills.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let profiles = self.profiles.clone();
+
+        for task in &mut self.tasks {
+            let profile_skills: Vec<String> = task
+                .profile
+                .as_ref()
+                .and_then(|name| {
+                    profiles
+                        .as_ref()
+                        .and_then(|m| m.get(name.as_str()))
+                        .and_then(|p| p.skills.as_ref())
+                })
+                .cloned()
+                .unwrap_or_default();
+            let task_skills = task.skills.as_ref().cloned().unwrap_or_default();
+
+            let all_skills: Vec<&String> = shared_skills
+                .iter()
+                .chain(profile_skills.iter())
+                .chain(task_skills.iter())
+                .collect();
+
+            if all_skills.is_empty() {
+                continue;
+            }
+
+            let mut skill_content = String::new();
+            for skill_path in &all_skills {
+                let path = base_dir.join(skill_path.as_str());
+                if !path.exists() {
+                    return Err(crate::Error::InvalidManifest(format!(
+                        "task '{}': skill file '{}' not found",
+                        task.name,
+                        path.display()
+                    )));
+                }
+                if !skill_content.is_empty() {
+                    skill_content.push('\n');
+                }
+                skill_content.push_str(&std::fs::read_to_string(&path)?);
+            }
+
+            let existing = task.append_system_prompt.take().unwrap_or_default();
+            task.append_system_prompt = Some(if existing.is_empty() {
+                skill_content
+            } else {
+                format!("{existing}\n{skill_content}")
+            });
         }
 
         Ok(())
@@ -627,6 +701,11 @@ pub struct Shared {
     /// Shell commands that always run after task completion, regardless of outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finally_hooks: Option<Vec<String>>,
+
+    /// Skill files (markdown/text) whose contents are appended to the system prompt.
+    /// Shared skills are prepended to any task-level skills.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
 }
 
 /// A fully resolved task. Every field is explicit.
@@ -734,6 +813,10 @@ pub struct Task {
     /// Shell commands that always run after task completion, regardless of outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finally_hooks: Option<Vec<String>>,
+
+    /// Skill files (markdown/text) whose contents are appended to the system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
 }
 
 impl Task {
@@ -766,6 +849,7 @@ impl Task {
             pre_hooks: None,
             post_hooks: None,
             finally_hooks: None,
+            skills: None,
         }
     }
 
@@ -994,6 +1078,12 @@ impl TaskBuilder {
     /// Set the finally hooks (always run, regardless of outcome).
     pub fn finally_hooks(mut self, finally_hooks: Vec<String>) -> Self {
         self.task.finally_hooks = Some(finally_hooks);
+        self
+    }
+
+    /// Set skill files to inject into the system prompt.
+    pub fn skills(mut self, skills: Vec<String>) -> Self {
+        self.task.skills = Some(skills);
         self
     }
 
@@ -2014,5 +2104,103 @@ prompt = "do it"
             warnings.is_empty(),
             "expected no warnings, got: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn resolve_skills_shared_skill_appended_to_task() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("skill.md")).unwrap();
+        write!(f, "skill content").unwrap();
+
+        let mut manifest = Manifest::new(vec![Task::new("t", "prompt")]);
+        manifest.shared = Some(Shared {
+            skills: Some(vec!["skill.md".into()]),
+            ..Default::default()
+        });
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(
+            manifest.tasks[0].append_system_prompt.as_deref(),
+            Some("skill content")
+        );
+    }
+
+    #[test]
+    fn resolve_skills_task_skill_appended_to_append_system_prompt() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(dir.path().join("skill.md")).unwrap();
+        write!(f, "skill data").unwrap();
+
+        let mut task = Task::new("t", "prompt");
+        task.append_system_prompt = Some("existing".into());
+        task.skills = Some(vec!["skill.md".into()]);
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(
+            manifest.tasks[0].append_system_prompt.as_deref(),
+            Some("existing\nskill data")
+        );
+    }
+
+    #[test]
+    fn resolve_skills_missing_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = Task::new("t", "prompt");
+        task.skills = Some(vec!["nonexistent.md".into()]);
+        let mut manifest = Manifest::new(vec![task]);
+        let err = manifest.resolve_files(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn resolve_skills_shared_and_task_skills_concatenated() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut f1 = std::fs::File::create(dir.path().join("shared_skill.md")).unwrap();
+        write!(f1, "shared").unwrap();
+        let mut f2 = std::fs::File::create(dir.path().join("task_skill.md")).unwrap();
+        write!(f2, "task").unwrap();
+
+        let mut task = Task::new("t", "prompt");
+        task.skills = Some(vec!["task_skill.md".into()]);
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            skills: Some(vec!["shared_skill.md".into()]),
+            ..Default::default()
+        });
+        manifest.resolve_files(dir.path()).unwrap();
+
+        assert_eq!(
+            manifest.tasks[0].append_system_prompt.as_deref(),
+            Some("shared\ntask")
+        );
+    }
+
+    #[test]
+    fn resolve_merges_skills_like_hooks() {
+        let mut task = Task::new("t", "prompt");
+        task.skills = Some(vec!["task.md".into()]);
+
+        let mut manifest = Manifest::new(vec![task]);
+        manifest.shared = Some(Shared {
+            skills: Some(vec!["shared.md".into()]),
+            ..Default::default()
+        });
+
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[0].skills.as_deref(),
+            Some(["shared.md".to_string(), "task.md".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn skills_not_serialized_when_none() {
+        let task = Task::new("t", "prompt");
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("skills"));
     }
 }

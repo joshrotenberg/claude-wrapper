@@ -56,6 +56,16 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
             manifest.apply_global_defaults(g);
         }
 
+        if !args.skill.is_empty() {
+            let shared = manifest
+                .shared
+                .get_or_insert_with(claudes::manifest::Shared::default);
+            shared
+                .skills
+                .get_or_insert_with(Vec::new)
+                .extend(args.skill.iter().cloned());
+        }
+
         let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
         if let Err(e) = manifest.resolve_files(manifest_dir) {
             eprintln!("error: {e}");
@@ -122,6 +132,16 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 manifest.apply_global_defaults(g);
             }
 
+            if !args.skill.is_empty() {
+                let shared = manifest
+                    .shared
+                    .get_or_insert_with(claudes::manifest::Shared::default);
+                shared
+                    .skills
+                    .get_or_insert_with(Vec::new)
+                    .extend(args.skill.iter().cloned());
+            }
+
             let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
             if let Err(e) = manifest.resolve_files(manifest_dir) {
                 eprintln!("error: {e}");
@@ -179,6 +199,20 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
     let mut manifest = claudes::plan(&plan_opts);
     if let Some(ref g) = global {
         manifest.apply_global_defaults(g);
+    }
+
+    if !args.skill.is_empty() {
+        let shared = manifest
+            .shared
+            .get_or_insert_with(claudes::manifest::Shared::default);
+        shared
+            .skills
+            .get_or_insert_with(Vec::new)
+            .extend(args.skill.iter().cloned());
+        if let Err(e) = manifest.resolve_files(&project_dir) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
     }
 
     for warning in manifest.check_file_overlaps() {

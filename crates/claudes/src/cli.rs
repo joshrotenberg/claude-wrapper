@@ -129,6 +129,10 @@ pub struct RunArgs {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Skill files to inject into the system prompt (repeatable).
+    #[arg(long)]
+    pub skill: Vec<String>,
+
     /// Disable colored output.
     #[arg(long)]
     pub no_color: bool,
