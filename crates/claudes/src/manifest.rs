@@ -39,13 +39,19 @@ pub fn load_global_defaults() -> Option<Shared> {
     load_global_defaults_from(&PathBuf::from(home).join(".config"))
 }
 
+fn default_version() -> u32 {
+    1
+}
+
 /// The manifest — a fully resolved, self-contained execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema version (currently 1).
+    #[serde(default = "default_version")]
     pub version: u32,
 
     /// When this manifest was created.
+    #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
 
     /// Manifest-level defaults applied to all tasks.
@@ -2013,6 +2019,59 @@ prompt = "do it"
         assert!(
             warnings.is_empty(),
             "expected no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn deserialize_json_without_created_at_uses_default() {
+        let json = r#"{
+            "version": 1,
+            "tasks": [{ "name": "t1", "prompt": "do it" }]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.tasks[0].name, "t1");
+        // created_at should be populated (close to now)
+        let diff = Utc::now() - manifest.created_at;
+        assert!(diff.num_seconds() < 5);
+    }
+
+    #[test]
+    fn deserialize_json_without_version_defaults_to_1() {
+        let json = r#"{
+            "created_at": "2026-03-18T10:30:00Z",
+            "tasks": [{ "name": "t1", "prompt": "do it" }]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.version, 1);
+    }
+
+    #[test]
+    fn deserialize_toml_without_version_or_created_at() {
+        let toml = r#"
+[[tasks]]
+name = "t1"
+prompt = "do it"
+"#;
+        let manifest = Manifest::from_toml(toml).unwrap();
+        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.tasks[0].name, "t1");
+        let diff = Utc::now() - manifest.created_at;
+        assert!(diff.num_seconds() < 5);
+    }
+
+    #[test]
+    fn deserialize_explicit_values_are_preserved() {
+        let json = r#"{
+            "version": 1,
+            "created_at": "2020-01-01T00:00:00Z",
+            "tasks": [{ "name": "t1", "prompt": "do it" }]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.version, 1);
+        assert_eq!(
+            manifest.created_at.to_rfc3339(),
+            "2020-01-01T00:00:00+00:00"
         );
     }
 }
