@@ -64,6 +64,33 @@ pub struct Manifest {
 
     /// One or more tasks to execute.
     pub tasks: Vec<Task>,
+
+    /// Dependency chains — sugar for declaring sequential/fan-out dependencies.
+    ///
+    /// Each chain is an array of steps. A step is either a task name (string) or
+    /// an array of task names (parallel group). Adjacent steps become dependencies:
+    ///
+    /// ```json
+    /// "chains": [
+    ///   ["a", "b", "c"],                    // linear: a -> b -> c
+    ///   ["a", ["b1", "b2"], "c"]            // fan-out: a -> (b1,b2) -> c
+    /// ]
+    /// ```
+    ///
+    /// Desugars into `depends_on` on the referenced tasks. Multiple chains that
+    /// reference the same task merge their dependencies (union).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chains: Option<Vec<Vec<ChainStep>>>,
+}
+
+/// A single step in a dependency chain — either one task or a parallel group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChainStep {
+    /// A single task name.
+    Single(String),
+    /// Multiple tasks that run in parallel at this step.
+    Group(Vec<String>),
 }
 
 impl Manifest {
@@ -75,6 +102,58 @@ impl Manifest {
             shared: None,
             profiles: None,
             tasks,
+            chains: None,
+        }
+    }
+
+    /// Desugar `chains` into `depends_on` on the referenced tasks.
+    ///
+    /// Each chain is processed step by step. Adjacent steps become dependencies:
+    /// the tasks in each step depend on all tasks in the previous step.
+    /// Dependencies are merged (unioned) across multiple chains.
+    ///
+    /// Call this before `validate()` and `resolve()`.
+    pub fn desugar_chains(&mut self) {
+        let Some(chains) = self.chains.take() else {
+            return;
+        };
+
+        // Build a map of task name -> accumulated dependencies.
+        let mut deps_map: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+        for chain in &chains {
+            let mut prev_names: Vec<String> = Vec::new();
+
+            for step in chain {
+                let current_names: Vec<String> = match step {
+                    ChainStep::Single(name) => vec![name.clone()],
+                    ChainStep::Group(names) => names.clone(),
+                };
+
+                // Each task in the current step depends on all tasks in the previous step.
+                if !prev_names.is_empty() {
+                    for name in &current_names {
+                        deps_map
+                            .entry(name.clone())
+                            .or_default()
+                            .extend(prev_names.iter().cloned());
+                    }
+                }
+
+                prev_names = current_names;
+            }
+        }
+
+        // Apply accumulated dependencies to tasks.
+        for task in &mut self.tasks {
+            if let Some(chain_deps) = deps_map.remove(&task.name) {
+                let existing = task.depends_on.get_or_insert_with(Vec::new);
+                for dep in chain_deps {
+                    if !existing.contains(&dep) {
+                        existing.push(dep);
+                    }
+                }
+            }
         }
     }
 
@@ -244,6 +323,7 @@ impl Manifest {
             shared: self.shared.clone(),
             profiles: self.profiles.clone(),
             tasks,
+            chains: self.chains.clone(),
         }
     }
 
@@ -2377,5 +2457,168 @@ prompt = "do it"
             parsed.tasks[1].depends_on.as_ref().unwrap(),
             &vec!["a".to_string()]
         );
+    }
+
+    // ========================================================================
+    // chains tests
+    // ========================================================================
+
+    #[test]
+    fn desugar_linear_chain() {
+        let mut manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            Task::new("b", "do b"),
+            Task::new("c", "do c"),
+        ]);
+        manifest.chains = Some(vec![vec![
+            ChainStep::Single("a".into()),
+            ChainStep::Single("b".into()),
+            ChainStep::Single("c".into()),
+        ]]);
+
+        manifest.desugar_chains();
+
+        assert!(manifest.tasks[0].depends_on.is_none());
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]);
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["b"]);
+    }
+
+    #[test]
+    fn desugar_fan_out_fan_in() {
+        let mut manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            Task::new("b1", "do b1"),
+            Task::new("b2", "do b2"),
+            Task::new("c", "do c"),
+        ]);
+        manifest.chains = Some(vec![vec![
+            ChainStep::Single("a".into()),
+            ChainStep::Group(vec!["b1".into(), "b2".into()]),
+            ChainStep::Single("c".into()),
+        ]]);
+
+        manifest.desugar_chains();
+
+        assert!(manifest.tasks[0].depends_on.is_none()); // a
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]); // b1
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["a"]); // b2
+        let c_deps = manifest.tasks[3].depends_on.as_ref().unwrap();
+        assert!(c_deps.contains(&"b1".to_string()));
+        assert!(c_deps.contains(&"b2".to_string()));
+        assert_eq!(c_deps.len(), 2);
+    }
+
+    #[test]
+    fn desugar_multi_chain_merge() {
+        // Two chains that share task "d":
+        // chain 1: a -> b -> d
+        // chain 2: a -> c -> d
+        // d should depend on both b and c
+        let mut manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            Task::new("b", "do b"),
+            Task::new("c", "do c"),
+            Task::new("d", "do d"),
+        ]);
+        manifest.chains = Some(vec![
+            vec![
+                ChainStep::Single("a".into()),
+                ChainStep::Single("b".into()),
+                ChainStep::Single("d".into()),
+            ],
+            vec![
+                ChainStep::Single("a".into()),
+                ChainStep::Single("c".into()),
+                ChainStep::Single("d".into()),
+            ],
+        ]);
+
+        manifest.desugar_chains();
+
+        // a has no deps
+        assert!(manifest.tasks[0].depends_on.is_none());
+        // b depends on a
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]);
+        // c depends on a
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["a"]);
+        // d depends on both b and c (merged)
+        let d_deps = manifest.tasks[3].depends_on.as_ref().unwrap();
+        assert!(d_deps.contains(&"b".to_string()));
+        assert!(d_deps.contains(&"c".to_string()));
+        assert_eq!(d_deps.len(), 2);
+    }
+
+    #[test]
+    fn desugar_chains_merges_with_existing_depends_on() {
+        let mut manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            {
+                let mut t = Task::new("b", "do b");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            Task::new("c", "do c"),
+        ]);
+        manifest.chains = Some(vec![vec![
+            ChainStep::Single("b".into()),
+            ChainStep::Single("c".into()),
+        ]]);
+
+        manifest.desugar_chains();
+
+        // b keeps its original depends_on
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]);
+        // c gets depends_on from chain
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["b"]);
+    }
+
+    #[test]
+    fn desugar_chains_no_duplicates() {
+        let mut manifest = Manifest::new(vec![Task::new("a", "do a"), Task::new("b", "do b")]);
+        // Same chain twice
+        manifest.chains = Some(vec![
+            vec![ChainStep::Single("a".into()), ChainStep::Single("b".into())],
+            vec![ChainStep::Single("a".into()), ChainStep::Single("b".into())],
+        ]);
+
+        manifest.desugar_chains();
+
+        // b should depend on a only once
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]);
+    }
+
+    #[test]
+    fn chains_json_roundtrip() {
+        let json = r#"{
+            "tasks": [
+                {"name": "a", "prompt": "do a"},
+                {"name": "b", "prompt": "do b"},
+                {"name": "c", "prompt": "do c"}
+            ],
+            "chains": [["a", "b", "c"]]
+        }"#;
+        let mut manifest: Manifest = serde_json::from_str(json).unwrap();
+        manifest.desugar_chains();
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["b"]);
+    }
+
+    #[test]
+    fn chains_json_fan_out_roundtrip() {
+        let json = r#"{
+            "tasks": [
+                {"name": "a", "prompt": "do a"},
+                {"name": "b1", "prompt": "do b1"},
+                {"name": "b2", "prompt": "do b2"},
+                {"name": "c", "prompt": "do c"}
+            ],
+            "chains": [["a", ["b1", "b2"], "c"]]
+        }"#;
+        let mut manifest: Manifest = serde_json::from_str(json).unwrap();
+        manifest.desugar_chains();
+        assert_eq!(manifest.tasks[1].depends_on.as_ref().unwrap(), &["a"]);
+        assert_eq!(manifest.tasks[2].depends_on.as_ref().unwrap(), &["a"]);
+        let c_deps = manifest.tasks[3].depends_on.as_ref().unwrap();
+        assert!(c_deps.contains(&"b1".to_string()));
+        assert!(c_deps.contains(&"b2".to_string()));
     }
 }

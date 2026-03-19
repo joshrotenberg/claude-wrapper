@@ -241,15 +241,26 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
 }
 
 fn print_run_start_ndjson(manifest: &Manifest) {
-    let task_names: Vec<&str> = manifest.tasks.iter().map(|t| t.name.as_str()).collect();
     let model = manifest
         .shared
         .as_ref()
         .and_then(|s| s.model.as_deref())
         .unwrap_or("default");
+    // Include dependency info per task.
+    let tasks_detail: Vec<serde_json::Value> = manifest
+        .tasks
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "depends_on": t.depends_on,
+            })
+        })
+        .collect();
+
     let event = serde_json::json!({
         "type": "run_start",
-        "tasks": task_names,
+        "tasks": tasks_detail,
         "task_count": manifest.tasks.len(),
         "model": model,
         "timestamp": Utc::now().to_rfc3339(),
