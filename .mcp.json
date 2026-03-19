@@ -1,11 +1,8 @@
 {
   "mcpServers": {
-    "claude-pool": {
+    "claudes": {
       "command": "cargo",
-      "args": ["run", "-p", "claude-pool-mcp", "--", "-n", "4", "--model", "claude-haiku-4-5-20251001", "--permission-mode", "auto"],
-      "env": {
-        "RUST_LOG": "claude_pool=debug,claude_pool_mcp=debug"
-      }
+      "args": ["run", "--quiet", "-p", "claudes", "--", "serve"]
     }
   }
 }
