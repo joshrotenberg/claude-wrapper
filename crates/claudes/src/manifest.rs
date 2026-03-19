@@ -233,6 +233,7 @@ impl Manifest {
                         profile.and_then(|p| p.finally_hooks.as_ref()),
                         task.finally_hooks.as_ref(),
                     ),
+                    depends_on: task.depends_on.clone(),
                 }
             })
             .collect();
@@ -506,7 +507,7 @@ impl Manifest {
         // Check for duplicate task names.
         let mut seen = std::collections::HashSet::new();
         for task in &self.tasks {
-            if !seen.insert(&task.name) {
+            if !seen.insert(task.name.clone()) {
                 errors.push(format!("duplicate task name: {}", task.name));
             }
         }
@@ -531,6 +532,25 @@ impl Manifest {
                     errors.push(format!("task '{}': {}", task.name, e));
                 }
             }
+
+            // Validate depends_on references exist.
+            if let Some(deps) = &task.depends_on {
+                for dep in deps {
+                    if !seen.contains(dep) {
+                        errors.push(format!(
+                            "task '{}': depends_on references unknown task '{dep}'",
+                            task.name
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check for dependency cycles.
+        if errors.is_empty()
+            && let Err(cycle_errors) = self.check_dependency_cycles()
+        {
+            errors.extend(cycle_errors);
         }
 
         if errors.is_empty() {
@@ -538,6 +558,136 @@ impl Manifest {
         } else {
             Err(errors)
         }
+    }
+
+    /// Check for dependency cycles using DFS.
+    fn check_dependency_cycles(&self) -> Result<(), Vec<String>> {
+        use std::collections::{HashMap, HashSet};
+
+        let deps: HashMap<&str, Vec<&str>> = self
+            .tasks
+            .iter()
+            .map(|t| {
+                let d = t
+                    .depends_on
+                    .as_ref()
+                    .map(|v| v.iter().map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                (t.name.as_str(), d)
+            })
+            .collect();
+
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+        let mut errors = Vec::new();
+
+        for task in &self.tasks {
+            if !visited.contains(task.name.as_str())
+                && let Some(cycle) = Self::dfs_cycle(&task.name, &deps, &mut visited, &mut in_stack)
+            {
+                errors.push(format!("dependency cycle detected: {}", cycle.join(" -> ")));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn dfs_cycle<'a>(
+        node: &'a str,
+        deps: &HashMap<&'a str, Vec<&'a str>>,
+        visited: &mut std::collections::HashSet<&'a str>,
+        in_stack: &mut std::collections::HashSet<&'a str>,
+    ) -> Option<Vec<String>> {
+        visited.insert(node);
+        in_stack.insert(node);
+
+        if let Some(neighbors) = deps.get(node) {
+            for &neighbor in neighbors {
+                if !visited.contains(neighbor) {
+                    if let Some(mut cycle) = Self::dfs_cycle(neighbor, deps, visited, in_stack) {
+                        cycle.insert(0, node.to_string());
+                        return Some(cycle);
+                    }
+                } else if in_stack.contains(neighbor) {
+                    return Some(vec![node.to_string(), neighbor.to_string()]);
+                }
+            }
+        }
+
+        in_stack.remove(node);
+        None
+    }
+
+    /// Return tasks in topological order (dependencies first).
+    ///
+    /// Tasks with no dependencies come first. Tasks are grouped into "layers"
+    /// where each layer can run in parallel. Returns an error if cycles exist.
+    pub fn topological_order(&self) -> Result<Vec<Vec<&Task>>, String> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let task_map: HashMap<&str, &Task> =
+            self.tasks.iter().map(|t| (t.name.as_str(), t)).collect();
+
+        // Build in-degree map.
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for task in &self.tasks {
+            in_degree.entry(task.name.as_str()).or_insert(0);
+            if let Some(deps) = &task.depends_on {
+                *in_degree.entry(task.name.as_str()).or_insert(0) += deps.len();
+                for dep in deps {
+                    dependents
+                        .entry(dep.as_str())
+                        .or_default()
+                        .push(task.name.as_str());
+                }
+            }
+        }
+
+        // Kahn's algorithm — layer by layer.
+        let mut layers: Vec<Vec<&Task>> = Vec::new();
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let mut processed: HashSet<&str> = HashSet::new();
+
+        while !queue.is_empty() {
+            let layer: Vec<&str> = queue.drain(..).collect();
+            let mut task_layer: Vec<&Task> = Vec::new();
+
+            for name in &layer {
+                processed.insert(name);
+                if let Some(task) = task_map.get(name) {
+                    task_layer.push(task);
+                }
+                if let Some(deps) = dependents.get(name) {
+                    for &dep in deps {
+                        if let Some(deg) = in_degree.get_mut(dep) {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                queue.push_back(dep);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !task_layer.is_empty() {
+                layers.push(task_layer);
+            }
+        }
+
+        if processed.len() != self.tasks.len() {
+            return Err("dependency cycle detected".to_string());
+        }
+
+        Ok(layers)
     }
 }
 
@@ -740,6 +890,11 @@ pub struct Task {
     /// Shell commands that always run after task completion, regardless of outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finally_hooks: Option<Vec<String>>,
+
+    /// Task names that must complete successfully before this task starts.
+    /// If any dependency fails, this task is skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 impl Task {
@@ -772,6 +927,7 @@ impl Task {
             pre_hooks: None,
             post_hooks: None,
             finally_hooks: None,
+            depends_on: None,
         }
     }
 
@@ -2072,6 +2228,154 @@ prompt = "do it"
         assert_eq!(
             manifest.created_at.to_rfc3339(),
             "2020-01-01T00:00:00+00:00"
+        );
+    }
+
+    // ========================================================================
+    // depends_on tests
+    // ========================================================================
+
+    #[test]
+    fn validate_depends_on_unknown_task_is_error() {
+        let manifest = Manifest::new(vec![{
+            let mut t = Task::new("a", "do a");
+            t.depends_on = Some(vec!["nonexistent".into()]);
+            t
+        }]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("nonexistent")));
+    }
+
+    #[test]
+    fn validate_depends_on_valid_reference_is_ok() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_dependency_cycle_is_error() {
+        let manifest = Manifest::new(vec![
+            {
+                let mut t = Task::new("a", "do a");
+                t.depends_on = Some(vec!["b".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("b", "do b");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+        ]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("cycle")));
+    }
+
+    #[test]
+    fn validate_self_dependency_is_cycle() {
+        let manifest = Manifest::new(vec![{
+            let mut t = Task::new("a", "do a");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("cycle")));
+    }
+
+    #[test]
+    fn topological_order_no_deps() {
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            Task::new("b", "do b"),
+            Task::new("c", "do c"),
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].len(), 3);
+    }
+
+    #[test]
+    fn topological_order_linear_chain() {
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            {
+                let mut t = Task::new("b", "do b");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("c", "do c");
+                t.depends_on = Some(vec!["b".into()]);
+                t
+            },
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0][0].name, "a");
+        assert_eq!(layers[1][0].name, "b");
+        assert_eq!(layers[2][0].name, "c");
+    }
+
+    #[test]
+    fn topological_order_fan_out_fan_in() {
+        // a -> (b1, b2) -> c
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            {
+                let mut t = Task::new("b1", "do b1");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("b2", "do b2");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("c", "do c");
+                t.depends_on = Some(vec!["b1".into(), "b2".into()]);
+                t
+            },
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0][0].name, "a");
+        // Layer 1 has b1 and b2 in some order.
+        let layer1_names: Vec<&str> = layers[1].iter().map(|t| t.name.as_str()).collect();
+        assert!(layer1_names.contains(&"b1"));
+        assert!(layer1_names.contains(&"b2"));
+        assert_eq!(layers[2][0].name, "c");
+    }
+
+    #[test]
+    fn depends_on_preserved_through_resolve() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[1].depends_on.as_ref().unwrap(),
+            &vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn depends_on_serialization_roundtrip() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.tasks[1].depends_on.as_ref().unwrap(),
+            &vec!["a".to_string()]
         );
     }
 }
