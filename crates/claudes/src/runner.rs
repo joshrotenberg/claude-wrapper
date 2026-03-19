@@ -241,9 +241,9 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 /// Execute a single task.
 async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
     let isolation_type = match &task.isolation {
-        None | Some(crate::manifest::Isolation::None) => "none",
+        None | Some(crate::manifest::Isolation::Worktree { .. }) => "worktree",
+        Some(crate::manifest::Isolation::None) => "none",
         Some(crate::manifest::Isolation::Clone { .. }) => "clone",
-        Some(crate::manifest::Isolation::Worktree { .. }) => "worktree",
     };
     let span = tracing::info_span!(
         "task",
@@ -327,6 +327,14 @@ async fn run_task_inner(
     let project_dir = &options.project_dir;
     let force = options.force;
 
+    // Default to worktree isolation when none is specified.
+    let effective_isolation =
+        task.isolation
+            .clone()
+            .unwrap_or(crate::manifest::Isolation::Worktree {
+                base_dir: ".worktrees".into(),
+            });
+
     // Set up isolation.
     let env = if force {
         // If force, try to clean up existing worktree first.
@@ -334,15 +342,15 @@ async fn run_task_inner(
             project_dir,
             &task.name,
             task.branch.as_deref(),
-            task.isolation.as_ref(),
+            Some(&effective_isolation),
         )
         .await
         {
             Ok(env) => env,
             Err(Error::Worktree(msg)) if msg.contains("already exists") => {
                 // Force remove and retry.
-                let worktree_dir = match &task.isolation {
-                    Some(crate::manifest::Isolation::Worktree { base_dir }) => {
+                let worktree_dir = match &effective_isolation {
+                    crate::manifest::Isolation::Worktree { base_dir } => {
                         project_dir.join(base_dir).join(&task.name)
                     }
                     _ => project_dir.join(".worktrees").join(&task.name),
@@ -356,7 +364,7 @@ async fn run_task_inner(
                     project_dir,
                     &task.name,
                     task.branch.as_deref(),
-                    task.isolation.as_ref(),
+                    Some(&effective_isolation),
                 )
                 .await?
             }
@@ -367,7 +375,7 @@ async fn run_task_inner(
             project_dir,
             &task.name,
             task.branch.as_deref(),
-            task.isolation.as_ref(),
+            Some(&effective_isolation),
         )
         .await?
     };
