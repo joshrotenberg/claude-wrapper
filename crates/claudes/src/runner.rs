@@ -252,6 +252,8 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         );
 
         let mut failed_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut task_work_dirs: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
 
         for layer in layers {
             let mut join_set = JoinSet::new();
@@ -291,7 +293,44 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                     continue;
                 }
 
-                let task = task.clone();
+                // Collect breadcrumbs from dependency tasks.
+                let mut task = task.clone();
+                if let Some(deps) = &task.depends_on {
+                    let breadcrumb_context = collect_breadcrumbs(deps, &task_work_dirs);
+                    if !breadcrumb_context.is_empty() {
+                        info!(
+                            task = task.name,
+                            deps = ?deps,
+                            bytes = breadcrumb_context.len(),
+                            "injecting breadcrumb context into prompt"
+                        );
+                        task.prompt = format!(
+                            "Context from dependency tasks:\n\n{breadcrumb_context}\n\n---\n\n{}",
+                            task.prompt
+                        );
+                    }
+                }
+
+                // If this task has dependents, auto-append breadcrumb instruction.
+                let has_dependents = manifest.tasks.iter().any(|t| {
+                    t.depends_on
+                        .as_ref()
+                        .is_some_and(|d| d.contains(&task.name))
+                });
+                if has_dependents {
+                    info!(
+                        task = task.name,
+                        "appending breadcrumb instruction (has dependents)"
+                    );
+                    task.prompt.push_str(&format!(
+                        "\n\nWhen done, write a breadcrumb file at \
+                         .claudes/breadcrumbs/{}.md summarizing: \
+                         what you did, key decisions made, and files modified. \
+                         Keep it concise.",
+                        task.name
+                    ));
+                }
+
                 let options = options.clone();
                 join_set.spawn(async move { run_task(&task, &options).await });
             }
@@ -302,6 +341,8 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                         if !task_result.success {
                             failed_tasks.insert(task_result.name.clone());
                         }
+                        task_work_dirs
+                            .insert(task_result.name.clone(), task_result.work_dir.clone());
                         results.push(task_result);
                     }
                     Err(join_err) => {
@@ -812,6 +853,38 @@ async fn run_hook(
         "{kind} hook succeeded"
     );
     Ok(())
+}
+
+/// Collect breadcrumb files from dependency task worktrees.
+///
+/// Looks for `.claudes/breadcrumbs/{dep-name}.md` in each dependency's work directory.
+/// Returns concatenated breadcrumb content, or empty string if none found.
+fn collect_breadcrumbs(
+    deps: &[String],
+    task_work_dirs: &std::collections::HashMap<String, PathBuf>,
+) -> String {
+    let mut parts = Vec::new();
+    for dep in deps {
+        if let Some(work_dir) = task_work_dirs.get(dep) {
+            let breadcrumb_path = work_dir
+                .join(".claudes")
+                .join("breadcrumbs")
+                .join(format!("{dep}.md"));
+            match std::fs::read_to_string(&breadcrumb_path) {
+                Ok(content) if !content.trim().is_empty() => {
+                    tracing::debug!(dep = dep, path = %breadcrumb_path.display(), "found breadcrumb");
+                    parts.push(format!("## Breadcrumb from {dep}\n\n{}", content.trim()));
+                }
+                Ok(_) => {
+                    tracing::debug!(dep = dep, "breadcrumb file empty, skipping");
+                }
+                Err(_) => {
+                    tracing::debug!(dep = dep, "no breadcrumb file found");
+                }
+            }
+        }
+    }
+    parts.join("\n\n---\n\n")
 }
 
 /// Build a QueryCommand from a Task's fields.
