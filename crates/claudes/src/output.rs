@@ -270,6 +270,13 @@ pub async fn render_stream(
                                         } else {
                                             s
                                         };
+                                        // Also strip .worktrees/<task-name>/ prefix.
+                                        let s = if let Some(rest) = s.strip_prefix(".worktrees/") {
+                                            rest.split_once('/')
+                                                .map_or(s.clone(), |(_, after)| after.to_string())
+                                        } else {
+                                            s
+                                        };
                                         let mut chars = s.chars();
                                         let truncated: String = chars.by_ref().take(60).collect();
                                         if chars.next().is_some() {
