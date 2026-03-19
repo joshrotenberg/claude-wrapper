@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 use claude_wrapper::{Claude, QueryCommand};
 use claudes::cli::{Cli, Command, parse_timeout};
-use claudes::output::{self, OutputFormat, Verbosity};
+use claudes::output::{self, OutputMode};
 use claudes::planner::PlanOptions;
 
 #[tokio::main]
@@ -207,25 +207,22 @@ async fn execute_manifest(
     options: &claudes::RunOptions,
     args: &claudes::cli::RunArgs,
 ) -> ExitCode {
-    let format = match args.output.as_str() {
-        "json" => OutputFormat::Json,
-        _ if args.quiet => OutputFormat::Quiet,
-        _ => OutputFormat::Text,
-    };
-
-    let verbosity = Verbosity::from(args.verbose);
+    let mode = OutputMode::detect(&args.output, args.quiet);
     let started_at = chrono::Utc::now();
 
-    // Set up streaming if we're in text mode.
+    // Opening bookend: what we're about to do.
+    output::print_run_start(manifest, mode, args.no_color);
+
+    // Set up streaming renderer.
     let mut options = options.clone();
-    let stream_handle = if format == OutputFormat::Text {
+    let stream_handle = if mode != OutputMode::Quiet {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         options.event_sender = Some(tx);
-        Some(tokio::spawn(output::render_stream(
-            rx,
-            verbosity,
-            args.no_color,
-        )))
+        Some(match mode {
+            OutputMode::Progress => tokio::spawn(output::render_progress(rx, args.no_color)),
+            OutputMode::Ndjson => tokio::spawn(output::render_ndjson(rx)),
+            OutputMode::Quiet => unreachable!(),
+        })
     } else {
         None
     };
@@ -250,7 +247,9 @@ async fn execute_manifest(
         tracing::warn!("failed to write state file: {e}");
     }
 
-    output::print_summary(&result, format);
+    // Closing bookend: what we did.
+    output::print_run_complete(&result, mode, args.no_color);
+
     if result.all_succeeded() {
         ExitCode::SUCCESS
     } else {
@@ -488,8 +487,7 @@ async fn cmd_fix(args: claudes::cli::FixArgs) -> ExitCode {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         options.event_sender = Some(tx);
-        let stream_handle =
-            tokio::spawn(output::render_stream(rx, output::Verbosity::Default, false));
+        let stream_handle = tokio::spawn(output::render_progress(rx, false));
 
         let result = match claudes::run(&fix_manifest, &options).await {
             Ok(r) => r,
@@ -508,7 +506,7 @@ async fn cmd_fix(args: claudes::cli::FixArgs) -> ExitCode {
             tracing::warn!("failed to write fix state file: {e}");
         }
 
-        output::print_summary(&result, output::OutputFormat::Text);
+        output::print_run_complete(&result, OutputMode::Progress, false);
 
         if !result.all_succeeded() {
             all_succeeded = false;

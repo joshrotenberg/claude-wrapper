@@ -113,8 +113,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub quiet: bool,
 
-    /// Output format (text|json).
-    #[arg(long, default_value = "text")]
+    /// Output mode (progress|json|quiet). Default: progress when TTY, json when piped.
+    #[arg(long, default_value = "auto")]
     pub output: String,
 
     /// Overwrite existing worktrees.
@@ -124,10 +124,6 @@ pub struct RunArgs {
     /// Auto-cleanup worktrees after run (none|on-success|always; default: none).
     #[arg(long, default_value = "none")]
     pub cleanup: String,
-
-    /// Increase output verbosity (repeat for more detail: -v, -vv).
-    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
-    pub verbose: u8,
 
     /// Disable colored output.
     #[arg(long)]
