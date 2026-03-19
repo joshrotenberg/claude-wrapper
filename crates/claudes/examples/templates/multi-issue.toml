@@ -1,0 +1,42 @@
+# Multi-Issue Template
+#
+# Shape: parallel independent tasks, each fixing one issue
+# Use case: batch-process multiple bugs or features in parallel
+#
+# Fill in: add/remove tasks, set prompts for each issue
+# Each task runs in its own worktree and creates its own PR.
+
+[shared]
+model = "claude-sonnet-4-6"
+isolation = { type = "worktree", base_dir = ".worktrees" }
+permission_mode = "bypassPermissions"
+no_session_persistence = true
+allowed_tools = ["Read", "Edit", "Glob", "Grep", "Bash(cargo *)", "Bash(git *)", "Bash(gh pr *)"]
+disallowed_tools = ["Write"]
+append_system_prompt = """
+This is a Rust 2024 project. Use if-let chains.
+Do NOT modify any file not explicitly named in the task prompt.
+Always run cargo fmt before committing.
+"""
+post_hooks = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo test --lib",
+]
+
+# No chains — all tasks run in parallel.
+
+[[tasks]]
+name = "fix-issue-1"
+prompt = "TODO: Describe issue 1 and which files to modify."
+branch = "fix/issue-1"
+
+[[tasks]]
+name = "fix-issue-2"
+prompt = "TODO: Describe issue 2 and which files to modify."
+branch = "fix/issue-2"
+
+[[tasks]]
+name = "fix-issue-3"
+prompt = "TODO: Describe issue 3 and which files to modify."
+branch = "fix/issue-3"

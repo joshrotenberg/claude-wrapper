@@ -1,0 +1,61 @@
+# Bug Fix Template
+#
+# Shape: reproduce -> fix -> verify -> PR (linear chain)
+# Use case: fix a single bug with verification gates
+#
+# Fill in: reproduce prompt (describe the bug), fix prompt (which files to modify)
+# Verify and PR tasks have sensible defaults.
+
+[shared]
+model = "claude-sonnet-4-6"
+isolation = { type = "worktree", base_dir = ".worktrees" }
+permission_mode = "bypassPermissions"
+no_session_persistence = true
+allowed_tools = ["Read", "Edit", "Glob", "Grep", "Bash(cargo *)", "Bash(git *)", "Bash(gh pr *)"]
+disallowed_tools = ["Write"]
+append_system_prompt = """
+This is a Rust 2024 project. Use if-let chains.
+Do NOT modify any file not explicitly named in the task prompt.
+"""
+
+chains = [
+  ["reproduce", "fix", "verify"],
+]
+
+[[tasks]]
+name = "reproduce"
+prompt = """
+TODO: Describe the bug and how to reproduce it.
+
+Write a failing test that demonstrates the issue.
+Only modify: TODO (test file path)
+"""
+
+[[tasks]]
+name = "fix"
+prompt = """
+TODO: Describe the fix and which files to modify.
+
+The reproduction test from the previous step should now pass.
+Only modify: TODO (source file paths)
+"""
+
+[[tasks]]
+name = "verify"
+prompt = """
+Run the full test suite and ensure everything passes.
+If tests fail, fix them.
+
+Then commit with message: TODO (commit message)
+Then create a PR:
+  gh pr create --title 'TODO' --body '## Summary
+TODO
+
+## Test plan
+- [ ] cargo test passes'
+"""
+post_hooks = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo test --lib",
+]
