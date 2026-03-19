@@ -20,15 +20,16 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run(args) => cmd_run(args).await,
-        Command::Plan(args) => cmd_plan(args).await,
-        Command::Init(args) => cmd_init(args).await,
-        Command::Status(args) => cmd_status(args).await,
-        Command::Clean(args) => cmd_clean(args).await,
-        Command::Fix(args) => cmd_fix(args).await,
-        Command::Metrics(args) => cmd_metrics(args).await,
-        Command::Generate(args) => cmd_generate(args).await,
-        Command::Serve(args) => cmd_serve(args).await,
+        Some(Command::Run(args)) => cmd_run(args).await,
+        Some(Command::Plan(args)) => cmd_plan(args).await,
+        Some(Command::Init(args)) => cmd_init(args).await,
+        Some(Command::Status(args)) => cmd_status(args).await,
+        Some(Command::Clean(args)) => cmd_clean(args).await,
+        Some(Command::Fix(args)) => cmd_fix(args).await,
+        Some(Command::Metrics(args)) => cmd_metrics(args).await,
+        Some(Command::Generate(args)) => cmd_generate(args).await,
+        Some(Command::Serve(args)) => cmd_serve(args).await,
+        None => cmd_interactive().await,
     }
 }
 
@@ -693,6 +694,129 @@ Best practices:
         Err(e) => {
             eprintln!("{raw}");
             eprintln!("error: response is not a valid manifest: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Interactive mode — bare `claudes` with no subcommand.
+///
+/// Spawns `claudes serve` as a child MCP server, writes a temp MCP config,
+/// assembles a system prompt with project context, and launches `claude`
+/// in interactive mode with the MCP server connected.
+async fn cmd_interactive() -> ExitCode {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Find the claudes binary (ourselves).
+    let claudes_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claudes"));
+
+    // Write a temp MCP config pointing to `claudes serve`.
+    let mcp_config = serde_json::json!({
+        "mcpServers": {
+            "claudes": {
+                "command": claudes_binary.to_string_lossy(),
+                "args": ["serve"],
+                "type": "stdio"
+            }
+        }
+    });
+
+    let tmp_dir = std::env::temp_dir().join("claudes-interactive");
+    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+        eprintln!("error: cannot create temp dir: {e}");
+        return ExitCode::FAILURE;
+    }
+    let mcp_config_path = tmp_dir.join("mcp.json");
+    if let Err(e) = std::fs::write(
+        &mcp_config_path,
+        serde_json::to_string_pretty(&mcp_config).unwrap(),
+    ) {
+        eprintln!("error: cannot write temp MCP config: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // Assemble system prompt: embedded prompt + project context.
+    let mut system_prompt = include_str!("interactive_prompt.md").to_string();
+
+    // Add project context.
+    let mut context_parts: Vec<String> = Vec::new();
+
+    // CLAUDE.md
+    for name in &["CLAUDE.md", ".claude/CLAUDE.md"] {
+        let path = project_dir.join(name);
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            let excerpt: String = content.lines().take(50).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("## Project context (from {name})\n\n{excerpt}"));
+            break;
+        }
+    }
+
+    // claudes.toml / existing manifest
+    if let Some(manifest_path) = claudes::manifest::Manifest::discover(&project_dir)
+        && let Ok(content) = std::fs::read_to_string(&manifest_path)
+    {
+        let excerpt: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
+        context_parts.push(format!(
+            "## Existing claudes config ({})\n\n```\n{excerpt}\n```",
+            manifest_path.display()
+        ));
+    }
+
+    // Available templates
+    let templates_dir = project_dir.join("crates/claudes/examples/templates");
+    if templates_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&templates_dir)
+    {
+        let names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                e.path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+            .collect();
+        if !names.is_empty() {
+            context_parts.push(format!("## Available templates\n\n{}", names.join(", ")));
+        }
+    }
+
+    if !context_parts.is_empty() {
+        system_prompt.push_str("\n\n---\n\n# Project Context\n\n");
+        system_prompt.push_str(&context_parts.join("\n\n"));
+    }
+
+    // Find the claude binary.
+    let claude = match Claude::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot find claude binary: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Launch claude in interactive mode (no --print) with our MCP server.
+    let status = tokio::process::Command::new(claude.binary())
+        .arg("--mcp-config")
+        .arg(&mcp_config_path)
+        .arg("--append-system-prompt")
+        .arg(&system_prompt)
+        .current_dir(&project_dir)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await;
+
+    // Cleanup temp config.
+    let _ = std::fs::remove_file(&mcp_config_path);
+
+    match status {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: failed to launch claude: {e}");
             ExitCode::FAILURE
         }
     }

@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "claudes", version, about)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
