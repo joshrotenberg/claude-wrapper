@@ -200,21 +200,85 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         "executing manifest"
     );
 
-    let mut join_set = JoinSet::new();
-
-    for task in &manifest.tasks {
-        let task = task.clone();
-        let options = options.clone();
-
-        join_set.spawn(async move { run_task(&task, &options).await });
-    }
+    // Check if any task has dependencies.
+    let has_dependencies = manifest
+        .tasks
+        .iter()
+        .any(|t| t.depends_on.as_ref().is_some_and(|d| !d.is_empty()));
 
     let mut results = Vec::new();
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(task_result) => results.push(task_result),
-            Err(join_err) => {
-                error!("task panicked: {join_err}");
+
+    if has_dependencies {
+        // Execute in topological layers — each layer runs in parallel,
+        // layers execute sequentially.
+        let layers = manifest
+            .topological_order()
+            .map_err(Error::InvalidManifest)?;
+
+        let mut failed_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for layer in layers {
+            let mut join_set = JoinSet::new();
+
+            for task in layer {
+                // Check if any dependency failed — if so, skip this task.
+                let should_skip = task
+                    .depends_on
+                    .as_ref()
+                    .is_some_and(|deps| deps.iter().any(|d| failed_tasks.contains(d)));
+
+                if should_skip {
+                    info!(task = task.name, "skipping — dependency failed");
+                    failed_tasks.insert(task.name.clone());
+                    results.push(TaskResult {
+                        name: task.name.clone(),
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "skipped: dependency failed".to_string(),
+                        duration: std::time::Duration::ZERO,
+                        work_dir: options.project_dir.clone(),
+                        cost_usd: None,
+                        files_modified: None,
+                        lines_changed: None,
+                    });
+                    continue;
+                }
+
+                let task = task.clone();
+                let options = options.clone();
+                join_set.spawn(async move { run_task(&task, &options).await });
+            }
+
+            while let Some(result) = join_set.join_next().await {
+                match result {
+                    Ok(task_result) => {
+                        if !task_result.success {
+                            failed_tasks.insert(task_result.name.clone());
+                        }
+                        results.push(task_result);
+                    }
+                    Err(join_err) => {
+                        error!("task panicked: {join_err}");
+                    }
+                }
+            }
+        }
+    } else {
+        // No dependencies — run all tasks in parallel (original behavior).
+        let mut join_set = JoinSet::new();
+
+        for task in &manifest.tasks {
+            let task = task.clone();
+            let options = options.clone();
+            join_set.spawn(async move { run_task(&task, &options).await });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(task_result) => results.push(task_result),
+                Err(join_err) => {
+                    error!("task panicked: {join_err}");
+                }
             }
         }
     }

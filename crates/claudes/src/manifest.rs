@@ -2230,4 +2230,152 @@ prompt = "do it"
             "2020-01-01T00:00:00+00:00"
         );
     }
+
+    // ========================================================================
+    // depends_on tests
+    // ========================================================================
+
+    #[test]
+    fn validate_depends_on_unknown_task_is_error() {
+        let manifest = Manifest::new(vec![{
+            let mut t = Task::new("a", "do a");
+            t.depends_on = Some(vec!["nonexistent".into()]);
+            t
+        }]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("nonexistent")));
+    }
+
+    #[test]
+    fn validate_depends_on_valid_reference_is_ok() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_dependency_cycle_is_error() {
+        let manifest = Manifest::new(vec![
+            {
+                let mut t = Task::new("a", "do a");
+                t.depends_on = Some(vec!["b".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("b", "do b");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+        ]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("cycle")));
+    }
+
+    #[test]
+    fn validate_self_dependency_is_cycle() {
+        let manifest = Manifest::new(vec![{
+            let mut t = Task::new("a", "do a");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.iter().any(|e| e.contains("cycle")));
+    }
+
+    #[test]
+    fn topological_order_no_deps() {
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            Task::new("b", "do b"),
+            Task::new("c", "do c"),
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].len(), 3);
+    }
+
+    #[test]
+    fn topological_order_linear_chain() {
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            {
+                let mut t = Task::new("b", "do b");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("c", "do c");
+                t.depends_on = Some(vec!["b".into()]);
+                t
+            },
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0][0].name, "a");
+        assert_eq!(layers[1][0].name, "b");
+        assert_eq!(layers[2][0].name, "c");
+    }
+
+    #[test]
+    fn topological_order_fan_out_fan_in() {
+        // a -> (b1, b2) -> c
+        let manifest = Manifest::new(vec![
+            Task::new("a", "do a"),
+            {
+                let mut t = Task::new("b1", "do b1");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("b2", "do b2");
+                t.depends_on = Some(vec!["a".into()]);
+                t
+            },
+            {
+                let mut t = Task::new("c", "do c");
+                t.depends_on = Some(vec!["b1".into(), "b2".into()]);
+                t
+            },
+        ]);
+        let layers = manifest.topological_order().unwrap();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0][0].name, "a");
+        // Layer 1 has b1 and b2 in some order.
+        let layer1_names: Vec<&str> = layers[1].iter().map(|t| t.name.as_str()).collect();
+        assert!(layer1_names.contains(&"b1"));
+        assert!(layer1_names.contains(&"b2"));
+        assert_eq!(layers[2][0].name, "c");
+    }
+
+    #[test]
+    fn depends_on_preserved_through_resolve() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let resolved = manifest.resolve();
+        assert_eq!(
+            resolved.tasks[1].depends_on.as_ref().unwrap(),
+            &vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn depends_on_serialization_roundtrip() {
+        let manifest = Manifest::new(vec![Task::new("a", "do a"), {
+            let mut t = Task::new("b", "do b");
+            t.depends_on = Some(vec!["a".into()]);
+            t
+        }]);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.tasks[1].depends_on.as_ref().unwrap(),
+            &vec!["a".to_string()]
+        );
+    }
 }
