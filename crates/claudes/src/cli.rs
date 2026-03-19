@@ -34,6 +34,9 @@ pub enum Command {
 
     /// Aggregate stats from run history.
     Metrics(MetricsArgs),
+
+    /// Generate a manifest from a prompt using Claude.
+    Generate(GenerateArgs),
 }
 
 /// Arguments for `claudes run`.
@@ -253,6 +256,26 @@ pub struct MetricsArgs {
     /// Output as JSON instead of a table.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `claudes generate`.
+#[derive(Debug, Parser)]
+pub struct GenerateArgs {
+    /// Prompt describing the tasks to generate.
+    #[arg(short = 'p', long)]
+    pub prompt: String,
+
+    /// Override model used for generation.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Write manifest to file (default: stdout).
+    #[arg(short = 'o', long)]
+    pub out: Option<PathBuf>,
+
+    /// Read additional context from stdin.
+    #[arg(long)]
+    pub stdin: bool,
 }
 
 /// Arguments for `claudes fix`.
