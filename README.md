@@ -1,79 +1,90 @@
 # claude-wrapper
 
-Rust tooling suite for the Claude Code CLI built around the coordinator/worker model.
+Rust tooling for the Claude Code CLI.
 
 [![Crates.io](https://img.shields.io/crates/v/claude-wrapper.svg)](https://crates.io/crates/claude-wrapper)
 [![Documentation](https://docs.rs/claude-wrapper/badge.svg)](https://docs.rs/claude-wrapper)
 [![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/claude-wrapper.svg)](LICENSE-MIT)
 
-## Coordinator/Worker Model
+## Crates
 
-**claude-pool** implements coordinator/worker orchestration for Claude Code. A
-**coordinator** -- an interactive Claude session with the pool in its MCP config --
-schedules work, dispatches tasks to **worker** slots, monitors results, reviews
-outputs, and decides what merges. Workers are isolated Claude instances that
-execute one task at a time and return.
+| Crate | Purpose | Status |
+|---|---|---|
+| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe Rust interface to Claude Code CLI | Stable |
+| **[claudes](crates/claudes/)** | Manifest-driven parallel execution engine | Active development |
+| **[claude-pool](crates/claude-pool/)** | Coordinator/worker orchestration | Deprecated (use claudes) |
+| **[claude-pool-mcp](crates/claude-pool-mcp/)** | MCP server exposing pool as tools | Deprecated (use claudes) |
 
-This is measured parallelism under human control. The human sits at the
-coordinator level and decides what offloads, when, and how. Not a
-leave-it-running daemon or full automation platform.
+## claudes
 
-The coordinator follows a repeating rhythm: **dispatch** tasks, **monitor**
-results (tick loop), **review** output, **merge** what passes. Chains compress
-this into one dispatch/monitor cycle. Fan-outs run monitor in parallel.
+Run headless Claude Code sessions in parallel from a manifest. Write a JSON or TOML
+document describing your tasks, and claudes runs them concurrently in isolated git
+worktrees with streaming output and post-hook validation.
 
-### Key Properties
+```bash
+# Run tasks from prompts
+claudes run -p "fix the pagination bug" -p "add unit tests" -v
 
-- **Session-scoped**: Slots live only as long as your process. No external state.
-- **Human-in-the-loop**: The coordinator reviews and approves worker output.
-- **Selective**: Choose what offloads -- chains, fan-outs, or single tasks.
-- **MCP-native**: Expose the pool as an MCP server and use it directly from Claude Code.
+# Use AI to generate a manifest
+claudes generate -p "work on the three open bugs as separate tasks"
 
-## The Three Crates
+# Run from a manifest file
+claudes run --manifest plan.json -v
 
-```
-+---------------------------------------------------+
-|  Your Application or Interactive Claude Session    |
-+------------------------+--------------------------+
-                         |
-                         |  MCP: claude-pool-mcp
-                         v
-      +--------------------------------------+
-      |      claude-pool (library)           |
-      |  * Task submission & routing         |
-      |  * Slot pool (N slots)               |
-      |  * Budget tracking                   |
-      |  * Chains, fan-out, auto-routing     |
-      |  * Worktree isolation                |
-      +----------------+--------------------+
-                        |
-              +---------+---------+
-              v         v         v
-          Slot-0    Slot-1    Slot-N
-          (Claude CLI instances)
-              |         |         |
-             Uses: claude-wrapper (CLI wrapper)
+# Check results
+claudes status
+claudes metrics
 ```
 
-| Crate | Purpose | Docs |
-|-------|---------|------|
-| **[claude-wrapper](crates/claude-wrapper/)** | Type-safe Rust interface to Claude Code CLI | [README](crates/claude-wrapper/README.md) |
-| **[claude-pool](crates/claude-pool/)** | Coordinator/worker orchestration | [README](crates/claude-pool/README.md) |
-| **[claude-pool-mcp](crates/claude-pool-mcp/)** | MCP server exposing pool as tools | [README](crates/claude-pool-mcp/README.md) |
+### Example manifest (TOML)
 
-## Quick Start
+```toml
+[shared]
+model = "sonnet"
+max_turns = 30
+post_hooks = ["cargo fmt --check", "cargo test --lib"]
 
-### 1. Use the CLI wrapper in your app
+[[tasks]]
+name = "fix-pagination"
+prompt = "Fix the pagination bug in src/api/list.rs"
+
+[[tasks]]
+name = "add-tests"
+prompt = "Add unit tests for the auth module"
+```
+
+### Features
+
+- Parallel execution in isolated git worktrees
+- JSON and TOML manifest formats
+- Shared blocks and named profiles
+- Pre/post/finally hooks for validation and cleanup
+- Streaming output with per-task colors (`-v`, `-vv`)
+- Run state with timestamped IDs and cost tracking
+- Auto-discovery of project manifest files
+- `claudes fix` to retry failed tasks with error context
+- `claudes generate` for AI-assisted manifest creation
+- `claudes metrics` for historical analysis
+
+See the [claudes README](crates/claudes/README.md) for full documentation and the
+[prompt guide](crates/claudes/PROMPTING.md) for best practices.
+
+## claude-wrapper
+
+Type-safe Rust wrapper around the Claude Code CLI with builder pattern, typed outputs,
+and async execution.
 
 ```rust
-use claude_wrapper::{Claude, QueryCommand};
+use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
 
 #[tokio::main]
 async fn main() -> claude_wrapper::Result<()> {
     let claude = Claude::builder().build()?;
     let output = QueryCommand::new("explain this error")
         .model("sonnet")
+        .max_turns(1)
+        .no_session_persistence()
         .execute(&claude)
         .await?;
     println!("{}", output.stdout);
@@ -81,59 +92,9 @@ async fn main() -> claude_wrapper::Result<()> {
 }
 ```
 
-### 2. Use a slot pool in your app
+See the [claude-wrapper README](crates/claude-wrapper/README.md) for full API docs.
 
-```rust
-use claude_pool::Pool;
-use claude_wrapper::Claude;
-
-#[tokio::main]
-async fn main() -> claude_pool::Result<()> {
-    let claude = Claude::builder().build()?;
-    let pool = Pool::builder(claude).slots(4).build().await?;
-
-    let result = pool.run("write a haiku about rust").await?;
-    println!("{}", result.output);
-
-    pool.drain().await?;
-    Ok(())
-}
-```
-
-### 3. Use as an MCP server from Claude Code
-
-Add to your `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "claude-pool": {
-      "command": "cargo",
-      "args": ["run", "-p", "claude-pool-mcp", "--", "-n", "4", "--model", "sonnet"]
-    }
-  }
-}
-```
-
-Then use `pool_run`, `pool_fan_out`, `pool_chain`, `pool_auto`, and 27 other tools directly from Claude Code. See the [coordinator skill](crates/claude-pool-mcp/skills/pool-coordinator/SKILL.md) for tool selection guidance.
-
-## Features
-
-- **claude-wrapper**: Type-safe CLI wrapper with full option coverage, MCP server management, plugin management, streaming NDJSON events, session management
-- **claude-pool**: Multi-slot coordination, synchronous/async task execution, parallel fan-out, sequential chains with failure policies, auto-routing (LLM picks single/parallel/chain), budget control, shared context injection, worktree isolation, review gates
-- **claude-pool-mcp**: 31-tool MCP server, stdio transport, configurable via CLI flags
-
-## Installation
-
-```bash
-# Library: type-safe CLI wrapper
-cargo add claude-wrapper
-
-# Library: slot pool orchestration
-cargo add claude-pool
-```
-
-## Development & Testing
+## Development
 
 ```bash
 cargo fmt --all -- --check
@@ -141,11 +102,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib --all-features
 cargo test --doc --all-features
 
-# Integration tests (requires fake-claude binary)
-cargo test --test pool_integration --test auto_route_tests -p claude-pool -- --ignored
-
-# Live routing accuracy test (requires real claude binary)
-cargo test --test route_stress -p claude-pool -- --ignored
+# claudes integration tests (requires fake-claude binary)
+cargo test --test fake_claude -p claudes -- --ignored
 ```
 
 ## License
