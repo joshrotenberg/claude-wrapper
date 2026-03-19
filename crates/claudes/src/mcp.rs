@@ -112,7 +112,19 @@ fn plan_tasks() -> Tool {
                 ..Default::default()
             };
             let manifest = crate::plan(&opts);
-            Ok(json_result(&manifest))
+            let mut manifest_val = match serde_json::to_value(&manifest) {
+                Ok(v) => v,
+                Err(e) => return Ok(CallToolResult::error(format!("serialization error: {e}"))),
+            };
+            if let serde_json::Value::Object(ref mut map) = manifest_val {
+                map.insert(
+                    "cli_command".into(),
+                    serde_json::Value::String(
+                        "claudes run --manifest /tmp/manifest.json -v".into(),
+                    ),
+                );
+            }
+            Ok(CallToolResult::json(manifest_val))
         })
         .build()
 }
@@ -175,7 +187,8 @@ fn run_manifest() -> Tool {
                 return Ok(json_result(&serde_json::json!({
                     "run_id": run_id,
                     "status": "started",
-                    "message": "running in background — poll task_status with this run_id to check completion"
+                    "message": "running in background — poll task_status with this run_id to check completion",
+                    "cli_command": format!("claudes status {run_id}")
                 })));
             }
 
@@ -187,7 +200,10 @@ fn run_manifest() -> Tool {
                     if let Err(e) = crate::state::save(&project_dir, &state) {
                         tracing::warn!("failed to write state file: {e}");
                     }
-                    Ok(json_result(&state))
+                    Ok(json_result(&serde_json::json!({
+                        "data": state,
+                        "cli_command": "claudes status"
+                    })))
                 }
                 Err(e) => Ok(CallToolResult::error(format!("{e}"))),
             }
@@ -213,7 +229,13 @@ fn task_status() -> Tool {
                 crate::state::load(&project_dir)
             };
             match state {
-                Some(s) => Ok(json_result(&s)),
+                Some(s) => {
+                    let run_id_str = s.run_id.clone();
+                    Ok(json_result(&serde_json::json!({
+                        "data": s,
+                        "cli_command": format!("claudes status --json {run_id_str}")
+                    })))
+                }
                 None => Ok(CallToolResult::error(
                     "no run state found (run `claudes run` first)",
                 )),
@@ -250,7 +272,10 @@ fn list_runs() -> Tool {
                     })
                 })
                 .collect();
-            Ok(json_result(&serde_json::json!({ "runs": summaries })))
+            Ok(json_result(&serde_json::json!({
+                "runs": summaries,
+                "cli_command": "claudes status --list"
+            })))
         })
         .build()
 }
