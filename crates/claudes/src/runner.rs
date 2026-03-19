@@ -179,6 +179,12 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 
     let manifest = manifest.resolve();
 
+    let run_id = crate::state::generate_run_id();
+    let task_names: Vec<String> = manifest.tasks.iter().map(|t| t.name.clone()).collect();
+    if let Err(e) = crate::state::write_running(&options.project_dir, &run_id, &task_names) {
+        warn!("failed to write running indicator: {e}");
+    }
+
     info!(tasks = manifest.tasks.len(), "executing manifest");
 
     let mut join_set = JoinSet::new();
@@ -199,6 +205,8 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
             }
         }
     }
+
+    crate::state::clear_running(&options.project_dir);
 
     // Auto-cleanup worktrees based on policy.
     if options.cleanup != CleanupPolicy::None {
