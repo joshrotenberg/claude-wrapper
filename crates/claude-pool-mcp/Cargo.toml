@@ -6,7 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Thin MCP server exposing claude-pool as tools"
+description = "Thin MCP server exposing claude-pool as tools (DEPRECATED: use claudes instead)"
+
+[badges]
+maintenance = { status = "deprecated" }
 
 [[bin]]
 name = "claude-pool-mcp"

@@ -54,6 +54,10 @@ Run format, lint, unit tests, and doc tests before every commit.
 - No emojis in code, commits, or documentation
 - Prefer editing existing files over creating new ones
 
+## Deprecation Notice
+
+`claude-pool` and `claude-pool-mcp` are deprecated. Use the `claudes` crate for parallel task execution.
+
 ## Architecture
 
 **claude-wrapper** uses a two-layer builder:
