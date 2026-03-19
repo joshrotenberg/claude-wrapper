@@ -28,6 +28,12 @@ pub enum Command {
 
     /// Remove worktrees and temporary state.
     Clean(CleanArgs),
+
+    /// Re-run failed or timed-out tasks from a previous run.
+    Fix(FixArgs),
+
+    /// Generate a manifest using AI assistance.
+    Generate(GenerateArgs),
 }
 
 /// Arguments for `claudes run`.
@@ -235,6 +241,50 @@ pub struct CleanArgs {
     /// Remove local claudes/* branches that have been merged into main.
     #[arg(long)]
     pub branches: bool,
+}
+
+/// Arguments for `claudes fix`.
+#[derive(Debug, Parser)]
+pub struct FixArgs {
+    /// Run ID to fix (default: latest run).
+    #[arg(long)]
+    pub run: Option<String>,
+
+    /// Re-run only these task(s) (repeatable; default: all failed/timed-out).
+    #[arg(long)]
+    pub task: Vec<String>,
+
+    /// Additional guidance to append to the fix prompt.
+    #[arg(short = 'p')]
+    pub prompt: Option<String>,
+
+    /// Force overwrite if worktree state is inconsistent.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `claudes generate`.
+#[derive(Debug, Parser)]
+pub struct GenerateArgs {
+    /// High-level description of the work to generate tasks for (repeatable).
+    #[arg(short, long)]
+    pub prompt: Vec<String>,
+
+    /// Read prompt from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Write manifest to file (default: stdout).
+    #[arg(short, long)]
+    pub out: Option<PathBuf>,
+
+    /// Override model used for generation.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Skip gathering project context from local files.
+    #[arg(long)]
+    pub no_context: bool,
 }
 
 /// Parse a timeout string like "30m", "1h", "3600" into seconds.

@@ -8,6 +8,35 @@ use claudes::cli::{Cli, Command, parse_timeout};
 use claudes::output::{self, OutputFormat, Verbosity};
 use claudes::planner::PlanOptions;
 
+const SYSTEM_PROMPT: &str = "\
+You are a manifest generator for the claudes tool, a manifest-driven execution \
+engine for headless Claude Code sessions.
+
+Given a high-level description, decompose the work into parallel tasks and output \
+a valid claudes manifest as JSON. The manifest schema is:
+
+{
+  \"version\": 1,
+  \"created_at\": \"<ISO 8601 timestamp>\",
+  \"tasks\": [
+    {
+      \"name\": \"<short-slug-XXXX>\",
+      \"prompt\": \"<detailed task prompt>\",
+      \"isolation\": {\"worktree\": {\"base_dir\": \".worktrees\"}},
+      \"branch\": \"claudes/<name>\"
+    }
+  ]
+}
+
+Rules:
+- Each task name must be a short slug (words separated by hyphens, max 25 chars) \
+followed by a hyphen and a 4-character hex hash unique to the task.
+- Default isolation is worktree. Use {\"none\": {}} only when tasks must share state.
+- Set model, max_turns, timeout_secs, or permission_mode only when clearly needed.
+- Write detailed, self-contained prompts — each task runs in isolation.
+- Output ONLY valid JSON with no markdown fences or explanation.\
+";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -22,6 +51,8 @@ async fn main() -> ExitCode {
         Command::Init(args) => cmd_init(args).await,
         Command::Status(args) => cmd_status(args).await,
         Command::Clean(args) => cmd_clean(args).await,
+        Command::Fix(args) => cmd_fix(args).await,
+        Command::Generate(args) => cmd_generate(args).await,
     }
 }
 
@@ -385,6 +416,136 @@ async fn cmd_clean(args: claudes::cli::CleanArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+async fn cmd_fix(args: claudes::cli::FixArgs) -> ExitCode {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let state = if let Some(ref run_id) = args.run {
+        claudes::state::load_run(&project_dir, run_id)
+    } else {
+        claudes::state::load(&project_dir)
+    };
+
+    let state = match state {
+        Some(s) => s,
+        None => {
+            eprintln!("error: no run state found (run `claudes run` first)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let tasks_to_fix: Vec<&claudes::state::TaskState> = state
+        .results
+        .iter()
+        .filter(|t| {
+            if args.task.is_empty() {
+                matches!(
+                    t.status,
+                    claudes::state::TaskStatus::Failed | claudes::state::TaskStatus::Timeout
+                )
+            } else {
+                args.task.contains(&t.name)
+            }
+        })
+        .collect();
+
+    if tasks_to_fix.is_empty() {
+        eprintln!("no failed or timed-out tasks to fix");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut all_succeeded = true;
+
+    for task_state in tasks_to_fix {
+        eprintln!("fixing task: {}", task_state.name);
+
+        let original_task = state
+            .manifest
+            .tasks
+            .iter()
+            .find(|t| t.name == task_state.name);
+
+        let original_prompt = original_task
+            .map(|t| t.prompt.as_str())
+            .unwrap_or("[unknown]");
+
+        let error_context = task_state
+            .error
+            .as_deref()
+            .unwrap_or("task timed out or failed with no error output");
+
+        let mut fix_prompt = format!(
+            "The previous task failed. Original prompt: {original_prompt}. \
+             Error: {error_context}. Fix the issue."
+        );
+        if let Some(ref guidance) = args.prompt {
+            fix_prompt.push_str(&format!(" {guidance}"));
+        }
+
+        let mut fix_task = original_task
+            .cloned()
+            .unwrap_or_else(|| claudes::Task::new(&task_state.name, ""));
+        fix_task.prompt = fix_prompt;
+        fix_task.isolation = Some(claudes::Isolation::None);
+
+        let fix_manifest = claudes::Manifest::new(vec![fix_task]);
+
+        let work_dir = PathBuf::from(&task_state.work_dir);
+        if !work_dir.exists() {
+            eprintln!(
+                "error: work_dir for task '{}' no longer exists: {}",
+                task_state.name, task_state.work_dir
+            );
+            all_succeeded = false;
+            continue;
+        }
+
+        let started_at = chrono::Utc::now();
+
+        let mut options = claudes::RunOptions {
+            project_dir: work_dir,
+            force: args.force,
+            binary: None,
+            env: vec![],
+            cleanup: claudes::CleanupPolicy::default(),
+            event_sender: None,
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        options.event_sender = Some(tx);
+        let stream_handle =
+            tokio::spawn(output::render_stream(rx, output::Verbosity::Default, false));
+
+        let result = match claudes::run(&fix_manifest, &options).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                all_succeeded = false;
+                continue;
+            }
+        };
+
+        options.event_sender = None;
+        let _ = stream_handle.await;
+
+        let fix_state = claudes::state::build_state(&fix_manifest, &result, started_at);
+        if let Err(e) = claudes::state::save(&project_dir, &fix_state) {
+            tracing::warn!("failed to write fix state file: {e}");
+        }
+
+        output::print_summary(&result, output::OutputFormat::Text);
+
+        if !result.all_succeeded() {
+            all_succeeded = false;
+        }
+    }
+
+    if all_succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 async fn clean_worktrees_impl(project_dir: &Path, force: bool) -> ExitCode {
     let worktrees_dir = project_dir.join(".worktrees");
 
@@ -556,6 +717,120 @@ async fn clean_branches_impl(project_dir: &Path) -> ExitCode {
     }
 
     eprintln!("deleted {removed} merged claudes/* branch(es)");
+    ExitCode::SUCCESS
+}
+
+async fn cmd_generate(args: claudes::cli::GenerateArgs) -> ExitCode {
+    let prompts = collect_prompts(&args.prompt, args.stdin).await;
+    if prompts.is_empty() {
+        eprintln!("error: no description provided (use -p or --stdin)");
+        return ExitCode::FAILURE;
+    }
+
+    let query = prompts.join("\n\n");
+
+    let mut system_prompt = SYSTEM_PROMPT.to_string();
+
+    if !args.no_context {
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut context_parts: Vec<String> = Vec::new();
+
+        if let Some(manifest_path) = claudes::manifest::Manifest::discover(&project_dir)
+            && let Ok(content) = std::fs::read_to_string(&manifest_path)
+        {
+            let parsed: Option<claudes::Manifest> =
+                if manifest_path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    toml::from_str(&content).ok()
+                } else {
+                    serde_json::from_str(&content).ok()
+                };
+            if let Some(manifest) = parsed {
+                let mut manifest_info: Vec<String> = Vec::new();
+                if let Some(profiles) = &manifest.profiles {
+                    let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+                    manifest_info.push(format!("Available profiles: {}", names.join(", ")));
+                }
+                if manifest.shared.is_some() {
+                    manifest_info.push(
+                        "Shared defaults present (tasks inherit them automatically).".to_string(),
+                    );
+                }
+                if !manifest_info.is_empty() {
+                    context_parts.push(format!(
+                        "From {}:\n{}",
+                        manifest_path.display(),
+                        manifest_info.join("\n")
+                    ));
+                }
+            }
+        }
+
+        let prompting_path = project_dir.join("PROMPTING.md");
+        if prompting_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&prompting_path)
+        {
+            let truncated: String = content.lines().take(500).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("PROMPTING.md (best practices):\n{truncated}"));
+        }
+
+        let claude_md_path = project_dir.join("CLAUDE.md");
+        if claude_md_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&claude_md_path)
+        {
+            let excerpt: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("CLAUDE.md (project context, excerpt):\n{excerpt}"));
+        }
+
+        if !context_parts.is_empty() {
+            system_prompt.push_str("\n\nProject context (from local files):\n");
+            system_prompt.push_str(&context_parts.join("\n\n"));
+            system_prompt.push_str(
+                "\n\nIf the project has profiles, reference them in tasks. \
+                 If it has shared defaults, tasks will inherit them automatically.",
+            );
+        }
+    }
+
+    let claude = match claude_wrapper::Claude::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to initialize claude client: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let model = args.model.as_deref().unwrap_or("claude-sonnet-4-6");
+    let result = match claude_wrapper::QueryCommand::new(&query)
+        .system_prompt(&system_prompt)
+        .model(model)
+        .no_session_persistence()
+        .execute_json(&claude)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if result.is_error {
+        eprintln!("error: claude returned an error response");
+        return ExitCode::FAILURE;
+    }
+
+    let json = result.result;
+
+    if let Some(out_path) = &args.out {
+        if let Err(e) = std::fs::write(out_path, &json) {
+            eprintln!("error: cannot write manifest: {e}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!("manifest written to {}", out_path.display());
+    } else {
+        println!("{json}");
+    }
+
     ExitCode::SUCCESS
 }
 
