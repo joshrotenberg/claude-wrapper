@@ -36,6 +36,8 @@ struct RunManifestInput {
     manifest_json: String,
     /// Force overwrite existing worktrees.
     force: Option<bool>,
+    /// Run in background. Returns run_id immediately; poll task_status to check completion.
+    background: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -122,7 +124,8 @@ fn run_manifest() -> Tool {
             "Execute a claudes manifest. Tasks run in parallel in isolated git worktrees. \
              Returns the full run state including per-task status, cost, duration, and errors. \
              The manifest JSON should include version, tasks array, and optionally a shared block. \
-             Use plan_tasks first to generate a manifest, then pass it here to execute.",
+             Use plan_tasks first to generate a manifest, then pass it here to execute. \
+             Set background=true to return immediately with a run_id; poll task_status to check completion.",
         )
         .handler(|input: RunManifestInput| async move {
             let manifest: crate::Manifest = match serde_json::from_str(&input.manifest_json) {
@@ -136,7 +139,9 @@ fn run_manifest() -> Tool {
             // Set up event sender so log files get written even without a renderer.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::TaskEvent>();
             // Drain events in background (no rendering, just enables log writing in runner).
-            tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            tokio::spawn(async move {
+                while rx.recv().await.is_some() {}
+            });
 
             let options = crate::RunOptions {
                 project_dir: project_dir.clone(),
@@ -146,6 +151,35 @@ fn run_manifest() -> Tool {
                 cleanup: crate::CleanupPolicy::default(),
                 event_sender: Some(tx),
             };
+
+            if input.background.unwrap_or(false) {
+                // Background mode: spawn and return run_id immediately.
+                let run_id = crate::state::generate_run_id();
+                let rid = run_id.clone();
+                tokio::spawn(async move {
+                    let started_at = chrono::Utc::now();
+                    match crate::run(&manifest, &options).await {
+                        Ok(result) => {
+                            let mut state =
+                                crate::state::build_state(&manifest, &result, started_at);
+                            state.run_id = rid;
+                            if let Err(e) = crate::state::save(&project_dir, &state) {
+                                tracing::error!("failed to write state file: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("background run failed: {e}");
+                        }
+                    }
+                });
+                return Ok(json_result(&serde_json::json!({
+                    "run_id": run_id,
+                    "status": "started",
+                    "message": "running in background — poll task_status with this run_id to check completion"
+                })));
+            }
+
+            // Foreground mode: block until complete.
             let started_at = chrono::Utc::now();
             match crate::run(&manifest, &options).await {
                 Ok(result) => {
