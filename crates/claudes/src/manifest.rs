@@ -432,6 +432,59 @@ impl Manifest {
         None
     }
 
+    /// Scan task prompts for file path references and warn if multiple tasks mention the same path.
+    ///
+    /// Returns one warning string per overlapping path. A token is treated as a file path if it
+    /// contains `'/'` or ends with `.rs`, `.ts`, `.py`, `.js`, `.toml`, `.json`, `.yaml`,
+    /// `.yml`, or `.md`. This is a best-effort heuristic — it may produce false positives for
+    /// URLs and similar patterns.
+    pub fn check_file_overlaps(&self) -> Vec<String> {
+        fn extract_paths(text: &str) -> std::collections::HashSet<String> {
+            const EXTENSIONS: &[&str] = &[
+                ".rs", ".ts", ".py", ".js", ".toml", ".json", ".yaml", ".yml", ".md",
+            ];
+            let mut paths = std::collections::HashSet::new();
+            for word in text.split_whitespace() {
+                let token = word.trim_matches(|c: char| {
+                    matches!(
+                        c,
+                        '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ':' | ';'
+                    )
+                });
+                if token.is_empty() {
+                    continue;
+                }
+                if token.contains('/') || EXTENSIONS.iter().any(|ext| token.ends_with(ext)) {
+                    paths.insert(token.to_string());
+                }
+            }
+            paths
+        }
+
+        let mut path_to_tasks: HashMap<String, Vec<&str>> = HashMap::new();
+        for task in &self.tasks {
+            for path in extract_paths(&task.prompt) {
+                path_to_tasks.entry(path).or_default().push(&task.name);
+            }
+        }
+
+        let mut warnings: Vec<String> = path_to_tasks
+            .into_iter()
+            .filter(|(_, tasks)| tasks.len() >= 2)
+            .map(|(path, mut tasks)| {
+                tasks.sort();
+                let names = tasks
+                    .iter()
+                    .map(|n| format!("'{n}'"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                format!("tasks {names} both reference '{path}' — consider sequencing them")
+            })
+            .collect();
+        warnings.sort();
+        warnings
+    }
+
     /// Validate the manifest, returning errors for any problems.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
@@ -1897,5 +1950,69 @@ prompt = "do it"
     fn validate_no_profiles_is_fine() {
         let manifest = Manifest::new(vec![Task::new("t1", "do it")]);
         assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn check_file_overlaps_detects_overlap() {
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Fix the bug in src/lib.rs and update Cargo.toml"),
+            Task::new("task-b", "Add tests in src/lib.rs"),
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("src/lib.rs") && w.contains("task-a") && w.contains("task-b")),
+            "expected overlap warning for src/lib.rs, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_no_overlap_returns_empty() {
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Edit src/main.rs"),
+            Task::new("task-b", "Edit src/lib.rs"),
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_path_in_only_one_task_no_warning() {
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Update Cargo.toml with new dependencies"),
+            Task::new("task-b", "Write documentation in README.md"),
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_extension_only_match() {
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "Update Cargo.toml"),
+            Task::new("task-b", "Also update Cargo.toml"),
+        ]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.iter().any(|w| w.contains("Cargo.toml")),
+            "expected overlap warning for Cargo.toml, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_file_overlaps_single_task_returns_empty() {
+        let manifest = Manifest::new(vec![Task::new("only", "Edit src/lib.rs and Cargo.toml")]);
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
     }
 }
