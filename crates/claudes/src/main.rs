@@ -540,7 +540,7 @@ async fn cmd_metrics(args: claudes::cli::MetricsArgs) -> ExitCode {
     if args.json {
         claudes::state::print_metrics_json(&metrics);
     } else {
-        claudes::state::print_metrics(&metrics);
+        claudes::state::print_metrics(&metrics, &runs);
     }
 
     ExitCode::SUCCESS

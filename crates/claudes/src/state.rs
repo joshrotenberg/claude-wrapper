@@ -217,31 +217,68 @@ pub fn compute_metrics(runs: &[RunState]) -> RunMetrics {
     }
 }
 
-/// Print metrics as a human-readable table.
-pub fn print_metrics(metrics: &RunMetrics) {
-    println!("Runs:       {}", metrics.total_runs);
-    println!("Tasks:      {}", metrics.total_tasks);
-    println!(
-        "Succeeded:  {} ({:.0}%)",
+/// Format metrics as a human-readable string, including a per-run breakdown.
+fn format_metrics(metrics: &RunMetrics, runs: &[RunState]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Runs:       {}\n", metrics.total_runs));
+    out.push_str(&format!("Tasks:      {}\n", metrics.total_tasks));
+    out.push_str(&format!(
+        "Succeeded:  {} ({:.0}%)\n",
         metrics.succeeded,
         if metrics.total_tasks > 0 {
             metrics.succeeded as f64 / metrics.total_tasks as f64 * 100.0
         } else {
             0.0
         }
-    );
-    println!("Failed:     {}", metrics.failed);
-    println!("Timed out:  {}", metrics.timed_out);
+    ));
+    out.push_str(&format!("Failed:     {}\n", metrics.failed));
+    out.push_str(&format!("Timed out:  {}\n", metrics.timed_out));
     if let Some(cost) = metrics.total_cost_usd {
-        println!("Total cost: ${cost:.4}");
+        out.push_str(&format!("Total cost: ${cost:.4}\n"));
     }
     if let Some(avg) = metrics.avg_cost_per_task {
-        println!("Avg cost/task: ${avg:.4}");
+        out.push_str(&format!("Avg cost/task: ${avg:.4}\n"));
     }
-    println!("Avg duration: {:.1}s", metrics.avg_duration_secs);
+    out.push_str(&format!(
+        "Avg duration: {:.1}s\n",
+        metrics.avg_duration_secs
+    ));
     if let Some(avg) = metrics.avg_turns_used {
-        println!("Avg turns/task: {avg:.1}");
+        out.push_str(&format!("Avg turns/task: {avg:.1}\n"));
     }
+
+    if !runs.is_empty() {
+        out.push_str("\nRecent runs:\n");
+        for run in runs.iter().take(10) {
+            let id_full = &run.run_id;
+            let id = &id_full[..id_full.len().min(20)];
+            let ok = run.summary.succeeded;
+            let total = run.summary.total;
+            let mut line = format!("  {id:<20}  {ok}/{total} ok");
+            if let Some(c) = run.summary.total_cost_usd {
+                line.push_str(&format!("   ${c:.2}"));
+            }
+            let turns: Vec<f64> = run
+                .results
+                .iter()
+                .filter_map(|t| t.turns_used)
+                .map(|n| n as f64)
+                .collect();
+            if !turns.is_empty() {
+                let avg = turns.iter().sum::<f64>() / turns.len() as f64;
+                line.push_str(&format!("  {avg:.1} turns/task"));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+/// Print metrics as a human-readable table.
+pub fn print_metrics(metrics: &RunMetrics, runs: &[RunState]) {
+    print!("{}", format_metrics(metrics, runs));
 }
 
 /// Print metrics as JSON.
@@ -1002,6 +1039,70 @@ mod tests {
         assert_eq!(cost, None);
         assert_eq!(session, None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn print_metrics_shows_recent_runs() {
+        let manifest = Manifest::new(vec![Task::new("a", "first"), Task::new("b", "second")]);
+        let result = RunResult {
+            tasks: vec![
+                TaskResult {
+                    name: "a".into(),
+                    success: true,
+                    stdout: r#"{"total_cost_usd":1.39,"num_turns":15}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(5),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+                TaskResult {
+                    name: "b".into(),
+                    success: true,
+                    stdout: r#"{"total_cost_usd":0.79,"num_turns":21}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(4),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+            ],
+        };
+
+        let t1: DateTime<Utc> = "2026-03-19T00:12:00Z".parse().unwrap();
+        let t2: DateTime<Utc> = "2026-03-19T00:30:00Z".parse().unwrap();
+        let mut s1 = build_state(&manifest, &result, t1);
+        s1.run_id = "run-20260319-001200-aaaa".to_string();
+        let mut s2 = build_state(&manifest, &result, t2);
+        s2.run_id = "run-20260319-003000-bbbb".to_string();
+
+        // Newest first, as returned by list_runs.
+        let runs = vec![s2, s1];
+        let metrics = compute_metrics(&runs);
+        let output = format_metrics(&metrics, &runs);
+
+        assert!(
+            output.contains("Recent runs:"),
+            "output missing 'Recent runs:':\n{output}"
+        );
+        assert!(
+            output.contains("run-20260319-003000"),
+            "output missing first run:\n{output}"
+        );
+        assert!(
+            output.contains("run-20260319-001200"),
+            "output missing second run:\n{output}"
+        );
+        assert!(
+            output.contains("2/2 ok"),
+            "output missing ok count:\n{output}"
+        );
+        assert!(
+            output.contains("turns/task"),
+            "output missing turns/task:\n{output}"
+        );
     }
 
     #[test]
