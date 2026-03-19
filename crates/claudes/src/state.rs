@@ -520,10 +520,15 @@ pub fn print_status(state: &RunState) {
         let name = &task.name;
         println!("  {name:<30} {status:<10} {time:>8}  {cost:>8}  {branch}");
 
-        if let Some(err) = &task.error {
-            for line in err.lines().take(3) {
-                println!("    {line}");
-            }
+        if let Some(err) = &task.error
+            && let Some(first_line) = err.lines().next()
+        {
+            let truncated = if first_line.len() > 80 {
+                format!("{}...", &first_line[..77])
+            } else {
+                first_line.to_string()
+            };
+            println!("    {truncated}");
         }
         if let Some(ref log_path) = task.log_path
             && std::path::Path::new(log_path).exists()
