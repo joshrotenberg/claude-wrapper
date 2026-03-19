@@ -10,12 +10,36 @@ use crate::runner::{RunResult, TaskEvent, TaskResult};
 use crate::state::is_timeout;
 
 const COLOR_PALETTE: &[Color] = &[
-    Color::Cyan,
-    Color::Green,
-    Color::Yellow,
-    Color::Magenta,
-    Color::Blue,
-    Color::Red,
+    Color::Rgb {
+        r: 0,
+        g: 255,
+        b: 255,
+    }, // bright cyan
+    Color::Rgb {
+        r: 0,
+        g: 255,
+        b: 128,
+    }, // bright green
+    Color::Rgb {
+        r: 255,
+        g: 255,
+        b: 0,
+    }, // bright yellow
+    Color::Rgb {
+        r: 255,
+        g: 128,
+        b: 255,
+    }, // bright magenta
+    Color::Rgb {
+        r: 128,
+        g: 128,
+        b: 255,
+    }, // bright blue
+    Color::Rgb {
+        r: 255,
+        g: 128,
+        b: 0,
+    }, // bright orange
 ];
 
 /// Verbosity level for streaming output.
@@ -223,6 +247,9 @@ pub async fn render_stream(
                                     .get("name")
                                     .and_then(|n| n.as_str())
                                     .unwrap_or("unknown");
+                                let cwd = std::env::current_dir()
+                                    .ok()
+                                    .map(|p| p.to_string_lossy().into_owned());
                                 let first_arg = block
                                     .get("input")
                                     .and_then(|i| i.as_object())
@@ -233,8 +260,18 @@ pub async fn render_stream(
                                         } else {
                                             v.to_string()
                                         };
+                                        let s = if let Some(ref cwd) = cwd {
+                                            let prefix = format!("{cwd}/");
+                                            if s.starts_with(&prefix) {
+                                                s[prefix.len()..].to_string()
+                                            } else {
+                                                s
+                                            }
+                                        } else {
+                                            s
+                                        };
                                         let mut chars = s.chars();
-                                        let truncated: String = chars.by_ref().take(40).collect();
+                                        let truncated: String = chars.by_ref().take(60).collect();
                                         if chars.next().is_some() {
                                             format!("{truncated}...")
                                         } else {
