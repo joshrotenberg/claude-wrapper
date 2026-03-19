@@ -116,6 +116,8 @@ pub enum TaskStatus {
     Failed,
     /// Task hit the max_turns limit.
     Timeout,
+    /// Task was skipped because a dependency failed.
+    Skipped,
 }
 
 /// Summary statistics for the entire run.
@@ -621,6 +623,7 @@ pub fn print_status(state: &RunState) {
             TaskStatus::Success => "ok",
             TaskStatus::Failed => "FAILED",
             TaskStatus::Timeout => "TIMEOUT",
+            TaskStatus::Skipped => "SKIPPED",
         };
         let status_display = if use_color {
             match task.status {
@@ -651,6 +654,16 @@ pub fn print_status(state: &RunState) {
                             r: 255,
                             g: 255,
                             b: 0
+                        })
+                        .to_string()
+                ),
+                TaskStatus::Skipped => format!(
+                    "{:<10}",
+                    status_str
+                        .with(Color::Rgb {
+                            r: 128,
+                            g: 128,
+                            b: 128
                         })
                         .to_string()
                 ),

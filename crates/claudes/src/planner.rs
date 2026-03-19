@@ -282,6 +282,7 @@ pub fn plan(options: &PlanOptions) -> Manifest {
                 pre_hooks: None,
                 post_hooks: None,
                 finally_hooks: None,
+                depends_on: None,
             }
         })
         .collect();
