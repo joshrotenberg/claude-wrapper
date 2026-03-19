@@ -190,6 +190,7 @@ pub async fn render_stream(
 
     let mut color_map: HashMap<String, Color> = HashMap::new();
     let mut color_index: usize = 0;
+    let mut start_times: HashMap<String, std::time::Instant> = HashMap::new();
 
     while let Some(event) = rx.recv().await {
         let task = &event.task_name;
@@ -217,21 +218,33 @@ pub async fn render_stream(
 
         match event_type {
             "claudes_task_start" => {
+                start_times.insert(task.clone(), std::time::Instant::now());
                 let mut out = stderr.lock();
                 let _ = writeln!(out, "  | {prefix} | starting");
             }
             "result" => {
-                let status = data
+                let subtype = data
                     .get("subtype")
                     .and_then(|s| s.as_str())
                     .unwrap_or("unknown");
+                let elapsed = start_times
+                    .get(task.as_str())
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
                 let cost = data
                     .get("total_cost_usd")
                     .or_else(|| data.get("cost_usd"))
                     .and_then(|c| c.as_f64());
-                let cost_str = cost.map(|c| format!(" ${c:.4}")).unwrap_or_default();
+                let line = if subtype == "success" {
+                    let cost_str = cost.map(|c| format!(", ${c:.2}")).unwrap_or_default();
+                    format!("  | {prefix} | complete ({elapsed}s{cost_str})")
+                } else if subtype == "error_max_turns" {
+                    format!("  | {prefix} | TIMEOUT ({elapsed}s)")
+                } else {
+                    format!("  | {prefix} | FAILED ({elapsed}s)")
+                };
                 let mut out = stderr.lock();
-                let _ = writeln!(out, "  | {prefix} | {status}{cost_str}");
+                let _ = writeln!(out, "{line}");
             }
             "assistant" if verbosity >= Verbosity::Verbose => {
                 if let Some(content) = data
