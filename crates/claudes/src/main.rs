@@ -707,9 +707,18 @@ async fn cmd_serve(_args: claudes::cli::ServeArgs) -> ExitCode {
     let router = McpRouter::new()
         .server_info("claudes", env!("CARGO_PKG_VERSION"))
         .instructions(
-            "Manifest-driven execution engine for Claude Code sessions. \
-             Use plan_tasks to generate a manifest, run_manifest to execute it, \
-             task_status and list_runs to inspect results, and clean to remove worktrees.",
+            "Manifest-driven execution engine for running Claude Code sessions in parallel.\n\n\
+             Workflow:\n\
+             1. Use plan_tasks to generate a manifest from task prompts (review before running)\n\
+             2. Use run_manifest to execute the manifest (tasks run in parallel in git worktrees)\n\
+             3. Use task_status to check results, costs, and errors\n\
+             4. Use list_runs to see history of all runs\n\
+             5. Use clean to remove worktrees and state when done\n\n\
+             Each task runs as an isolated headless Claude Code session. Tasks can have \
+             pre_hooks (setup), post_hooks (validation), and finally_hooks (cleanup). \
+             Manifests support a shared block for defaults and named profiles for presets.\n\n\
+             Always plan first, review the manifest, then run. Check task_status after \
+             running to verify results and inspect any failures.",
         )
         .tools(claudes::mcp::tools());
 
