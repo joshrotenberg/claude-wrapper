@@ -87,6 +87,22 @@ pub struct TaskState {
     /// Path to the NDJSON log file for this task.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
+
+    /// Number of turns used (parsed from result JSON `num_turns` field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns_used: Option<u32>,
+
+    /// Number of files modified (from git diff --stat HEAD in worktree after execution).
+    /// None if the task did not use worktree isolation or git diff could not be parsed.
+    // Note: not computed in build_state — populated by the runner via TaskResult.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_modified: Option<u32>,
+
+    /// Number of lines changed (insertions + deletions, from git diff --stat HEAD in worktree).
+    /// None if the task did not use worktree isolation or git diff could not be parsed.
+    // Note: not computed in build_state — populated by the runner via TaskResult.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines_changed: Option<u32>,
 }
 
 /// Task completion status.
@@ -118,6 +134,10 @@ pub struct RunSummary {
     /// Total cost across all tasks (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
+
+    /// Average number of turns used per task (only set if at least one task reported turns).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_turns_used: Option<f64>,
 }
 
 /// Generate a run ID like "run-a3b2f1" (prefix + 6 hex chars from timestamp).
@@ -143,8 +163,8 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
         .tasks
         .iter()
         .map(|t| {
-            // Parse session/result from the JSON output; prefer stream-aggregated cost.
-            let (stdout_cost, session_id, result_text) = parse_task_output(&t.stdout);
+            // Parse session/result/turns from the JSON output; prefer stream-aggregated cost.
+            let (stdout_cost, session_id, result_text, turns_used) = parse_task_output(&t.stdout);
             let cost_usd = t.cost_usd.or(stdout_cost);
 
             // Find the matching manifest task for branch and isolation info.
@@ -192,6 +212,12 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
                 result_text,
                 error,
                 log_path,
+                turns_used,
+                // files_modified and lines_changed cannot be derived in build_state (no git
+                // access); they are populated by the runner via git diff --stat HEAD after
+                // worktree task execution and passed through TaskResult.
+                files_modified: t.files_modified,
+                lines_changed: t.lines_changed,
             }
         })
         .collect();
@@ -221,6 +247,15 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
         .filter(|r| r.status == TaskStatus::Failed)
         .count();
 
+    let avg_turns_used = {
+        let turns: Vec<u32> = results.iter().filter_map(|r| r.turns_used).collect();
+        if turns.is_empty() {
+            None
+        } else {
+            Some(turns.iter().map(|&t| t as f64).sum::<f64>() / turns.len() as f64)
+        }
+    };
+
     let summary = RunSummary {
         total: result.tasks.len(),
         succeeded: result.success_count(),
@@ -228,6 +263,7 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
         timed_out,
         wall_time_secs: wall_time,
         total_cost_usd: total_cost,
+        avg_turns_used,
     };
 
     RunState {
@@ -310,10 +346,10 @@ pub(crate) fn is_timeout(stdout: &str, stderr: &str) -> bool {
     false
 }
 
-/// Try to parse cost, session_id, and result text from claude JSON output.
-fn parse_task_output(stdout: &str) -> (Option<f64>, Option<String>, Option<String>) {
+/// Try to parse cost, session_id, result text, and turns from claude JSON output.
+fn parse_task_output(stdout: &str) -> (Option<f64>, Option<String>, Option<String>, Option<u32>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
 
     let cost = v
@@ -328,7 +364,12 @@ fn parse_task_output(stdout: &str) -> (Option<f64>, Option<String>, Option<Strin
 
     let result_text = v.get("result").and_then(|r| r.as_str()).map(String::from);
 
-    (cost, session_id, result_text)
+    let turns_used = v
+        .get("num_turns")
+        .and_then(|n| n.as_u64())
+        .map(|n| n as u32);
+
+    (cost, session_id, result_text, turns_used)
 }
 
 /// Print a summary table of all runs.
@@ -377,11 +418,14 @@ pub fn print_status(state: &RunState) {
     if let Some(cost) = state.summary.total_cost_usd {
         println!("Cost: ${cost:.4}");
     }
+    if let Some(avg_turns) = state.summary.avg_turns_used {
+        println!("Avg turns: {avg_turns:.1}");
+    }
     println!();
-    let header_sep = "-".repeat(80);
+    let header_sep = "-".repeat(88);
     println!(
-        "  {:<30} {:<10} {:>8}  {:>8}  Branch",
-        "Task", "Status", "Time", "Cost"
+        "  {:<30} {:<10} {:>8}  {:>8}  {:>6}  Branch",
+        "Task", "Status", "Time", "Cost", "Turns"
     );
     println!("  {header_sep}");
 
@@ -397,9 +441,10 @@ pub fn print_status(state: &RunState) {
             .unwrap_or_default();
         let branch = task.branch.as_deref().unwrap_or("-");
         let time = format!("{:.1}s", task.duration_secs);
+        let turns = task.turns_used.map(|t| t.to_string()).unwrap_or_default();
 
         let name = &task.name;
-        println!("  {name:<30} {status:<10} {time:>8}  {cost:>8}  {branch}");
+        println!("  {name:<30} {status:<10} {time:>8}  {cost:>8}  {turns:>6}  {branch}");
 
         if let Some(err) = &task.error {
             for line in err.lines().take(3) {
@@ -442,6 +487,8 @@ mod tests {
             duration: Duration::from_secs(1),
             work_dir: PathBuf::from("/tmp"),
             cost_usd: None,
+            files_modified: None,
+            lines_changed: None,
         }
     }
 
@@ -463,6 +510,8 @@ mod tests {
                 duration: Duration::from_secs(5),
                 work_dir: PathBuf::from("/tmp/test"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
 
@@ -501,6 +550,8 @@ mod tests {
                     duration: Duration::from_secs(3),
                     work_dir: PathBuf::from("/tmp/ok"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
                 TaskResult {
                     name: "bad-task".into(),
@@ -510,6 +561,8 @@ mod tests {
                     duration: Duration::from_secs(1),
                     work_dir: PathBuf::from("/tmp/bad"),
                     cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
                 },
             ],
         };
@@ -537,6 +590,8 @@ mod tests {
                 duration: Duration::from_secs(2),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
 
@@ -665,6 +720,8 @@ mod tests {
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
         let state = build_state(&manifest, &result_stderr, Utc::now());
@@ -682,6 +739,8 @@ mod tests {
                 duration: Duration::from_secs(60),
                 work_dir: PathBuf::from("/tmp"),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }],
         };
         let state2 = build_state(&manifest, &result_stdout, Utc::now());
@@ -693,25 +752,87 @@ mod tests {
     #[test]
     fn parse_output_extracts_fields() {
         let stdout = r#"{"result":"hello","session_id":"s1","total_cost_usd":0.123,"num_turns":3}"#;
-        let (cost, session, result) = parse_task_output(stdout);
+        let (cost, session, result, turns) = parse_task_output(stdout);
         assert_eq!(cost, Some(0.123));
         assert_eq!(session.as_deref(), Some("s1"));
         assert_eq!(result.as_deref(), Some("hello"));
+        assert_eq!(turns, Some(3));
     }
 
     #[test]
     fn parse_output_handles_missing_fields() {
-        let (cost, session, result) = parse_task_output("{}");
+        let (cost, session, result, turns) = parse_task_output("{}");
         assert_eq!(cost, None);
         assert_eq!(session, None);
         assert_eq!(result, None);
+        assert_eq!(turns, None);
     }
 
     #[test]
     fn parse_output_handles_invalid_json() {
-        let (cost, session, result) = parse_task_output("not json");
+        let (cost, session, result, turns) = parse_task_output("not json");
         assert_eq!(cost, None);
         assert_eq!(session, None);
         assert_eq!(result, None);
+        assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn build_state_populates_turns_used() {
+        let manifest = Manifest::new(vec![
+            Task::new("task-a", "do a"),
+            Task::new("task-b", "do b"),
+        ]);
+        let result = RunResult {
+            tasks: vec![
+                TaskResult {
+                    name: "task-a".into(),
+                    success: true,
+                    stdout: r#"{"result":"ok","num_turns":4}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(2),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+                TaskResult {
+                    name: "task-b".into(),
+                    success: true,
+                    stdout: r#"{"result":"ok","num_turns":8}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(3),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+            ],
+        };
+        let state = build_state(&manifest, &result, Utc::now());
+        assert_eq!(state.results[0].turns_used, Some(4));
+        assert_eq!(state.results[1].turns_used, Some(8));
+        assert_eq!(state.summary.avg_turns_used, Some(6.0));
+    }
+
+    #[test]
+    fn build_state_propagates_git_metrics() {
+        let manifest = Manifest::new(vec![Task::new("task-a", "do a")]);
+        let result = RunResult {
+            tasks: vec![TaskResult {
+                name: "task-a".into(),
+                success: true,
+                stdout: "{}".into(),
+                stderr: String::new(),
+                duration: Duration::from_secs(1),
+                work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
+                files_modified: Some(3),
+                lines_changed: Some(42),
+            }],
+        };
+        let state = build_state(&manifest, &result, Utc::now());
+        assert_eq!(state.results[0].files_modified, Some(3));
+        assert_eq!(state.results[0].lines_changed, Some(42));
     }
 }

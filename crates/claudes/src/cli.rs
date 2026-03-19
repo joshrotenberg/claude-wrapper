@@ -28,6 +28,9 @@ pub enum Command {
 
     /// Remove worktrees and temporary state.
     Clean(CleanArgs),
+
+    /// Re-run failed or timed-out tasks from a previous run.
+    Fix(FixArgs),
 }
 
 /// Arguments for `claudes run`.
@@ -235,6 +238,26 @@ pub struct CleanArgs {
     /// Remove local claudes/* branches that have been merged into main.
     #[arg(long)]
     pub branches: bool,
+}
+
+/// Arguments for `claudes fix`.
+#[derive(Debug, Parser)]
+pub struct FixArgs {
+    /// Run ID to fix (default: latest run).
+    #[arg(long)]
+    pub run: Option<String>,
+
+    /// Re-run only these task(s) (repeatable; default: all failed/timed-out).
+    #[arg(long)]
+    pub task: Vec<String>,
+
+    /// Additional guidance to append to the fix prompt.
+    #[arg(short = 'p')]
+    pub prompt: Option<String>,
+
+    /// Force overwrite if worktree state is inconsistent.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Parse a timeout string like "30m", "1h", "3600" into seconds.

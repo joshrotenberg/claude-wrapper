@@ -34,6 +34,10 @@ pub struct TaskResult {
     pub work_dir: PathBuf,
     /// Cost in USD aggregated from stream events (or parsed from stdout as fallback).
     pub cost_usd: Option<f64>,
+    /// Number of files modified (from git diff --stat HEAD in worktree, if applicable).
+    pub files_modified: Option<u32>,
+    /// Number of lines changed (insertions + deletions, from git diff --stat HEAD in worktree).
+    pub lines_changed: Option<u32>,
 }
 
 /// Result of executing an entire manifest.
@@ -242,6 +246,15 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                             .and_then(|c| c.as_f64())
                     })
             });
+
+            // Collect git diff metrics if running in a worktree.
+            let (files_modified, lines_changed) =
+                if matches!(env.kind, isolation::IsolationKind::Worktree { .. }) {
+                    git_diff_stats(&env.work_dir).await
+                } else {
+                    (None, None)
+                };
+
             TaskResult {
                 name: task_name,
                 success: output.success,
@@ -250,6 +263,8 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                 duration: start.elapsed(),
                 work_dir: env.work_dir,
                 cost_usd,
+                files_modified,
+                lines_changed,
             }
         }
         Err(e) => {
@@ -262,6 +277,8 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
                 duration: start.elapsed(),
                 work_dir: options.project_dir.to_path_buf(),
                 cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
             }
         }
     }
@@ -601,6 +618,55 @@ fn parse_effort(s: &str) -> claude_wrapper::Effort {
     }
 }
 
+/// Run `git diff --stat HEAD` in the worktree and return (files_modified, lines_changed).
+/// Non-fatal: returns (None, None) if git is unavailable or output cannot be parsed.
+async fn git_diff_stats(work_dir: &std::path::Path) -> (Option<u32>, Option<u32>) {
+    let Ok(output) = tokio::process::Command::new("git")
+        .args(["diff", "--stat", "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .await
+    else {
+        return (None, None);
+    };
+    if !output.status.success() {
+        return (None, None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_diff_stat_summary(&text)
+}
+
+/// Parse the summary line of `git diff --stat` output.
+///
+/// Expects a line like: " 3 files changed, 77 insertions(+), 14 deletions(-)"
+/// Returns (files_modified, lines_changed) where lines_changed = insertions + deletions.
+fn parse_diff_stat_summary(output: &str) -> (Option<u32>, Option<u32>) {
+    let Some(summary) = output.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return (None, None);
+    };
+    let summary = summary.trim();
+
+    let mut files: Option<u32> = None;
+    let mut lines: u32 = 0;
+    let mut has_lines = false;
+
+    for part in summary.split(',') {
+        let part = part.trim();
+        let n: u32 = match part.split_whitespace().next().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if part.contains("file") {
+            files = Some(n);
+        } else if part.contains("insertion") || part.contains("deletion") {
+            lines += n;
+            has_lines = true;
+        }
+    }
+
+    (files, if has_lines { Some(lines) } else { None })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +749,45 @@ mod tests {
         run_hooks("test-task", &[], dir.path(), "post")
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn parse_diff_stat_full_summary() {
+        let output = " file1.rs | 10 ++++++++++\n file2.rs |  5 -----\n 2 files changed, 10 insertions(+), 5 deletions(-)\n";
+        let (files, lines) = parse_diff_stat_summary(output);
+        assert_eq!(files, Some(2));
+        assert_eq!(lines, Some(15));
+    }
+
+    #[test]
+    fn parse_diff_stat_insertions_only() {
+        let output = " file.rs | 7 +++++++\n 1 file changed, 7 insertions(+)\n";
+        let (files, lines) = parse_diff_stat_summary(output);
+        assert_eq!(files, Some(1));
+        assert_eq!(lines, Some(7));
+    }
+
+    #[test]
+    fn parse_diff_stat_deletions_only() {
+        let output = " file.rs | 3 ---\n 1 file changed, 3 deletions(-)\n";
+        let (files, lines) = parse_diff_stat_summary(output);
+        assert_eq!(files, Some(1));
+        assert_eq!(lines, Some(3));
+    }
+
+    #[test]
+    fn parse_diff_stat_empty_output() {
+        let (files, lines) = parse_diff_stat_summary("");
+        assert_eq!(files, None);
+        assert_eq!(lines, None);
+    }
+
+    #[test]
+    fn parse_diff_stat_no_changes() {
+        // git diff --stat HEAD on a clean tree produces no output
+        let (files, lines) = parse_diff_stat_summary("   \n");
+        assert_eq!(files, None);
+        assert_eq!(lines, None);
     }
 
     #[test]
