@@ -935,6 +935,12 @@ fn build_query_command(task: &Task) -> QueryCommand {
             cmd = cmd.add_dir(dir);
         }
     }
+    if let Some(settings) = &task.settings {
+        cmd = cmd.settings(settings);
+    }
+    if let Some(sources) = &task.setting_sources {
+        cmd = cmd.setting_sources(sources);
+    }
 
     cmd
 }

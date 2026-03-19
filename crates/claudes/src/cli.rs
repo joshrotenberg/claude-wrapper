@@ -125,6 +125,10 @@ pub struct RunArgs {
     #[arg(long, default_value = "none")]
     pub cleanup: String,
 
+    /// Skill files to inject into the system prompt (repeatable).
+    #[arg(long)]
+    pub skill: Vec<String>,
+
     /// Disable colored output.
     #[arg(long)]
     pub no_color: bool,
