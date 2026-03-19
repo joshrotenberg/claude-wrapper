@@ -325,6 +325,11 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
             .unwrap()
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
 
+    let waiting_style =
+        ProgressStyle::with_template("  {spinner:.dim} {prefix:<22}        {msg:.dim}")
+            .unwrap()
+            .tick_chars("· ");
+
     // Gap between task spinners and footer.
     let gap = mp.add(ProgressBar::new_spinner());
     gap.set_style(ProgressStyle::with_template(" ").unwrap());
@@ -354,14 +359,65 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
         let task_prefix = truncate_name(task, 20);
 
         match event_type {
+            "claudes_run_plan" => {
+                // Pre-populate bars for all tasks. Tasks with dependencies show as waiting.
+                if let Some(tasks) = data.get("tasks").and_then(|t| t.as_array()) {
+                    for (i, task_info) in tasks.iter().enumerate() {
+                        let name = task_info
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        let deps =
+                            task_info
+                                .get("depends_on")
+                                .and_then(|d| d.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                });
+
+                        if use_color && !color_map.contains_key(name) {
+                            let c = COLOR_PALETTE[i % COLOR_PALETTE.len()];
+                            color_map.insert(name.to_string(), c);
+                            color_index = i + 1;
+                        }
+
+                        let pb = mp.insert_before(&gap, ProgressBar::new_spinner());
+                        pb.set_style(waiting_style.clone());
+                        pb.set_prefix(truncate_name(name, 20));
+                        let has_deps = deps.as_ref().is_some_and(|d| !d.is_empty());
+                        if has_deps {
+                            pb.set_message(format!("waiting on: {}", deps.unwrap_or_default()));
+                        } else {
+                            pb.set_message("pending");
+                        }
+                        bars.insert(name.to_string(), pb);
+                    }
+                    total_tasks = tasks.len();
+                    footer.set_message(format!("{completed_tasks}/{total_tasks} complete"));
+                }
+            }
             "claudes_task_start" => {
-                total_tasks += 1;
-                let pb = mp.insert_before(&gap, ProgressBar::new_spinner());
-                pb.set_style(spinner_style.clone());
-                pb.set_prefix(task_prefix);
-                pb.set_message("starting");
-                pb.enable_steady_tick(std::time::Duration::from_millis(100));
-                bars.insert(task.clone(), pb);
+                if !bars.contains_key(task.as_str()) {
+                    // Task wasn't pre-populated (no plan event — e.g. no dependencies at all).
+                    total_tasks += 1;
+                }
+                // Upgrade existing waiting bar or create new one.
+                if let Some(pb) = bars.get(task.as_str()) {
+                    pb.set_style(spinner_style.clone());
+                    pb.set_message("starting");
+                    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+                    pb.reset_elapsed();
+                } else {
+                    let pb = mp.insert_before(&gap, ProgressBar::new_spinner());
+                    pb.set_style(spinner_style.clone());
+                    pb.set_prefix(task_prefix);
+                    pb.set_message("starting");
+                    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+                    bars.insert(task.clone(), pb);
+                }
                 footer.set_message(format!("{completed_tasks}/{total_tasks} complete"));
             }
             "result" => {
@@ -422,6 +478,35 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
                 if let Some(c) = cost {
                     total_cost += c;
                 }
+                let cost_msg = if total_cost > 0.0 {
+                    format!("  ${total_cost:.2}")
+                } else {
+                    String::new()
+                };
+                footer.set_message(format!(
+                    "{completed_tasks}/{total_tasks} complete{cost_msg}"
+                ));
+                if completed_tasks == total_tasks {
+                    footer.finish_with_message("");
+                }
+            }
+            "claudes_task_skipped" => {
+                if let Some(pb) = bars.get(task.as_str()) {
+                    let finish = if use_color {
+                        format!(
+                            "  {}  {:<22} {}",
+                            "⊘".with(Color::DarkGrey),
+                            task_prefix.with(Color::DarkGrey),
+                            "skipped".with(Color::DarkGrey)
+                        )
+                    } else {
+                        format!("  ⊘  {task_prefix:<22} skipped")
+                    };
+                    pb.finish_with_message("");
+                    pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+                    pb.finish_with_message(finish);
+                }
+                completed_tasks += 1;
                 let cost_msg = if total_cost > 0.0 {
                     format!("  ${total_cost:.2}")
                 } else {

@@ -200,6 +200,30 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         "executing manifest"
     );
 
+    // Emit a plan event with all task names and dependencies so renderers
+    // can pre-populate waiting indicators.
+    if let Some(ref sender) = options.event_sender {
+        let plan: Vec<serde_json::Value> = manifest
+            .tasks
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "depends_on": t.depends_on,
+                })
+            })
+            .collect();
+        let _ = sender.send(TaskEvent {
+            task_name: String::new(),
+            event: StreamEvent {
+                data: serde_json::json!({
+                    "type": "claudes_run_plan",
+                    "tasks": plan,
+                }),
+            },
+        });
+    }
+
     // Check if any task has dependencies.
     let has_dependencies = manifest
         .tasks
@@ -229,6 +253,17 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 
                 if should_skip {
                     info!(task = task.name, "skipping — dependency failed");
+                    if let Some(ref sender) = options.event_sender {
+                        let _ = sender.send(TaskEvent {
+                            task_name: task.name.clone(),
+                            event: StreamEvent {
+                                data: serde_json::json!({
+                                    "type": "claudes_task_skipped",
+                                    "task_name": task.name,
+                                }),
+                            },
+                        });
+                    }
                     failed_tasks.insert(task.name.clone());
                     results.push(TaskResult {
                         name: task.name.clone(),
