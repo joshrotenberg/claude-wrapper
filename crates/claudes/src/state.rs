@@ -153,6 +153,9 @@ pub struct RunMetrics {
     pub avg_cost_per_task: Option<f64>,
     /// Average wall-clock duration per run in seconds.
     pub avg_duration_secs: f64,
+    /// Average number of turns used per task (None if no turns data available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_turns_used: Option<f64>,
 }
 
 /// Compute aggregated metrics across a slice of runs.
@@ -186,6 +189,18 @@ pub fn compute_metrics(runs: &[RunState]) -> RunMetrics {
         runs.iter().map(|r| r.summary.wall_time_secs).sum::<f64>() / total_runs as f64
     };
 
+    let turns: Vec<f64> = runs
+        .iter()
+        .flat_map(|r| r.results.iter())
+        .filter_map(|t| t.turns_used)
+        .map(|n| n as f64)
+        .collect();
+    let avg_turns_used = if turns.is_empty() {
+        None
+    } else {
+        Some(turns.iter().sum::<f64>() / turns.len() as f64)
+    };
+
     RunMetrics {
         total_runs,
         total_tasks,
@@ -195,6 +210,7 @@ pub fn compute_metrics(runs: &[RunState]) -> RunMetrics {
         total_cost_usd,
         avg_cost_per_task,
         avg_duration_secs,
+        avg_turns_used,
     }
 }
 
@@ -220,6 +236,9 @@ pub fn print_metrics(metrics: &RunMetrics) {
         println!("Avg cost/task: ${avg:.4}");
     }
     println!("Avg duration: {:.1}s", metrics.avg_duration_secs);
+    if let Some(avg) = metrics.avg_turns_used {
+        println!("Avg turns/task: {avg:.1}");
+    }
 }
 
 /// Print metrics as JSON.
@@ -931,5 +950,58 @@ mod tests {
         assert_eq!(cost, None);
         assert_eq!(session, None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compute_metrics_avg_turns() {
+        let manifest = Manifest::new(vec![Task::new("a", "first"), Task::new("b", "second")]);
+        let result = RunResult {
+            tasks: vec![
+                TaskResult {
+                    name: "a".into(),
+                    success: true,
+                    stdout: r#"{"num_turns":10}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(2),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+                TaskResult {
+                    name: "b".into(),
+                    success: true,
+                    stdout: r#"{"num_turns":20}"#.into(),
+                    stderr: String::new(),
+                    duration: Duration::from_secs(3),
+                    work_dir: PathBuf::from("/tmp"),
+                    cost_usd: None,
+                    files_modified: None,
+                    lines_changed: None,
+                },
+            ],
+        };
+        let state = build_state(&manifest, &result, Utc::now());
+        let m = compute_metrics(&[state]);
+        assert!((m.avg_turns_used.unwrap() - 15.0).abs() < 1e-9);
+
+        // No turns data → None.
+        let manifest2 = Manifest::new(vec![Task::new("t", "p")]);
+        let result2 = RunResult {
+            tasks: vec![TaskResult {
+                name: "t".into(),
+                success: true,
+                stdout: "{}".into(),
+                stderr: String::new(),
+                duration: Duration::from_secs(1),
+                work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
+            }],
+        };
+        let state2 = build_state(&manifest2, &result2, Utc::now());
+        let m2 = compute_metrics(&[state2]);
+        assert_eq!(m2.avg_turns_used, None);
     }
 }
