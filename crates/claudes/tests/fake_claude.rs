@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use chrono::Utc;
 use claudes::manifest::Shared;
 use claudes::planner::PlanOptions;
 use claudes::{CleanupPolicy, Isolation, Manifest, RunOptions, Task, plan};
@@ -549,6 +550,92 @@ prompt = "do the thing"
         manifest.shared.as_ref().unwrap().model.as_deref(),
         Some("claude-opus-4-6")
     );
+}
+
+/// Task inherits profile fields after resolve().
+#[tokio::test]
+#[ignore]
+async fn run_with_profile() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+    let mut task = Task::new("profiled-task", "do something");
+    task.profile = Some("fast".into());
+    task.isolation = Some(Isolation::None);
+    let mut manifest = Manifest::new(vec![task]);
+    manifest.profiles = Some({
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            "fast".into(),
+            Shared {
+                max_turns: Some(5),
+                ..Default::default()
+            },
+        );
+        m
+    });
+    let resolved = manifest.resolve();
+    assert_eq!(resolved.tasks[0].max_turns, Some(5));
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+}
+
+/// Prompt is loaded from a file via prompt_file and resolve_files.
+#[test]
+#[ignore]
+fn run_with_prompt_file() {
+    let dir = temp_git_repo();
+    std::fs::write(dir.path().join("prompt.txt"), "do something").unwrap();
+    let mut task = Task::new("file-prompt", "");
+    task.prompt_file = Some("prompt.txt".into());
+    task.isolation = Some(Isolation::None);
+    let mut manifest = Manifest::new(vec![task]);
+    manifest.resolve_files(dir.path()).unwrap();
+    assert_eq!(manifest.tasks[0].prompt, "do something");
+}
+
+/// isolation::setup creates a worktree and isolation::cleanup removes it.
+#[tokio::test]
+#[ignore]
+async fn clean_removes_worktrees() {
+    let dir = temp_git_repo();
+    let isolation = Isolation::Worktree {
+        base_dir: ".worktrees".into(),
+    };
+    let env = claudes::isolation::setup(dir.path(), "clean-task", None, Some(&isolation))
+        .await
+        .unwrap();
+    let wt_dir = dir.path().join(".worktrees").join("clean-task");
+    assert!(wt_dir.exists(), "worktree should exist after setup");
+    claudes::isolation::cleanup(dir.path(), &env, false)
+        .await
+        .unwrap();
+    assert!(!wt_dir.exists(), "worktree should be removed after cleanup");
+}
+
+/// After a run, state::load returns the correct run.
+#[tokio::test]
+#[ignore]
+async fn status_shows_latest_run() {
+    let dir = temp_git_repo();
+    let options = run_options(dir.path().to_path_buf());
+
+    let manifest = Manifest::new(vec![{
+        let mut t = Task::new("status-task", "do something");
+        t.isolation = Some(Isolation::None);
+        t
+    }]);
+
+    let started_at = Utc::now();
+    let result = claudes::run(&manifest, &options).await.unwrap();
+    assert!(result.all_succeeded());
+
+    let state = claudes::state::build_state(&manifest, &result, started_at);
+    claudes::state::save(dir.path(), &state).unwrap();
+
+    let loaded = claudes::state::load(dir.path()).unwrap();
+    assert_eq!(loaded.summary.total, 1);
+    assert_eq!(loaded.summary.succeeded, 1);
+    assert_eq!(loaded.results[0].name, "status-task");
 }
 
 /// Manifest::discover finds claudes.toml in a directory (unit test, no execution).
