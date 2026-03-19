@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -221,11 +222,12 @@ async fn execute_manifest(
     let stream_handle = if format == OutputFormat::Text {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         options.event_sender = Some(tx);
-        Some(tokio::spawn(output::render_stream(
-            rx,
-            verbosity,
-            args.no_color,
-        )))
+        let use_progress = args.progress && std::io::stderr().is_terminal();
+        Some(if use_progress {
+            tokio::spawn(output::render_progress(rx, args.no_color))
+        } else {
+            tokio::spawn(output::render_stream(rx, verbosity, args.no_color))
+        })
     } else {
         None
     };

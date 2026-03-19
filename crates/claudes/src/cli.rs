@@ -132,6 +132,10 @@ pub struct RunArgs {
     /// Disable colored output.
     #[arg(long)]
     pub no_color: bool,
+
+    /// Show indicatif progress bars instead of streaming text (falls back to text when not a TTY).
+    #[arg(long)]
+    pub progress: bool,
 }
 
 /// Arguments for `claudes status`.

@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
 use crossterm::style::{Color, Stylize};
 use tokio::sync::mpsc;
 
@@ -170,6 +172,77 @@ fn print_json_summary(result: &RunResult) {
     });
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
+/// Render task progress using indicatif progress bars.
+///
+/// Runs until the channel is closed (all senders dropped).
+/// Each task gets a spinner showing elapsed time and final status.
+pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_color: bool) {
+    let use_color = !no_color && std::env::var_os("NO_COLOR").is_none();
+
+    let multi = MultiProgress::new();
+    let spinner_style =
+        ProgressStyle::with_template("  {spinner:.cyan} {prefix:<20} {elapsed_precise} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]);
+
+    let mut bars: HashMap<String, ProgressBar> = HashMap::new();
+
+    while let Some(event) = rx.recv().await {
+        let task = event.task_name.clone();
+        let data = &event.event.data;
+        let event_type = event.event.event_type().unwrap_or("");
+
+        match event_type {
+            "claudes_task_start" => {
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(task.clone());
+                pb.set_message("starting...");
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+                bars.insert(task, pb);
+            }
+            "result" => {
+                let subtype = data
+                    .get("subtype")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let cost = data
+                    .get("total_cost_usd")
+                    .or_else(|| data.get("cost_usd"))
+                    .and_then(|c| c.as_f64());
+
+                if let Some(pb) = bars.get(task.as_str()) {
+                    let msg = if subtype == "success" {
+                        let cost_str = cost.map(|c| format!(", ${c:.2}")).unwrap_or_default();
+                        let m = format!("complete{cost_str}");
+                        if use_color {
+                            format!("\x1b[32m{m}\x1b[0m")
+                        } else {
+                            m
+                        }
+                    } else if subtype == "error_max_turns" {
+                        let m = "TIMEOUT".to_string();
+                        if use_color {
+                            format!("\x1b[31m{m}\x1b[0m")
+                        } else {
+                            m
+                        }
+                    } else {
+                        let m = "FAILED".to_string();
+                        if use_color {
+                            format!("\x1b[31m{m}\x1b[0m")
+                        } else {
+                            m
+                        }
+                    };
+                    pb.finish_with_message(msg);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Render streaming events from tasks as they arrive.
