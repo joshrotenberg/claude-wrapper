@@ -60,6 +60,10 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
 
+        for warning in manifest.check_file_overlaps() {
+            eprintln!("warning: {warning}");
+        }
+
         let options = claudes::RunOptions {
             project_dir,
             force: args.force,
@@ -122,6 +126,10 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
 
+            for warning in manifest.check_file_overlaps() {
+                eprintln!("warning: {warning}");
+            }
+
             let options = claudes::RunOptions {
                 project_dir,
                 force: args.force,
@@ -164,6 +172,10 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
     let mut manifest = claudes::plan(&plan_opts);
     if let Some(ref g) = global {
         manifest.apply_global_defaults(g);
+    }
+
+    for warning in manifest.check_file_overlaps() {
+        eprintln!("warning: {warning}");
     }
 
     if args.dry_run {
