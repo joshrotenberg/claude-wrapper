@@ -213,18 +213,17 @@ async fn execute_manifest(
     // Opening bookend: what we're about to do.
     output::print_run_start(manifest, mode, args.no_color);
 
-    // Set up streaming renderer.
+    // Always create event sender so streaming/tracing works in all modes.
     let mut options = options.clone();
-    let stream_handle = if mode != OutputMode::Quiet {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        options.event_sender = Some(tx);
-        Some(match mode {
-            OutputMode::Progress => tokio::spawn(output::render_progress(rx, args.no_color)),
-            OutputMode::Ndjson => tokio::spawn(output::render_ndjson(rx)),
-            OutputMode::Quiet => unreachable!(),
-        })
-    } else {
-        None
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    options.event_sender = Some(tx);
+    let stream_handle = match mode {
+        OutputMode::Progress => tokio::spawn(output::render_progress(rx, args.no_color)),
+        OutputMode::Ndjson => tokio::spawn(output::render_ndjson(rx)),
+        OutputMode::Quiet => tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_some() {}
+        }),
     };
 
     let result = match claudes::run(manifest, &options).await {
@@ -237,9 +236,7 @@ async fn execute_manifest(
 
     // Drop the sender so the renderer finishes.
     options.event_sender = None;
-    if let Some(handle) = stream_handle {
-        let _ = handle.await;
-    }
+    let _ = stream_handle.await;
 
     // Write state file.
     let state = claudes::state::build_state(manifest, &result, started_at);

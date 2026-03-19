@@ -301,82 +301,137 @@ fn print_run_complete_ndjson(result: &RunResult) {
 // Streaming renderers
 // ============================================================================
 
-/// Render streaming events as indicatif progress display.
+/// Render streaming events as in-place indicatif progress bars.
 ///
-/// Shows per-task status lines that update in place. Each task gets a colored
-/// prefix and shows its current activity (latest tool call).
+/// Each task gets a spinner that updates in place showing elapsed time and
+/// current activity (latest tool call). On completion the spinner is replaced
+/// with a final status line. No scrolling — everything updates in place.
 pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_color: bool) {
+    use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
     let stderr = std::io::stderr();
     let use_color = !no_color && std::env::var_os("NO_COLOR").is_none() && stderr.is_terminal();
 
-    let mut color_map: HashMap<String, Color> = HashMap::new();
+    let mp = MultiProgress::new();
+    let mut bars: HashMap<String, ProgressBar> = HashMap::new();
     let mut color_index: usize = 0;
-    let mut start_times: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut color_map: HashMap<String, Color> = HashMap::new();
+    let mut total_tasks: usize = 0;
+    let mut completed_tasks: usize = 0;
+    let mut total_cost: f64 = 0.0;
+
+    let spinner_style =
+        ProgressStyle::with_template("  {spinner:.cyan} {prefix:<22} {elapsed:>5}  {msg}")
+            .unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+
+    // Gap between task spinners and footer.
+    let gap = mp.add(ProgressBar::new_spinner());
+    gap.set_style(ProgressStyle::with_template(" ").unwrap());
+    gap.finish();
+
+    // Footer bar — shows aggregate progress.
+    let footer = mp.add(ProgressBar::new_spinner());
+
+    // Spacer bar — just a blank line below the footer for breathing room.
+    let spacer = mp.add(ProgressBar::new_spinner());
+    spacer.set_style(ProgressStyle::with_template(" ").unwrap());
+    spacer.finish();
+    footer.enable_steady_tick(std::time::Duration::from_millis(500));
 
     while let Some(event) = rx.recv().await {
         let task = &event.task_name;
         let data = &event.event.data;
         let event_type = event.event.event_type().unwrap_or("");
 
-        let color_opt = if use_color {
-            if !color_map.contains_key(task.as_str()) {
-                let c = COLOR_PALETTE[color_index % COLOR_PALETTE.len()];
-                color_map.insert(task.clone(), c);
-                color_index += 1;
-            }
-            color_map.get(task.as_str()).copied()
-        } else {
-            None
-        };
+        // Assign a color for this task.
+        if use_color && !color_map.contains_key(task.as_str()) {
+            let c = COLOR_PALETTE[color_index % COLOR_PALETTE.len()];
+            color_map.insert(task.clone(), c);
+            color_index += 1;
+        }
 
-        let prefix = {
-            let name = truncate_name(task, 20);
-            let padded = format!("{name:<20}");
-            match color_opt {
-                Some(color) => format!("{}", padded.with(color)),
-                None => padded,
-            }
-        };
+        let task_prefix = truncate_name(task, 20);
 
         match event_type {
             "claudes_task_start" => {
-                start_times.insert(task.clone(), std::time::Instant::now());
-                let mut out = stderr.lock();
-                let _ = writeln!(out, "  | {prefix} | starting");
+                total_tasks += 1;
+                let pb = mp.insert_before(&gap, ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_prefix(task_prefix);
+                pb.set_message("starting");
+                pb.enable_steady_tick(std::time::Duration::from_millis(100));
+                bars.insert(task.clone(), pb);
+                footer.set_message(format!("{completed_tasks}/{total_tasks} complete"));
             }
             "result" => {
                 let subtype = data
                     .get("subtype")
                     .and_then(|s| s.as_str())
                     .unwrap_or("unknown");
-                let elapsed = start_times
-                    .get(task.as_str())
-                    .map(|t| t.elapsed().as_secs())
-                    .unwrap_or(0);
                 let cost = data
                     .get("total_cost_usd")
                     .or_else(|| data.get("cost_usd"))
                     .and_then(|c| c.as_f64());
 
-                let status_msg = if subtype == "success" {
-                    let cost_str = cost.map(|c| format!(", ${c:.2}")).unwrap_or_default();
-                    format!("complete ({elapsed}s{cost_str})")
-                } else if subtype == "error_max_turns" {
-                    format!("TIMEOUT ({elapsed}s)")
-                } else {
-                    format!("FAILED ({elapsed}s)")
-                };
+                if let Some(pb) = bars.get(task.as_str()) {
+                    let elapsed = format!("{:.0}s", pb.elapsed().as_secs_f64());
+                    let cost_str = cost.map(|c| format!("  ${c:.2}")).unwrap_or_default();
 
-                let mut out = stderr.lock();
-                if use_color {
-                    let color = if subtype == "success" {
-                        Color::Green
+                    if subtype == "success" {
+                        let msg = format!("ok  {elapsed}{cost_str}");
+                        let finish = if use_color {
+                            format!(
+                                "  {}  {:<22} {}",
+                                "✓".with(Color::Green),
+                                task_prefix
+                                    .with(*color_map.get(task.as_str()).unwrap_or(&Color::White)),
+                                msg.with(Color::Green)
+                            )
+                        } else {
+                            format!("  ✓  {task_prefix:<22} {msg}")
+                        };
+                        pb.finish_with_message("");
+                        pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+                        pb.finish_with_message(finish);
                     } else {
-                        Color::Red
-                    };
-                    let _ = writeln!(out, "  | {prefix} | {}", status_msg.with(color));
+                        let status = if subtype == "error_max_turns" {
+                            "TIMEOUT"
+                        } else {
+                            "FAILED"
+                        };
+                        let msg = format!("{status}  {elapsed}");
+                        let finish = if use_color {
+                            format!(
+                                "  {}  {:<22} {}",
+                                "✗".with(Color::Red),
+                                task_prefix
+                                    .with(*color_map.get(task.as_str()).unwrap_or(&Color::White)),
+                                msg.with(Color::Red)
+                            )
+                        } else {
+                            format!("  ✗  {task_prefix:<22} {msg}")
+                        };
+                        pb.finish_with_message("");
+                        pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+                        pb.finish_with_message(finish);
+                    }
+                }
+
+                completed_tasks += 1;
+                if let Some(c) = cost {
+                    total_cost += c;
+                }
+                let cost_msg = if total_cost > 0.0 {
+                    format!("  ${total_cost:.2}")
                 } else {
-                    let _ = writeln!(out, "  | {prefix} | {status_msg}");
+                    String::new()
+                };
+                footer.set_message(format!(
+                    "{completed_tasks}/{total_tasks} complete{cost_msg}"
+                ));
+                if completed_tasks == total_tasks {
+                    footer.finish_with_message("");
                 }
             }
             "assistant" => {
@@ -392,11 +447,13 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("unknown");
                             let first_arg = extract_tool_arg(block);
-                            let mut out = stderr.lock();
-                            if first_arg.is_empty() {
-                                let _ = writeln!(out, "  | {prefix} | {tool}");
+                            let msg = if first_arg.is_empty() {
+                                tool.to_string()
                             } else {
-                                let _ = writeln!(out, "  | {prefix} | {tool}({first_arg})");
+                                format!("{tool}({first_arg})")
+                            };
+                            if let Some(pb) = bars.get(task.as_str()) {
+                                pb.set_message(msg);
                             }
                         }
                     }
