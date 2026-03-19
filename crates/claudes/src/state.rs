@@ -7,9 +7,11 @@
 //!
 //! `claudes status` reads the latest run and displays it.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use crossterm::style::{Color, Stylize};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{Isolation, Manifest};
@@ -570,6 +572,8 @@ pub fn print_status_list(runs: &[RunState]) {
 
 /// Print state as a human-readable table.
 pub fn print_status(state: &RunState) {
+    let use_color = std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal();
+
     if let Ok(cwd) = std::env::current_dir()
         && let Some(running) = load_running(&cwd)
     {
@@ -613,10 +617,46 @@ pub fn print_status(state: &RunState) {
     println!("  {header_sep}");
 
     for task in &state.results {
-        let status = match task.status {
+        let status_str = match task.status {
             TaskStatus::Success => "ok",
             TaskStatus::Failed => "FAILED",
             TaskStatus::Timeout => "TIMEOUT",
+        };
+        let status_display = if use_color {
+            match task.status {
+                TaskStatus::Success => format!(
+                    "{:<10}",
+                    status_str
+                        .with(Color::Rgb {
+                            r: 0,
+                            g: 255,
+                            b: 128
+                        })
+                        .to_string()
+                ),
+                TaskStatus::Failed => format!(
+                    "{:<10}",
+                    status_str
+                        .with(Color::Rgb {
+                            r: 255,
+                            g: 80,
+                            b: 80
+                        })
+                        .to_string()
+                ),
+                TaskStatus::Timeout => format!(
+                    "{:<10}",
+                    status_str
+                        .with(Color::Rgb {
+                            r: 255,
+                            g: 255,
+                            b: 0
+                        })
+                        .to_string()
+                ),
+            }
+        } else {
+            format!("{status_str:<10}")
         };
         let cost = task
             .cost_usd
@@ -626,7 +666,7 @@ pub fn print_status(state: &RunState) {
         let time = format!("{:.1}s", task.duration_secs);
 
         let name = &task.name;
-        println!("  {name:<30} {status:<10} {time:>8}  {cost:>8}  {branch}");
+        println!("  {name:<30} {status_display} {time:>8}  {cost:>8}  {branch}");
 
         if let Some(err) = &task.error
             && let Some(first_line) = err.lines().next()
