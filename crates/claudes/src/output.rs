@@ -159,8 +159,11 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
     let _ = writeln!(out);
 
     for task in &result.tasks {
+        let is_skipped = !task.success && task.stderr.contains("skipped: dependency failed");
         let status = if task.success {
             "ok"
+        } else if is_skipped {
+            "SKIPPED"
         } else if is_timeout(&task.stdout, &task.stderr) {
             "TIMEOUT"
         } else {
@@ -184,6 +187,8 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
         if use_color {
             let status_color = if task.success {
                 Color::Green
+            } else if is_skipped {
+                Color::DarkGrey
             } else {
                 Color::Red
             };
@@ -197,7 +202,7 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
             );
         }
 
-        if !task.success && !task.stderr.is_empty() {
+        if !task.success && !is_skipped && !task.stderr.is_empty() {
             for line in task.stderr.lines().take(5) {
                 let _ = writeln!(out, "    {line}");
             }
