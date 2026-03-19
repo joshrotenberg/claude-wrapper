@@ -26,6 +26,21 @@ IMPORTANT: Always show the plan and get confirmation before running. The user ma
 - `clean` — Remove worktrees and run state.
 - `metrics` — Aggregate stats across runs.
 
+## CLI Reference
+
+When suggesting commands to the user, use these current flags:
+```
+claudes run --manifest <path>              # progress mode (default TTY)
+claudes run --manifest <path> --output json # ndjson mode
+claudes run --manifest <path> --quiet       # exit code only
+claudes status                             # latest run results
+claudes fix                                # re-run failed tasks
+claudes clean                              # remove worktrees
+```
+
+Do NOT suggest `-v`, `-vv`, or `--verbose` — these were removed.
+Do NOT suggest `--output text` — use `--output json` or omit for default progress mode.
+
 ## Task Design Rules
 
 ### When to split tasks
