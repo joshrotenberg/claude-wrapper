@@ -6,7 +6,60 @@ use clap::{Parser, Subcommand};
 
 /// Manifest-driven execution engine for headless Claude Code sessions.
 #[derive(Debug, Parser)]
-#[command(name = "claudes", version, about)]
+#[command(
+    name = "claudes",
+    version,
+    about = "Manifest-driven execution engine for headless Claude Code sessions",
+    long_about = "Manifest-driven execution engine for headless Claude Code sessions.\n\n\
+        Run multiple Claude Code tasks in parallel with git worktree isolation,\n\
+        dependency chains, breadcrumb context passing, and structured output.",
+    after_long_help = "\
+GETTING STARTED:\n\
+  Interactive mode (recommended):\n\
+    claudes                                    Launch orchestrator\n\
+\n\
+  From a manifest:\n\
+    claudes run --manifest plan.json           Run tasks from manifest\n\
+    claudes run -p 'fix the bug'              Run a single ad-hoc task\n\
+    claudes run -p 'task 1' -p 'task 2'       Run parallel ad-hoc tasks\n\
+\n\
+  Generate manifests:\n\
+    claudes plan -p 'do X' -p 'do Y'          Quick manifest (no AI)\n\
+    claudes generate -p 'describe the work'   AI-generated manifest\n\
+    claudes init                              Template with stub tasks\n\
+\n\
+  Monitor and fix:\n\
+    claudes status                            Latest run results\n\
+    claudes fix                               Re-run failed tasks\n\
+    claudes metrics                           Stats across all runs\n\
+    claudes clean                             Remove worktrees and state\n\
+\n\
+EXAMPLES:\n\
+  # Fix three bugs in parallel, each in its own worktree\n\
+  claudes run -p 'fix issue #12' -p 'fix issue #15' -p 'fix issue #20'\n\
+\n\
+  # Run a manifest with dependency chains\n\
+  claudes run --manifest plan.toml\n\
+\n\
+  # Research pipeline with NDJSON output\n\
+  claudes run --manifest research.json --output json | jpx --slurp '[?type == `result`]'\n\
+\n\
+  # Check what happened\n\
+  claudes status --json\n\
+\n\
+MANIFEST FORMATS:\n\
+  JSON (.json) and TOML (.toml) are supported.\n\
+  Place claudes.toml in your project root for auto-discovery.\n\
+\n\
+OUTPUT MODES:\n\
+  progress    In-place spinners with live status (default TTY)\n\
+  json        Structured NDJSON on stdout (default piped)\n\
+  quiet       Exit code only\n\
+\n\
+  Tracing is orthogonal: RUST_LOG=claudes=debug for tool calls,\n\
+  RUST_LOG=claudes=info for task lifecycle.\n\
+"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -14,20 +67,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Execute tasks from a manifest, config, or CLI args.
-    Run(RunArgs),
-
     /// Generate a manifest without executing.
     Plan(PlanArgs),
+
+    /// Generate a manifest from a prompt using Claude.
+    Generate(GenerateArgs),
 
     /// Generate a manifest template with stub tasks.
     Init(InitArgs),
 
+    /// Execute tasks from a manifest, config, or CLI args.
+    Run(RunArgs),
+
     /// Show status of the most recent run.
     Status(StatusArgs),
-
-    /// Remove worktrees and temporary state.
-    Clean(CleanArgs),
 
     /// Re-run failed or timed-out tasks from a previous run.
     Fix(FixArgs),
@@ -35,8 +88,8 @@ pub enum Command {
     /// Aggregate stats from run history.
     Metrics(MetricsArgs),
 
-    /// Generate a manifest from a prompt using Claude.
-    Generate(GenerateArgs),
+    /// Remove worktrees and temporary state.
+    Clean(CleanArgs),
 
     /// Start the MCP server (stdio transport).
     Serve(ServeArgs),
@@ -44,6 +97,28 @@ pub enum Command {
 
 /// Arguments for `claudes run`.
 #[derive(Debug, Parser)]
+#[command(
+    long_about = "Execute tasks from a manifest file, ad-hoc prompts, or auto-discovered claudes.toml.\n\n\
+        Tasks run in parallel by default, each in an isolated git worktree.\n\
+        Use --manifest for pre-built plans, or -p for quick ad-hoc tasks.",
+    after_long_help = "\
+EXAMPLES:\n\
+  # Run from a manifest\n\
+  claudes run --manifest plan.json\n\
+\n\
+  # Ad-hoc parallel tasks\n\
+  claudes run -p 'fix the pagination bug' -p 'add unit tests for auth'\n\
+\n\
+  # Single task with overrides\n\
+  claudes run -p 'refactor the parser' --model claude-opus-4-6 --effort high\n\
+\n\
+  # NDJSON output for piping\n\
+  claudes run --manifest plan.json --output json | jpx --stream '[type, task]'\n\
+\n\
+  # Dry run to preview the manifest\n\
+  claudes run -p 'do X' -p 'do Y' --dry-run\n\
+"
+)]
 pub struct RunArgs {
     /// Run from a manifest file (all other generation options ignored).
     #[arg(long)]
