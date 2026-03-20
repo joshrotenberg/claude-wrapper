@@ -218,6 +218,51 @@ pub async fn create_pull_request(
     })
 }
 
+/// Add a label to an issue.
+pub async fn add_label(repo: &str, number: u64, label: &str) -> Result<()> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "issue",
+            "edit",
+            "--repo",
+            repo,
+            &number.to_string(),
+            "--add-label",
+            label,
+        ])
+        .output()
+        .await
+        .map_err(|e| Error::GitHub(format!("gh issue edit failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::GitHub(format!("add label failed: {stderr}")));
+    }
+    Ok(())
+}
+
+/// Remove a label from an issue.
+pub async fn remove_label(repo: &str, number: u64, label: &str) -> Result<()> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "issue",
+            "edit",
+            "--repo",
+            repo,
+            &number.to_string(),
+            "--remove-label",
+            label,
+        ])
+        .output()
+        .await
+        .map_err(|e| Error::GitHub(format!("gh issue edit failed: {e}")))?;
+
+    if !output.status.success() {
+        tracing::debug!(label = label, "remove label failed (non-fatal)");
+    }
+    Ok(())
+}
+
 /// Post a comment on an issue.
 pub async fn comment_on_issue(repo: &str, number: u64, body: &str) -> Result<()> {
     let output = tokio::process::Command::new("gh")
