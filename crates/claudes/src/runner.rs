@@ -365,6 +365,25 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                     ));
                 }
 
+                // Inherit branch from dependency if this task doesn't specify one.
+                // This ensures chained tasks share a branch and worktree automatically.
+                if task.branch.is_none()
+                    && let Some(deps) = &task.depends_on
+                {
+                    for dep in deps {
+                        if let Some(Some(dep_branch)) = task_branches.get(dep.as_str()) {
+                            info!(
+                                task = task.name,
+                                dep = dep,
+                                branch = dep_branch,
+                                "inheriting branch from dependency"
+                            );
+                            task.branch = Some(dep_branch.clone());
+                            break;
+                        }
+                    }
+                }
+
                 // Check if any dependency used the same branch and has a worktree
                 // we can reuse (avoids git error when branch is already checked out).
                 let reuse_work_dir = if let Some(branch) = &task.branch
