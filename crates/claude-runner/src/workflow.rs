@@ -72,12 +72,21 @@ pub fn select_workflow(
 ) -> WorkflowTemplate {
     // Check policy workflow mappings first.
     for label in &issue.labels {
-        if let Some(template_name) = policy.workflows.get(label)
-            && let Some(template) = builtin_templates()
+        if let Some(template_name) = policy.workflows.get(label) {
+            // Custom templates take precedence over built-ins.
+            if let Some(template) = policy
+                .workflow_templates
+                .iter()
+                .find(|t| t.name == *template_name)
+            {
+                return template.clone();
+            }
+            if let Some(template) = builtin_templates()
                 .into_iter()
                 .find(|t| t.name == *template_name)
-        {
-            return template;
+            {
+                return template;
+            }
         }
     }
 
@@ -247,6 +256,98 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_policy_with_templates(
+        workflows: std::collections::HashMap<String, String>,
+        workflow_templates: Vec<WorkflowTemplate>,
+    ) -> crate::policy::RepoPolicy {
+        crate::policy::RepoPolicy {
+            repo: "owner/repo".to_string(),
+            eligible_labels: vec![],
+            exclude_labels: vec![],
+            workflows,
+            branch_pattern: "automation/{issue}-{slug}".to_string(),
+            max_concurrency: 3,
+            concurrency: Default::default(),
+            auto_merge: false,
+            agent: "claude".to_string(),
+            model: None,
+            validation_commands: vec![],
+            stage_prompts: Default::default(),
+            workflow_templates,
+        }
+    }
+
+    fn make_issue(number: u64, title: &str, labels: Vec<String>) -> crate::github::IssueCandidate {
+        crate::github::IssueCandidate {
+            number,
+            repo: "owner/repo".to_string(),
+            title: title.to_string(),
+            body: String::new(),
+            labels,
+            state: "open".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            is_assigned: false,
+            html_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn select_workflow_custom_template_via_label_mapping() {
+        let custom = WorkflowTemplate {
+            name: "my-custom".to_string(),
+            stages: vec![Stage {
+                kind: StageKind::Research,
+                optional: false,
+                max_retries: 1,
+                timeout_secs: None,
+                condition: None,
+            }],
+        };
+        let mut workflows = std::collections::HashMap::new();
+        workflows.insert("my-label".to_string(), "my-custom".to_string());
+        let policy = make_policy_with_templates(workflows, vec![custom]);
+        let issue = make_issue(1, "some task", vec!["my-label".to_string()]);
+        let selected = select_workflow(&issue, &policy);
+        assert_eq!(selected.name, "my-custom");
+        assert_eq!(selected.stages.len(), 1);
+        assert_eq!(selected.stages[0].kind, StageKind::Research);
+    }
+
+    #[test]
+    fn select_workflow_custom_overrides_builtin_with_same_name() {
+        let custom_bug = WorkflowTemplate {
+            name: "bug".to_string(),
+            stages: vec![Stage {
+                kind: StageKind::Comment,
+                optional: false,
+                max_retries: 1,
+                timeout_secs: None,
+                condition: None,
+            }],
+        };
+        let mut workflows = std::collections::HashMap::new();
+        workflows.insert("bug".to_string(), "bug".to_string());
+        let policy = make_policy_with_templates(workflows, vec![custom_bug]);
+        let issue = make_issue(2, "fix something", vec!["bug".to_string()]);
+        let selected = select_workflow(&issue, &policy);
+        assert_eq!(selected.name, "bug");
+        // Custom has only 1 stage (Comment); builtin "bug" has 5 stages.
+        assert_eq!(selected.stages.len(), 1);
+        assert_eq!(selected.stages[0].kind, StageKind::Comment);
+    }
+
+    #[test]
+    fn select_workflow_falls_back_to_builtin_when_no_custom() {
+        let mut workflows = std::collections::HashMap::new();
+        workflows.insert("bug".to_string(), "bug".to_string());
+        let policy = make_policy_with_templates(workflows, vec![]);
+        let issue = make_issue(3, "fix crash", vec!["bug".to_string()]);
+        let selected = select_workflow(&issue, &policy);
+        assert_eq!(selected.name, "bug");
+        assert!(selected.stages.len() > 1);
+    }
 
     #[test]
     fn feature_template_has_no_clarify_stage() {

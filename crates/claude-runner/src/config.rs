@@ -459,6 +459,60 @@ model = "opus"
     }
 
     #[test]
+    fn parse_workflow_templates_toml() {
+        let content = r#"
+[global]
+repo = "owner/repo"
+
+[[workflow_templates]]
+name = "my-workflow"
+
+[[workflow_templates.stages]]
+kind = "plan"
+optional = false
+
+[[workflow_templates.stages]]
+kind = "implement"
+optional = false
+"#;
+        let config: RunnerConfig = toml::from_str(content).unwrap();
+        assert_eq!(config.workflow_templates.len(), 1);
+        assert_eq!(config.workflow_templates[0].name, "my-workflow");
+        assert_eq!(config.workflow_templates[0].stages.len(), 2);
+    }
+
+    #[test]
+    fn custom_workflow_template_overrides_builtin() {
+        let content = r#"
+[global]
+repo = "owner/repo"
+
+[[workflow_templates]]
+name = "bug"
+
+[[workflow_templates.stages]]
+kind = "comment"
+optional = false
+"#;
+        let config: RunnerConfig = toml::from_str(content).unwrap();
+        let resolved = config.resolve_workflow("bug").unwrap();
+        // Custom "bug" has only 1 stage; builtin "bug" has 5.
+        assert_eq!(resolved.stages.len(), 1);
+    }
+
+    #[test]
+    fn resolve_workflow_falls_back_to_builtin_when_no_custom() {
+        let content = r#"
+[global]
+repo = "owner/repo"
+"#;
+        let config: RunnerConfig = toml::from_str(content).unwrap();
+        let resolved = config.resolve_workflow("feature").unwrap();
+        assert_eq!(resolved.name, "feature");
+        assert!(resolved.stages.len() > 1);
+    }
+
+    #[test]
     fn slug_generation() {
         assert_eq!(slugify("fix: handle the thing", 40), "fix-handle-the-thing");
         assert_eq!(
