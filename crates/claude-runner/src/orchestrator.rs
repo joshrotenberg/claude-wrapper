@@ -560,7 +560,7 @@ async fn handle_open_pr(
     issue_number: u64,
     work_dir: &Path,
 ) -> Result<github::PullRequest> {
-    // Commit any uncommitted changes.
+    // Commit any uncommitted changes (tracked files only — skip breadcrumbs/temp files).
     let status = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(work_dir)
@@ -570,7 +570,7 @@ async fn handle_open_pr(
 
     if has_changes {
         let _ = tokio::process::Command::new("git")
-            .args(["add", "-A"])
+            .args(["add", "-u"])
             .current_dir(work_dir)
             .output()
             .await;
@@ -583,6 +583,32 @@ async fn handle_open_pr(
             .current_dir(work_dir)
             .output()
             .await;
+    }
+
+    // Rebase on latest origin/main to avoid conflicts with recently merged PRs.
+    let _ = tokio::process::Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(work_dir)
+        .output()
+        .await;
+    let rebase = tokio::process::Command::new("git")
+        .args(["rebase", "origin/main"])
+        .current_dir(work_dir)
+        .output()
+        .await;
+    if let Ok(ref o) = rebase
+        && !o.status.success()
+    {
+        // Rebase failed — abort and try pushing anyway.
+        let _ = tokio::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(work_dir)
+            .output()
+            .await;
+        tracing::warn!(
+            issue = issue_number,
+            "rebase on origin/main failed, pushing as-is"
+        );
     }
 
     // Push.
