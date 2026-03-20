@@ -127,17 +127,17 @@ pub async fn process_issue(
 
     for planned_stage in &plan.stages {
         // Evaluate condition if set — skip stage if condition exits non-zero.
-        if let Some(ref condition) = planned_stage.condition {
-            if eval_stage_condition(condition, &issue, &worktree_dir).await {
-                info!(
-                    issue = number,
-                    stage = planned_stage.kind_name(),
-                    condition = condition,
-                    "stage condition not met, skipping"
-                );
-                record.record_stage_skipped(planned_stage.kind);
-                continue;
-            }
+        if let Some(ref condition) = planned_stage.condition
+            && eval_stage_condition(condition, &issue, &worktree_dir).await
+        {
+            info!(
+                issue = number,
+                stage = planned_stage.kind_name(),
+                condition = condition,
+                "stage condition not met, skipping"
+            );
+            record.record_stage_skipped(planned_stage.kind);
+            continue;
         }
 
         // Handle OpenPr specially — it's a platform operation.
