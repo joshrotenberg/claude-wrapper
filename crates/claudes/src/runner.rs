@@ -24,6 +24,10 @@ pub struct TaskResult {
     pub name: String,
     /// Whether the task succeeded.
     pub success: bool,
+    /// Whether this task was skipped because its `condition` command exited 0.
+    ///
+    /// When true, downstream dependents are not blocked.
+    pub condition_skipped: bool,
     /// Stdout from the claude process.
     pub stdout: String,
     /// Stderr from the claude process.
@@ -293,6 +297,7 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                     results.push(TaskResult {
                         name: task.name.clone(),
                         success: false,
+                        condition_skipped: false,
                         stdout: String::new(),
                         stderr: "skipped: dependency failed".to_string(),
                         duration: std::time::Duration::ZERO,
@@ -359,7 +364,8 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
             while let Some(result) = join_set.join_next().await {
                 match result {
                     Ok(task_result) => {
-                        if !task_result.success {
+                        // Condition-skipped tasks do not block dependents.
+                        if !task_result.success && !task_result.condition_skipped {
                             failed_tasks.insert(task_result.name.clone());
                         }
                         task_work_dirs
@@ -459,10 +465,74 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
     run_task_impl(task, options).instrument(span).await
 }
 
+/// Evaluate the task condition command.
+///
+/// Returns `true` if the task should be skipped (condition command exited 0).
+/// Returns `false` if the command exited non-zero or failed to spawn (fail-safe: run the task).
+async fn evaluate_condition(condition: &str, project_dir: &std::path::Path) -> bool {
+    match tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(condition)
+        .current_dir(project_dir)
+        .output()
+        .await
+    {
+        Ok(output) => output.status.success(),
+        Err(e) => {
+            warn!(
+                condition = condition,
+                error = %e,
+                "condition spawn failed — treating as non-zero (task will run)"
+            );
+            false
+        }
+    }
+}
+
 /// Inner task execution body.
 async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
     let start = std::time::Instant::now();
     let task_name = task.name.clone();
+
+    // Evaluate condition before isolation setup, pre_hooks, and finally_hooks.
+    if let Some(condition) = &task.condition {
+        let should_skip = evaluate_condition(condition, &options.project_dir).await;
+        if should_skip {
+            info!(
+                task = task_name,
+                condition = condition,
+                "condition met (exit 0) — skipping task"
+            );
+            if let Some(ref sender) = options.event_sender {
+                let _ = sender.send(TaskEvent {
+                    task_name: task_name.clone(),
+                    event: StreamEvent {
+                        data: serde_json::json!({
+                            "type": "claudes_task_condition_skipped",
+                            "task_name": task_name,
+                        }),
+                    },
+                });
+            }
+            return TaskResult {
+                name: task_name,
+                success: false,
+                condition_skipped: true,
+                stdout: String::new(),
+                stderr: "skipped: condition met".to_string(),
+                duration: start.elapsed(),
+                work_dir: options.project_dir.to_path_buf(),
+                cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
+            };
+        }
+        info!(
+            task = task_name,
+            condition = condition,
+            "condition not met (non-zero) — running task"
+        );
+    }
 
     let result = run_task_inner(task, options).await;
 
@@ -512,6 +582,7 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
             TaskResult {
                 name: task_name,
                 success,
+                condition_skipped: false,
                 stdout: output.stdout,
                 stderr: output.stderr,
                 duration,
@@ -526,6 +597,7 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
             TaskResult {
                 name: task_name,
                 success: false,
+                condition_skipped: false,
                 stdout: String::new(),
                 stderr: e.to_string(),
                 duration: start.elapsed(),
@@ -1244,5 +1316,38 @@ mod tests {
             .cleanup(CleanupPolicy::OnSuccess)
             .build();
         assert_eq!(opts.cleanup, CleanupPolicy::OnSuccess);
+    }
+
+    #[tokio::test]
+    async fn condition_exit_zero_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(evaluate_condition("exit 0", dir.path()).await);
+    }
+
+    #[tokio::test]
+    async fn condition_exit_nonzero_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!evaluate_condition("exit 1", dir.path()).await);
+    }
+
+    #[tokio::test]
+    async fn condition_spawn_failure_returns_false() {
+        let _dir = tempfile::tempdir().unwrap();
+        // Passing a non-existent binary through sh -c will still work (sh handles it).
+        // Test spawn failure by using a non-existent working directory.
+        let bad_dir = std::path::Path::new("/nonexistent/path/that/does/not/exist");
+        // sh -c "exit 0" with a bad cwd — sh may still succeed on some platforms,
+        // but the intent of the fail-safe is covered by evaluate_condition returning false on Err.
+        // Instead verify directly with a command that will fail to spawn due to bad cwd.
+        let result = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .current_dir(bad_dir)
+            .output()
+            .await;
+        // If spawn fails (bad cwd), evaluate_condition should return false.
+        if result.is_err() {
+            assert!(!evaluate_condition("exit 0", bad_dir).await);
+        }
     }
 }

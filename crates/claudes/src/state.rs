@@ -118,6 +118,12 @@ pub enum TaskStatus {
     Timeout,
     /// Task was skipped because a dependency failed.
     Skipped,
+    /// Task was skipped because its `condition` command exited with status 0.
+    ///
+    /// Unlike `Skipped`, this is a success-like outcome: downstream dependents
+    /// are not blocked and the task is not counted as a failure.
+    #[serde(rename = "condition_skipped")]
+    ConditionSkipped,
 }
 
 /// Summary statistics for the entire run.
@@ -340,7 +346,9 @@ pub fn build_state(manifest: &Manifest, result: &RunResult, started_at: DateTime
             };
             let log_path = Some(log_path.to_string_lossy().to_string());
 
-            let status = if t.success {
+            let status = if t.condition_skipped {
+                TaskStatus::ConditionSkipped
+            } else if t.success {
                 TaskStatus::Success
             } else if is_timeout(&t.stdout, &t.stderr) {
                 TaskStatus::Timeout
@@ -624,6 +632,7 @@ pub fn print_status(state: &RunState) {
             TaskStatus::Failed => "FAILED",
             TaskStatus::Timeout => "TIMEOUT",
             TaskStatus::Skipped => "SKIPPED",
+            TaskStatus::ConditionSkipped => "SKIPPED (cond)",
         };
         let status_display = if use_color {
             match task.status {
@@ -663,6 +672,16 @@ pub fn print_status(state: &RunState) {
                         .with(Color::Rgb {
                             r: 128,
                             g: 128,
+                            b: 128
+                        })
+                        .to_string()
+                ),
+                TaskStatus::ConditionSkipped => format!(
+                    "{:<10}",
+                    status_str
+                        .with(Color::Rgb {
+                            r: 128,
+                            g: 200,
                             b: 128
                         })
                         .to_string()
@@ -718,6 +737,7 @@ mod tests {
         TaskResult {
             name: name.into(),
             success,
+            condition_skipped: false,
             stdout: if success { "{}".into() } else { String::new() },
             stderr: if success {
                 String::new()
@@ -752,6 +772,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "t".into(),
                 success: true,
+                condition_skipped: false,
                 stdout: r#"{"total_cost_usd":0.10}"#.into(),
                 stderr: String::new(),
                 duration: Duration::from_secs(5),
@@ -780,6 +801,7 @@ mod tests {
                 TaskResult {
                     name: "ok".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: "{}".into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(4),
@@ -791,6 +813,7 @@ mod tests {
                 TaskResult {
                     name: "bad".into(),
                     success: false,
+                    condition_skipped: false,
                     stdout: String::new(),
                     stderr: "oops".into(),
                     duration: Duration::from_secs(2),
@@ -825,6 +848,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "test-task".into(),
                 success: true,
+                condition_skipped: false,
                 stdout: r#"{"result":"done","session_id":"sess-123","total_cost_usd":0.05}"#.into(),
                 stderr: String::new(),
                 duration: Duration::from_secs(5),
@@ -865,6 +889,7 @@ mod tests {
                 TaskResult {
                     name: "ok-task".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: "{}".into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(3),
@@ -876,6 +901,7 @@ mod tests {
                 TaskResult {
                     name: "bad-task".into(),
                     success: false,
+                    condition_skipped: false,
                     stdout: String::new(),
                     stderr: "something went wrong".into(),
                     duration: Duration::from_secs(1),
@@ -905,6 +931,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "t".into(),
                 success: true,
+                condition_skipped: false,
                 stdout: "{}".into(),
                 stderr: String::new(),
                 duration: Duration::from_secs(2),
@@ -1035,6 +1062,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "timeout-task".into(),
                 success: false,
+                condition_skipped: false,
                 stdout: String::new(),
                 stderr: "reached max_turns limit".into(),
                 duration: Duration::from_secs(60),
@@ -1054,6 +1082,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "timeout-task".into(),
                 success: false,
+                condition_skipped: false,
                 stdout: r#"{"subtype":"error_max_turns","result":""}"#.into(),
                 stderr: String::new(),
                 duration: Duration::from_secs(60),
@@ -1102,6 +1131,7 @@ mod tests {
                 TaskResult {
                     name: "a".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: r#"{"total_cost_usd":1.39,"num_turns":15}"#.into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(5),
@@ -1113,6 +1143,7 @@ mod tests {
                 TaskResult {
                     name: "b".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: r#"{"total_cost_usd":0.79,"num_turns":21}"#.into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(4),
@@ -1166,6 +1197,7 @@ mod tests {
                 TaskResult {
                     name: "a".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: r#"{"num_turns":10}"#.into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(2),
@@ -1177,6 +1209,7 @@ mod tests {
                 TaskResult {
                     name: "b".into(),
                     success: true,
+                    condition_skipped: false,
                     stdout: r#"{"num_turns":20}"#.into(),
                     stderr: String::new(),
                     duration: Duration::from_secs(3),
@@ -1197,6 +1230,7 @@ mod tests {
             tasks: vec![TaskResult {
                 name: "t".into(),
                 success: true,
+                condition_skipped: false,
                 stdout: "{}".into(),
                 stderr: String::new(),
                 duration: Duration::from_secs(1),
@@ -1209,5 +1243,38 @@ mod tests {
         let state2 = build_state(&manifest2, &result2, Utc::now());
         let m2 = compute_metrics(&[state2]);
         assert_eq!(m2.avg_turns_used, None);
+    }
+
+    #[test]
+    fn task_status_condition_skipped_serialization() {
+        let status = TaskStatus::ConditionSkipped;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#""condition_skipped""#);
+        let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TaskStatus::ConditionSkipped);
+    }
+
+    #[test]
+    fn build_state_condition_skipped() {
+        let manifest = Manifest::new(vec![Task::new("cond-task", "do work")]);
+        let result = RunResult {
+            tasks: vec![TaskResult {
+                name: "cond-task".into(),
+                success: false,
+                condition_skipped: true,
+                stdout: String::new(),
+                stderr: "skipped: condition met".to_string(),
+                duration: Duration::from_millis(5),
+                work_dir: PathBuf::from("/tmp"),
+                cost_usd: None,
+                files_modified: None,
+                lines_changed: None,
+            }],
+        };
+        let state = build_state(&manifest, &result, Utc::now());
+        assert_eq!(state.results[0].status, TaskStatus::ConditionSkipped);
+        // Condition-skipped tasks are not counted as failed.
+        assert_eq!(state.summary.failed, 0);
+        assert_eq!(state.summary.timed_out, 0);
     }
 }

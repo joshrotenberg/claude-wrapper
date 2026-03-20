@@ -313,6 +313,7 @@ impl Manifest {
                         task.finally_hooks.as_ref(),
                     ),
                     depends_on: task.depends_on.clone(),
+                    condition: task.condition.clone(),
                     skills: merge_hooks(
                         shared.and_then(|s| s.skills.as_ref()),
                         profile.and_then(|p| p.skills.as_ref()),
@@ -1127,6 +1128,15 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
 
+    /// Optional shell condition command.
+    ///
+    /// If set, this command is executed in the project root before isolation setup.
+    /// Exit code 0 means the task should be **skipped** (condition is met, no work needed).
+    /// Any non-zero exit code (or a spawn failure) means the task runs normally.
+    /// Condition-skipped tasks do not block downstream dependents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+
     /// Skill files (markdown/text) whose contents are appended to the system prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills: Option<Vec<String>>,
@@ -1172,6 +1182,7 @@ impl Task {
             post_hooks: None,
             finally_hooks: None,
             depends_on: None,
+            condition: None,
             skills: None,
             settings: None,
             setting_sources: None,
@@ -1421,6 +1432,15 @@ impl TaskBuilder {
     /// Set the Claude CLI setting sources.
     pub fn setting_sources(mut self, setting_sources: impl Into<String>) -> Self {
         self.task.setting_sources = Some(setting_sources.into());
+        self
+    }
+
+    /// Set a shell condition for this task.
+    ///
+    /// The command runs in the project root before isolation setup.
+    /// Exit 0 = skip the task; non-zero (or spawn failure) = run the task.
+    pub fn condition(mut self, condition: impl Into<String>) -> Self {
+        self.task.condition = Some(condition.into());
         self
     }
 
@@ -2886,5 +2906,48 @@ prompt = "do it"
         let c_deps = manifest.tasks[3].depends_on.as_ref().unwrap();
         assert!(c_deps.contains(&"b1".to_string()));
         assert!(c_deps.contains(&"b2".to_string()));
+    }
+
+    #[test]
+    fn task_condition_field_json() {
+        let json = r#"{
+            "name": "check-task",
+            "prompt": "do the work",
+            "condition": "test -f marker.txt"
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.condition.as_deref(), Some("test -f marker.txt"));
+    }
+
+    #[test]
+    fn task_condition_field_toml() {
+        let toml_str = r#"
+            name = "check-task"
+            prompt = "do the work"
+            condition = "test -f marker.txt"
+        "#;
+        let task: Task = toml::from_str(toml_str).unwrap();
+        assert_eq!(task.condition.as_deref(), Some("test -f marker.txt"));
+    }
+
+    #[test]
+    fn task_condition_field_absent_defaults_to_none() {
+        let json = r#"{"name": "t", "prompt": "p"}"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(task.condition.is_none());
+    }
+
+    #[test]
+    fn task_condition_not_inherited_from_shared() {
+        // condition is task-only: it must not appear on the Shared struct.
+        // Verify that resolving a manifest preserves the task's condition.
+        let json = r#"{
+            "tasks": [
+                {"name": "t", "prompt": "p", "condition": "exit 1"}
+            ]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        let resolved = manifest.resolve();
+        assert_eq!(resolved.tasks[0].condition.as_deref(), Some("exit 1"));
     }
 }
