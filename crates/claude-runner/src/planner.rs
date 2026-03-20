@@ -37,6 +37,8 @@ pub struct PlannedStage {
     pub optional: bool,
     /// Maximum retries.
     pub max_retries: u32,
+    /// Shell command that gates execution. Exit 0 = run, non-zero = skip.
+    pub condition: Option<String>,
 }
 
 impl PlannedStage {
@@ -73,6 +75,7 @@ pub fn create_plan(issue: &IssueCandidate, template: &WorkflowTemplate, branch: 
                 validation: Vec::new(),
                 optional: stage.optional,
                 max_retries: stage.max_retries,
+                condition: stage.condition.clone(),
             }
         })
         .collect();

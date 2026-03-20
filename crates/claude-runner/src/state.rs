@@ -155,6 +155,20 @@ impl RunRecord {
         }
     }
 
+    /// Record a stage as skipped (no result).
+    pub fn record_stage_skipped(&mut self, kind: StageKind) {
+        if let Some(existing) = self.stages.iter_mut().find(|s| s.kind == kind) {
+            existing.status = StageStatus::Skipped;
+        } else {
+            self.stages.push(StageRecord {
+                kind,
+                status: StageStatus::Skipped,
+                attempts: 0,
+                result: None,
+            });
+        }
+    }
+
     /// Mark the run as finished.
     pub fn finish(&mut self, status: RunStatus) {
         self.status = status;

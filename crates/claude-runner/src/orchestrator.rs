@@ -82,6 +82,7 @@ pub async fn process_issue(
             optional: false,
             max_retries: 1,
             timeout_secs: None,
+            condition: None,
         };
         let plan_pos = template
             .stages
@@ -125,6 +126,20 @@ pub async fn process_issue(
     let mut all_succeeded = true;
 
     for planned_stage in &plan.stages {
+        // Evaluate condition if set — skip stage if condition exits non-zero.
+        if let Some(ref condition) = planned_stage.condition
+            && eval_stage_condition(condition, &issue, &worktree_dir).await
+        {
+            info!(
+                issue = number,
+                stage = planned_stage.kind_name(),
+                condition = condition,
+                "stage condition not met, skipping"
+            );
+            record.record_stage_skipped(planned_stage.kind);
+            continue;
+        }
+
         // Handle OpenPr specially — it's a platform operation.
         if planned_stage.kind == StageKind::OpenPr {
             match handle_open_pr(repo, &branch, &issue.title, number, &worktree_dir).await {
@@ -323,6 +338,41 @@ async fn handle_open_pr(
     );
 
     github::create_pull_request(repo, branch, issue_title, &body, work_dir).await
+}
+
+/// Evaluate a stage condition shell command. Returns `true` if the stage should be skipped.
+///
+/// The following env vars are available to the condition script:
+/// - `RUNNER_ISSUE_NUMBER`
+/// - `RUNNER_ISSUE_TITLE`
+/// - `RUNNER_ISSUE_BODY`
+/// - `RUNNER_ISSUE_LABELS` (comma-separated)
+async fn eval_stage_condition(
+    condition: &str,
+    issue: &github::IssueCandidate,
+    work_dir: &Path,
+) -> bool {
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", condition])
+        .current_dir(work_dir)
+        .env("RUNNER_ISSUE_NUMBER", issue.number.to_string())
+        .env("RUNNER_ISSUE_TITLE", &issue.title)
+        .env("RUNNER_ISSUE_BODY", &issue.body)
+        .env("RUNNER_ISSUE_LABELS", issue.labels.join(","))
+        .output()
+        .await;
+
+    match output {
+        Ok(o) => !o.status.success(),
+        Err(e) => {
+            warn!(
+                condition = condition,
+                error = %e,
+                "condition command failed to run; not skipping stage"
+            );
+            false
+        }
+    }
 }
 
 fn build_adapter(policy: &RepoPolicy) -> ClaudeAdapter {
