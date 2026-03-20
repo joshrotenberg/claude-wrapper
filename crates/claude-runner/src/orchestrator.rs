@@ -311,7 +311,7 @@ async fn run_validation(commands: &[String], work_dir: &Path) {
             .await;
         match output {
             Ok(o) if o.status.success() => {
-                tracing::debug!(command = cmd, "validation passed");
+                info!(command = cmd, "validation passed");
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
