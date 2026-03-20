@@ -283,6 +283,7 @@ pub fn plan(options: &PlanOptions) -> Manifest {
                 post_hooks: None,
                 finally_hooks: None,
                 depends_on: None,
+                condition: None,
                 skills: None,
                 settings: None,
                 setting_sources: None,

@@ -159,10 +159,12 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
     let _ = writeln!(out);
 
     for task in &result.tasks {
-        let is_skipped = !task.success && task.stderr.contains("skipped: dependency failed");
+        let is_dep_skipped = !task.success && task.stderr.contains("skipped: dependency failed");
         let status = if task.success {
             "ok"
-        } else if is_skipped {
+        } else if task.condition_skipped {
+            "SKIPPED (cond)"
+        } else if is_dep_skipped {
             "SKIPPED"
         } else if is_timeout(&task.stdout, &task.stderr) {
             "TIMEOUT"
@@ -187,7 +189,13 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
         if use_color {
             let status_color = if task.success {
                 Color::Green
-            } else if is_skipped {
+            } else if task.condition_skipped {
+                Color::Rgb {
+                    r: 128,
+                    g: 200,
+                    b: 128,
+                }
+            } else if is_dep_skipped {
                 Color::DarkGrey
             } else {
                 Color::Red
@@ -202,7 +210,7 @@ fn print_run_complete_progress(result: &RunResult, no_color: bool) {
             );
         }
 
-        if !task.success && !is_skipped && !task.stderr.is_empty() {
+        if !task.success && !is_dep_skipped && !task.condition_skipped && !task.stderr.is_empty() {
             for line in task.stderr.lines().take(5) {
                 let _ = writeln!(out, "    {line}");
             }
@@ -494,6 +502,47 @@ pub async fn render_progress(mut rx: mpsc::UnboundedReceiver<TaskEvent>, no_colo
                 if let Some(c) = cost {
                     total_cost += c;
                 }
+                let cost_msg = if total_cost > 0.0 {
+                    format!("  ${total_cost:.2}")
+                } else {
+                    String::new()
+                };
+                footer.set_message(format!(
+                    "{completed_tasks}/{total_tasks} complete{cost_msg}"
+                ));
+                if completed_tasks == total_tasks {
+                    footer.finish_with_message("");
+                }
+            }
+            "claudes_task_condition_skipped" => {
+                if let Some(pb) = bars.get(task.as_str()) {
+                    let finish = if use_color {
+                        format!(
+                            "  {}  {:<22} {}",
+                            "⊘".with(Color::Rgb {
+                                r: 128,
+                                g: 200,
+                                b: 128
+                            }),
+                            task_prefix.with(Color::Rgb {
+                                r: 128,
+                                g: 200,
+                                b: 128
+                            }),
+                            "skipped (condition)".with(Color::Rgb {
+                                r: 128,
+                                g: 200,
+                                b: 128
+                            })
+                        )
+                    } else {
+                        format!("  ⊘  {task_prefix:<22} skipped (condition)")
+                    };
+                    pb.finish_with_message("");
+                    pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+                    pb.finish_with_message(finish);
+                }
+                completed_tasks += 1;
                 let cost_msg = if total_cost > 0.0 {
                     format!("  ${total_cost:.2}")
                 } else {
