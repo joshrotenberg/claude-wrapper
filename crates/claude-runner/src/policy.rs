@@ -50,6 +50,11 @@ pub struct RepoPolicy {
     /// Post-stage validation commands.
     #[serde(default)]
     pub validation_commands: Vec<String>,
+
+    /// Per-stage prompt overrides. Keys are stage names (e.g., "plan", "implement").
+    /// If set, the value replaces the default generated prompt for that stage.
+    #[serde(default)]
+    pub stage_prompts: std::collections::HashMap<String, String>,
 }
 
 fn default_branch_pattern() -> String {
@@ -197,6 +202,7 @@ mod tests {
             agent: default_agent(),
             model: None,
             validation_commands: vec![],
+            stage_prompts: Default::default(),
         };
         let issue = make_issue(42, "fix: handle the thing");
         let branch = policy.branch_for_issue(&issue);
@@ -249,6 +255,7 @@ mod tests {
             agent: default_agent(),
             model: None,
             validation_commands: vec![],
+            stage_prompts: Default::default(),
         };
         let issue = make_issue(471, &"a".repeat(200));
         let branch = policy.branch_for_issue(&issue);
