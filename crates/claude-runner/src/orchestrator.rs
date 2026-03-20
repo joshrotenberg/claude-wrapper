@@ -4,6 +4,7 @@ use std::path::Path;
 
 use tracing::{error, info, warn};
 
+use crate::config::RunnerConfig;
 use crate::error::{Error, Result};
 use crate::executor::{AgentAdapter, ClaudeAdapter, StageResult};
 use crate::github;
@@ -14,7 +15,261 @@ use crate::state::{self, RunRecord, RunStatus, StageStatus};
 use crate::triage::{self, TriageDecision};
 use crate::workflow::{self, StageKind};
 
-/// Process a single issue through the full pipeline.
+/// Process a single issue through the full pipeline using the new config model.
+pub async fn process_issue_with_config(
+    number: u64,
+    config: &RunnerConfig,
+    state_dir: &Path,
+    repo_dir: &Path,
+) -> Result<RunRecord> {
+    let repo = &config.global.repo;
+    info!(repo = repo, issue = number, "processing issue");
+
+    // 1. Fetch the issue.
+    let issue = github::fetch_issue(repo, number).await?;
+    info!(
+        issue = number,
+        title = issue.title,
+        labels = ?issue.labels,
+        "fetched issue"
+    );
+
+    // 2. Match route.
+    let (route_name, route) = config
+        .match_route(&issue)
+        .ok_or_else(|| Error::Triage("no route matches this issue's labels".into()))?;
+    info!(issue = number, route = route_name, "matched route");
+
+    // 3. Acquire lease.
+    let _ = github::add_label(repo, number, &config.global.in_progress_label).await;
+    if let Some(ref gate) = config.global.gate_label {
+        let _ = github::remove_label(repo, number, gate).await;
+    }
+
+    // 4. Resolve workflow template.
+    let template = config
+        .resolve_workflow(&route.workflow)
+        .ok_or_else(|| Error::Policy(format!("unknown workflow: {}", route.workflow)))?;
+    let branch = config.branch_for_issue(&issue);
+    info!(
+        issue = number,
+        route = route_name,
+        workflow = template.name,
+        branch = branch,
+        stages = template.stages.len(),
+        "selected workflow"
+    );
+
+    // 5. Create work plan.
+    let plan = planner::create_plan(&issue, &template, &branch);
+
+    // 6. Set up isolation.
+    let worktree_dir = isolation::create_worktree(repo_dir, &branch, ".worktrees").await?;
+    info!(issue = number, worktree = %worktree_dir.display(), "created worktree");
+
+    // 7. Execute stages.
+    let mut adapter = ClaudeAdapter::new();
+    if let Some(model) = config.effective_model(route) {
+        adapter = adapter.model(model);
+    }
+    let validation = config.effective_validation(route);
+
+    let mut record = RunRecord::new(repo, number, &template.name, &branch);
+    let mut all_succeeded = true;
+
+    for planned_stage in &plan.stages {
+        if planned_stage.kind == StageKind::OpenPr {
+            match handle_open_pr(repo, &branch, &issue.title, number, &worktree_dir).await {
+                Ok(pr) => {
+                    record.pr_number = Some(pr.number);
+                    info!(
+                        issue = number,
+                        pr = pr.number,
+                        url = pr.html_url,
+                        "created PR"
+                    );
+                    record.record_stage(
+                        planned_stage.kind,
+                        StageStatus::Succeeded,
+                        StageResult {
+                            stage: "open_pr".into(),
+                            success: true,
+                            duration_secs: 0.0,
+                            cost_usd: None,
+                            output: pr.html_url,
+                            files_modified: None,
+                        },
+                    );
+                }
+                Err(e) => {
+                    error!(issue = number, error = %e, "failed to create PR");
+                    record.record_stage(
+                        planned_stage.kind,
+                        StageStatus::Failed,
+                        StageResult {
+                            stage: "open_pr".into(),
+                            success: false,
+                            duration_secs: 0.0,
+                            cost_usd: None,
+                            output: e.to_string(),
+                            files_modified: None,
+                        },
+                    );
+                    all_succeeded = false;
+                    if !planned_stage.optional {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Skip optional stages if condition says so.
+        if planned_stage.optional
+            && let Some(ref condition) = planned_stage.condition
+            && let Ok(o) = tokio::process::Command::new("sh")
+                .args(["-c", condition])
+                .current_dir(&worktree_dir)
+                .output()
+                .await
+            && o.status.success()
+        {
+            info!(
+                issue = number,
+                stage = planned_stage.kind_name(),
+                "skipping optional stage (condition met)"
+            );
+            continue;
+        }
+
+        info!(
+            issue = number,
+            stage = planned_stage.kind_name(),
+            "running stage"
+        );
+
+        match adapter.execute_stage(planned_stage, &worktree_dir).await {
+            Ok(result) => {
+                let status = if result.success {
+                    StageStatus::Succeeded
+                } else {
+                    StageStatus::Failed
+                };
+                info!(
+                    issue = number,
+                    stage = planned_stage.kind_name(),
+                    success = result.success,
+                    duration = format!("{:.1}s", result.duration_secs),
+                    cost = result.cost_usd,
+                    "stage complete"
+                );
+                let failed = !result.success;
+                record.record_stage(planned_stage.kind, status, result);
+                if failed {
+                    all_succeeded = false;
+                    if !planned_stage.optional {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                error!(issue = number, stage = planned_stage.kind_name(), error = %e, "stage error");
+                record.record_stage(
+                    planned_stage.kind,
+                    StageStatus::Failed,
+                    StageResult {
+                        stage: planned_stage.kind_name().to_string(),
+                        success: false,
+                        duration_secs: 0.0,
+                        cost_usd: None,
+                        output: e.to_string(),
+                        files_modified: None,
+                    },
+                );
+                all_succeeded = false;
+                if !planned_stage.optional {
+                    break;
+                }
+            }
+        }
+
+        // Run validation.
+        if !validation.is_empty() {
+            run_validation(validation, &worktree_dir).await;
+        }
+    }
+
+    // 8. Finish.
+    let final_status = if all_succeeded {
+        RunStatus::Succeeded
+    } else {
+        RunStatus::Failed
+    };
+    record.finish(final_status);
+    state::save_run(&record, state_dir)?;
+    info!(issue = number, run_id = record.run_id, status = ?final_status, cost = record.total_cost_usd, "run complete");
+
+    // 9. Update lease labels.
+    let _ = github::remove_label(repo, number, &config.global.in_progress_label).await;
+    if all_succeeded {
+        let _ = github::add_label(repo, number, &config.global.complete_label).await;
+    } else {
+        let _ = github::add_label(repo, number, &config.global.failed_label).await;
+    }
+
+    // 10. Cleanup.
+    if all_succeeded
+        && let Err(e) = isolation::remove_worktree(repo_dir, &worktree_dir, false).await
+    {
+        warn!(error = %e, "failed to clean worktree (non-fatal)");
+    }
+
+    Ok(record)
+}
+
+/// Process all eligible issues for a config using route matching.
+pub async fn process_batch_with_config(
+    config: &RunnerConfig,
+    state_dir: &Path,
+    repo_dir: &Path,
+) -> Vec<RunRecord> {
+    let repo = &config.global.repo;
+
+    // Fetch issues with the gate label if configured.
+    let labels = config
+        .global
+        .gate_label
+        .as_deref()
+        .map(|l| vec![l.to_string()])
+        .unwrap_or_default();
+
+    let issues = match github::fetch_eligible_issues(repo, &labels, 10).await {
+        Ok(issues) => issues,
+        Err(e) => {
+            error!(error = %e, "failed to fetch issues");
+            return vec![];
+        }
+    };
+
+    info!(repo = repo, count = issues.len(), "found eligible issues");
+
+    let mut records = Vec::new();
+    for issue in issues {
+        // Only process if a route matches.
+        if config.match_route(&issue).is_none() {
+            tracing::debug!(issue = issue.number, "no route match, skipping");
+            continue;
+        }
+        match process_issue_with_config(issue.number, config, state_dir, repo_dir).await {
+            Ok(record) => records.push(record),
+            Err(e) => warn!(issue = issue.number, error = %e, "failed to process issue"),
+        }
+    }
+
+    records
+}
+
+/// Process a single issue through the full pipeline (legacy API).
 ///
 /// Returns the run record with per-stage results.
 pub async fn process_issue(
