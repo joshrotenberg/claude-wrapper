@@ -22,10 +22,20 @@ pub async fn create_worktree(
 
     tokio::fs::create_dir_all(repo_dir.join(base_dir)).await?;
 
+    // Fetch latest from remote so we branch from up-to-date main.
+    let _ = tokio::process::Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(repo_dir)
+        .output()
+        .await;
+
+    // Determine the default branch base point.
+    let base_ref = detect_default_branch(repo_dir).await;
+
     let output = tokio::process::Command::new("git")
         .args(["worktree", "add", "-b", branch])
         .arg(&worktree_dir)
-        .arg("HEAD")
+        .arg(&base_ref)
         .current_dir(repo_dir)
         .output()
         .await?;
@@ -84,4 +94,22 @@ pub async fn remove_worktree(
     }
 
     Ok(())
+}
+
+/// Detect the remote default branch (origin/main or origin/master).
+async fn detect_default_branch(repo_dir: &Path) -> String {
+    // Try origin/main first, fall back to origin/master, then HEAD.
+    for candidate in &["origin/main", "origin/master"] {
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--verify", candidate])
+            .current_dir(repo_dir)
+            .output()
+            .await;
+        if let Ok(o) = output
+            && o.status.success()
+        {
+            return candidate.to_string();
+        }
+    }
+    "HEAD".to_string()
 }
