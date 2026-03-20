@@ -11,3 +11,11 @@ validation_commands = [
     "cargo clippy --all-targets -- -D warnings",
     "cargo test --lib",
 ]
+
+# Per-workflow concurrency limits.
+# 0 = unlimited (up to the global max_concurrency cap).
+# Workflows not listed here default to unlimited.
+[concurrency]
+bug = 1
+feature = 2
+research = 0

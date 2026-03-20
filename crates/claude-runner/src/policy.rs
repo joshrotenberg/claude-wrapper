@@ -26,9 +26,15 @@ pub struct RepoPolicy {
     #[serde(default = "default_branch_pattern")]
     pub branch_pattern: String,
 
-    /// Maximum concurrent runs for this repo.
+    /// Maximum concurrent runs across all workflows (global cap).
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
+
+    /// Per-workflow concurrency limits. Key is the workflow name (e.g., "bug",
+    /// "feature"). A value of `0` means unlimited (up to the global cap).
+    /// Workflows not listed here default to unlimited (up to the global cap).
+    #[serde(default)]
+    pub concurrency: std::collections::HashMap<String, usize>,
 
     /// Whether to auto-merge approved PRs.
     #[serde(default)]
@@ -186,6 +192,7 @@ mod tests {
             workflows: Default::default(),
             branch_pattern: default_branch_pattern(),
             max_concurrency: default_concurrency(),
+            concurrency: Default::default(),
             auto_merge: false,
             agent: default_agent(),
             model: None,
@@ -237,6 +244,7 @@ mod tests {
             workflows: Default::default(),
             branch_pattern: default_branch_pattern(),
             max_concurrency: default_concurrency(),
+            concurrency: Default::default(),
             auto_merge: false,
             agent: default_agent(),
             model: None,

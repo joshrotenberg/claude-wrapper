@@ -161,6 +161,54 @@ pub async fn fetch_eligible_issues(
         .collect())
 }
 
+/// Fetch all open issues that have a specific label.
+pub async fn fetch_issues_with_label(repo: &str, label: &str) -> Result<Vec<IssueCandidate>> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--label",
+            label,
+            "--json",
+            "number,title,body,labels,state,createdAt,updatedAt,assignees,url",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .await
+        .map_err(|e| Error::GitHub(format!("failed to run gh: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::GitHub(format!(
+            "gh issue list (label={label}) failed: {stderr}"
+        )));
+    }
+
+    let raw: Vec<GhIssue> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| Error::GitHub(format!("failed to parse gh output: {e}")))?;
+
+    Ok(raw
+        .into_iter()
+        .map(|r| IssueCandidate {
+            number: r.number,
+            repo: repo.to_string(),
+            title: r.title,
+            body: r.body.unwrap_or_default(),
+            labels: r.labels.into_iter().map(|l| l.name).collect(),
+            state: r.state,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            is_assigned: !r.assignees.is_empty(),
+            html_url: r.url,
+        })
+        .collect())
+}
+
 /// Push a branch from a worktree to the remote.
 pub async fn push_branch(work_dir: &Path, branch: &str) -> Result<()> {
     let output = tokio::process::Command::new("git")
