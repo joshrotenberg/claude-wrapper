@@ -24,6 +24,11 @@ pub struct Stage {
     pub max_retries: u32,
     /// Timeout in seconds for this stage.
     pub timeout_secs: Option<u64>,
+    /// Shell command that gates execution. Exit 0 = run, non-zero = skip.
+    /// Evaluated with RUNNER_ISSUE_NUMBER, RUNNER_ISSUE_TITLE, RUNNER_ISSUE_BODY,
+    /// and RUNNER_ISSUE_LABELS env vars available.
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 fn default_retries() -> u32 {
@@ -119,30 +124,35 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Implement,
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Test,
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Review,
                     optional: true,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::OpenPr,
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
             ],
         },
@@ -154,30 +164,35 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Implement,
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Test,
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Review,
                     optional: true,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::OpenPr,
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
             ],
         },
@@ -189,18 +204,21 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Test,
                     optional: false,
                     max_retries: 2,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::OpenPr,
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
             ],
         },
@@ -212,12 +230,14 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
                 Stage {
                     kind: StageKind::Comment,
                     optional: false,
                     max_retries: 1,
                     timeout_secs: None,
+                    condition: None,
                 },
             ],
         },
@@ -254,6 +274,39 @@ mod tests {
     }
 
     #[test]
+    fn stage_condition_field_defaults_to_none() {
+        let stage = Stage {
+            kind: StageKind::Review,
+            optional: true,
+            max_retries: 1,
+            timeout_secs: None,
+            condition: None,
+        };
+        assert!(stage.condition.is_none());
+    }
+
+    #[test]
+    fn stage_condition_round_trips_via_serde() {
+        let stage = Stage {
+            kind: StageKind::Review,
+            optional: true,
+            max_retries: 1,
+            timeout_secs: None,
+            condition: Some("test -n \"$RUNNER_ISSUE_BODY\"".into()),
+        };
+        let json = serde_json::to_string(&stage).unwrap();
+        let restored: Stage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.condition, stage.condition);
+    }
+
+    #[test]
+    fn stage_condition_absent_in_json_defaults_to_none() {
+        let json = r#"{"kind":"review","optional":true,"max_retries":1}"#;
+        let stage: Stage = serde_json::from_str(json).unwrap();
+        assert!(stage.condition.is_none());
+    }
+
+    #[test]
     fn clarify_injection_before_plan() {
         let mut template = builtin_templates()
             .into_iter()
@@ -265,6 +318,7 @@ mod tests {
             optional: false,
             max_retries: 1,
             timeout_secs: None,
+            condition: None,
         };
         let plan_pos = template
             .stages
