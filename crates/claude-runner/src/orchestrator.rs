@@ -35,7 +35,11 @@ pub async fn process_issue(
         "fetched issue"
     );
 
-    // 2. Triage.
+    // 2. Acquire lease (add runner:in-progress, remove runner:ready).
+    let _ = github::add_label(repo, number, "runner:in-progress").await;
+    let _ = github::remove_label(repo, number, "runner:ready").await;
+
+    // 3. Triage.
     let decision = triage::triage(&issue, policy);
     let needs_clarification = match &decision {
         TriageDecision::Ready => {
@@ -250,7 +254,15 @@ pub async fn process_issue(
         "run complete"
     );
 
-    // 9. Cleanup on success.
+    // 9. Update lease labels.
+    let _ = github::remove_label(repo, number, "runner:in-progress").await;
+    if all_succeeded {
+        let _ = github::add_label(repo, number, "runner:complete").await;
+    } else {
+        let _ = github::add_label(repo, number, "runner:failed").await;
+    }
+
+    // 10. Cleanup on success.
     if all_succeeded {
         if let Err(e) = isolation::remove_worktree(repo_dir, &worktree_dir, false).await {
             warn!(error = %e, "failed to clean worktree (non-fatal)");

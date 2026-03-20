@@ -1,6 +1,6 @@
 repo = "joshrotenberg/claude-wrapper"
-eligible_labels = ["bug", "enhancement"]
-exclude_labels = ["blocked", "needs-design"]
+eligible_labels = ["runner:ready"]
+exclude_labels = ["blocked", "needs-design", "runner:in-progress", "runner:complete"]
 branch_pattern = "automation/{issue}-{slug}"
 max_concurrency = 3
 auto_merge = false
