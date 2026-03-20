@@ -6,7 +6,7 @@ use tower_mcp::McpRouter;
 use tower_mcp::transport::StdioTransport;
 use tracing_subscriber::EnvFilter;
 
-use claude_wrapper::{Claude, QueryCommand};
+use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
 use claudes::cli::{Cli, Command, parse_timeout};
 use claudes::output::{self, OutputMode};
 use claudes::planner::PlanOptions;
@@ -599,33 +599,7 @@ async fn cmd_generate(args: claudes::cli::GenerateArgs) -> ExitCode {
         }
     };
 
-    const SYSTEM_PROMPT: &str = "\
-You generate claudes manifest JSON for running Claude Code tasks in parallel.
-
-Output ONLY valid JSON. No markdown, no explanation, no code fences.
-
-Schema (all optional fields may be omitted):
-{
-  \"version\": 1,
-  \"created_at\": \"<current ISO 8601 datetime>\",
-  \"tasks\": [
-    {
-      \"name\": \"<kebab-case-name>\",
-      \"prompt\": \"<detailed description of exactly what to do>\",
-      \"isolation\": {\"type\": \"worktree\", \"base_dir\": \".worktrees\"},
-      \"model\": \"<optional: claude-sonnet-4-6 or claude-opus-4-6>\",
-      \"max_turns\": null,
-      \"post_hooks\": [\"<optional shell commands run after task succeeds>\"]
-    }
-  ]
-}
-
-Best practices:
-- Use descriptive kebab-case task names (e.g. \"fix-login-bug\", \"add-unit-tests\")
-- Set isolation to worktree so tasks run in parallel without conflicts
-- Write detailed prompts with enough context to complete the task independently
-- Add post_hooks for tasks that should commit and push changes
-- Keep tasks independent; avoid multiple tasks editing the same files";
+    const SYSTEM_PROMPT: &str = include_str!("generate_prompt.md");
 
     // Gather project context unless --no-context.
     let mut full_system_prompt = SYSTEM_PROMPT.to_string();
@@ -686,13 +660,25 @@ Best practices:
 
     let mut query = QueryCommand::new(&user_prompt)
         .system_prompt(&full_system_prompt)
-        .no_session_persistence();
+        .no_session_persistence()
+        .disallowed_tools([
+            "Read",
+            "Edit",
+            "Write",
+            "Bash",
+            "Glob",
+            "Grep",
+            "WebSearch",
+            "WebFetch",
+            "NotebookEdit",
+            "TodoWrite",
+        ]);
 
     if let Some(ref model) = args.model {
         query = query.model(model);
     }
 
-    let result = match query.execute_json(&claude).await {
+    let output = match query.execute(&claude).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: Claude query failed: {e}");
@@ -700,15 +686,34 @@ Best practices:
         }
     };
 
-    let raw = result.result.trim();
+    let raw = output.stdout.trim();
 
-    // Strip markdown code fences if Claude wrapped the output despite instructions.
-    let json_str = if raw.starts_with("```") {
-        let lines: Vec<&str> = raw.lines().collect();
-        lines[1..lines.len().saturating_sub(1)].join("\n")
-    } else {
-        raw.to_string()
-    };
+    tracing::debug!(
+        stdout_len = raw.len(),
+        stderr_len = output.stderr.len(),
+        "generate response"
+    );
+    if raw.is_empty() {
+        if !output.stderr.is_empty() {
+            // The response might be on stderr.
+            eprintln!("error: response was empty on stdout");
+            eprintln!(
+                "stderr ({} bytes): {}",
+                output.stderr.len(),
+                &output.stderr[..output.stderr.len().min(200)]
+            );
+        } else {
+            eprintln!("error: response is empty (no output from claude)");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    // Extract JSON manifest from the response.
+    // Try progressively broader strategies:
+    // 1. Look for {"version" (our manifest always starts with this)
+    // 2. Look for the largest balanced {} block
+    // 3. Fall back to the raw text
+    let json_str = extract_json_manifest(raw);
 
     match serde_json::from_str::<claudes::Manifest>(&json_str) {
         Ok(manifest) => {
@@ -1133,4 +1138,77 @@ fn filter_tasks(manifest: &mut claudes::Manifest, task_names: &[String]) -> Resu
     }
     manifest.tasks.retain(|t| task_names.contains(&t.name));
     Ok(())
+}
+
+/// Extract a JSON manifest from a response that may contain surrounding text.
+///
+/// Tries in order:
+/// 1. Look for `{"version"` or `{"tasks"` (manifest-specific markers)
+/// 2. Look for the largest balanced `{}` block in the text
+/// 3. Fall back to the raw text
+fn extract_json_manifest(raw: &str) -> String {
+    // Strategy 1: find a manifest-specific JSON start.
+    for marker in &[
+        "{\"version\"",
+        "{\"tasks\"",
+        "{\n  \"version\"",
+        "{\n  \"tasks\"",
+    ] {
+        if let Some(start) = raw.find(marker)
+            && let Some(json) = extract_balanced_braces(raw, start)
+        {
+            return json;
+        }
+    }
+
+    // Strategy 2: find the largest balanced {} block.
+    let mut best: Option<String> = None;
+    let mut search_from = 0;
+    while let Some(start) = raw[search_from..].find('{') {
+        let abs_start = search_from + start;
+        if let Some(json) = extract_balanced_braces(raw, abs_start)
+            && best.as_ref().is_none_or(|b| json.len() > b.len())
+        {
+            best = Some(json);
+        }
+        search_from = abs_start + 1;
+    }
+
+    best.unwrap_or_else(|| raw.to_string())
+}
+
+fn extract_balanced_braces(raw: &str, start: usize) -> Option<String> {
+    let bytes = &raw.as_bytes()[start..];
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(raw[start..start + i + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
