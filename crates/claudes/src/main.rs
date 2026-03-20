@@ -78,6 +78,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
 
+        manifest.desugar_chains();
         for warning in manifest.check_file_overlaps() {
             eprintln!("warning: {warning}");
         }
@@ -154,6 +155,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
 
+            manifest.desugar_chains();
             for warning in manifest.check_file_overlaps() {
                 eprintln!("warning: {warning}");
             }
@@ -212,6 +214,7 @@ async fn cmd_run(args: claudes::cli::RunArgs) -> ExitCode {
             .extend(args.skill.iter().cloned());
     }
 
+    manifest.desugar_chains();
     for warning in manifest.check_file_overlaps() {
         eprintln!("warning: {warning}");
     }

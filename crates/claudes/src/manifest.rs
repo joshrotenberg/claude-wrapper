@@ -2503,6 +2503,28 @@ prompt = "do it"
     }
 
     #[test]
+    fn check_file_overlaps_suppressed_when_chain_declares_dependency() {
+        // tasks a and b both touch src/lib.rs, but are sequenced via chains.
+        // Without desugar_chains first, check_file_overlaps would emit a warning.
+        let mut manifest = Manifest::new(vec![
+            Task::new("task-a", "Fix the bug in src/lib.rs"),
+            Task::new("task-b", "Add tests in src/lib.rs"),
+        ]);
+        manifest.chains = Some(vec![vec![
+            ChainStep::Single("task-a".into()),
+            ChainStep::Single("task-b".into()),
+        ]]);
+
+        // Desugar first — this is the ordering fix from issue #442.
+        manifest.desugar_chains();
+        let warnings = manifest.check_file_overlaps();
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings for chain-sequenced tasks, got: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn deserialize_json_without_created_at_uses_default() {
         let json = r#"{
             "version": 1,
