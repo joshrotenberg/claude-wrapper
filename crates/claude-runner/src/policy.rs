@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::workflow::WorkflowTemplate;
+
 /// Per-repository configuration that controls automation behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoPolicy {
@@ -55,6 +57,16 @@ pub struct RepoPolicy {
     /// If set, the value replaces the default generated prompt for that stage.
     #[serde(default)]
     pub stage_prompts: std::collections::HashMap<String, String>,
+
+    /// Default workflow to use when no label matches `workflows`. Falls back to
+    /// `"feature"` if not set.
+    #[serde(default)]
+    pub default_workflow: Option<String>,
+
+    /// Custom workflow templates. These are merged with the built-in templates;
+    /// custom templates shadow built-ins with the same name.
+    #[serde(default)]
+    pub workflow_templates: Vec<WorkflowTemplate>,
 }
 
 fn default_branch_pattern() -> String {
@@ -203,6 +215,8 @@ mod tests {
             model: None,
             validation_commands: vec![],
             stage_prompts: Default::default(),
+            default_workflow: None,
+            workflow_templates: vec![],
         };
         let issue = make_issue(42, "fix: handle the thing");
         let branch = policy.branch_for_issue(&issue);
@@ -256,6 +270,8 @@ mod tests {
             model: None,
             validation_commands: vec![],
             stage_prompts: Default::default(),
+            default_workflow: None,
+            workflow_templates: vec![],
         };
         let issue = make_issue(471, &"a".repeat(200));
         let branch = policy.branch_for_issue(&issue);

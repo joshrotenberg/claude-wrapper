@@ -66,45 +66,41 @@ pub enum StageKind {
 }
 
 /// Select a workflow template for an issue based on labels and policy.
+///
+/// Resolution order:
+/// 1. For each issue label, check `policy.workflows` for a template name; if
+///    found, resolve it against custom then built-in templates.
+/// 2. Fall back to `policy.default_workflow` (if set) or `"feature"`, again
+///    resolved against custom then built-in templates.
 pub fn select_workflow(
     issue: &crate::github::IssueCandidate,
     policy: &crate::policy::RepoPolicy,
 ) -> WorkflowTemplate {
-    // Check policy workflow mappings first.
+    // Merge custom and built-in templates; custom templates shadow built-ins.
+    let all: Vec<WorkflowTemplate> = {
+        let mut v = policy.workflow_templates.clone();
+        for builtin in builtin_templates() {
+            if !v.iter().any(|t| t.name == builtin.name) {
+                v.push(builtin);
+            }
+        }
+        v
+    };
+
+    // Check policy workflow label mappings first.
     for label in &issue.labels {
         if let Some(template_name) = policy.workflows.get(label)
-            && let Some(template) = builtin_templates()
-                .into_iter()
-                .find(|t| t.name == *template_name)
+            && let Some(template) = all.iter().find(|t| t.name == *template_name)
         {
-            return template;
+            return template.clone();
         }
     }
 
-    // Infer from title prefix.
-    let lower_title = issue.title.to_lowercase();
-    let inferred = if lower_title.starts_with("fix")
-        || lower_title.starts_with("bug")
-        || lower_title.contains("bug:")
-    {
-        "bug"
-    } else if lower_title.starts_with("chore")
-        || lower_title.starts_with("refactor")
-        || lower_title.contains("chore:")
-    {
-        "chore"
-    } else if lower_title.starts_with("research")
-        || lower_title.starts_with("discuss")
-        || lower_title.contains("research:")
-    {
-        "research"
-    } else {
-        "feature"
-    };
-
-    builtin_templates()
-        .into_iter()
-        .find(|t| t.name == inferred)
+    // Fall back to configured default or "feature".
+    let default_name = policy.default_workflow.as_deref().unwrap_or("feature");
+    all.iter()
+        .find(|t| t.name == default_name)
+        .cloned()
         .unwrap_or_else(|| {
             builtin_templates()
                 .into_iter()
@@ -332,5 +328,101 @@ mod tests {
 
         assert_eq!(template.stages[0].kind, StageKind::Clarify);
         assert_eq!(template.stages[1].kind, StageKind::Plan);
+    }
+
+    fn make_policy(
+        workflows: std::collections::HashMap<String, String>,
+        default_workflow: Option<String>,
+        workflow_templates: Vec<WorkflowTemplate>,
+    ) -> crate::policy::RepoPolicy {
+        crate::policy::RepoPolicy {
+            repo: "owner/repo".to_string(),
+            eligible_labels: vec![],
+            exclude_labels: vec![],
+            workflows,
+            branch_pattern: "automation/{issue}-{slug}".to_string(),
+            max_concurrency: 3,
+            concurrency: Default::default(),
+            auto_merge: false,
+            agent: "claude".to_string(),
+            model: None,
+            validation_commands: vec![],
+            stage_prompts: Default::default(),
+            default_workflow,
+            workflow_templates,
+        }
+    }
+
+    fn make_issue(labels: Vec<String>) -> crate::github::IssueCandidate {
+        crate::github::IssueCandidate {
+            number: 1,
+            repo: "owner/repo".to_string(),
+            title: "some issue".to_string(),
+            body: String::new(),
+            labels,
+            state: "open".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            is_assigned: false,
+            html_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn label_mapping_selects_bug_workflow() {
+        let mut workflows = std::collections::HashMap::new();
+        workflows.insert("bug".to_string(), "bug".to_string());
+        let policy = make_policy(workflows, None, vec![]);
+        let issue = make_issue(vec!["bug".to_string()]);
+        let tmpl = select_workflow(&issue, &policy);
+        assert_eq!(tmpl.name, "bug");
+    }
+
+    #[test]
+    fn no_label_match_falls_back_to_default_workflow() {
+        let policy = make_policy(Default::default(), Some("chore".to_string()), vec![]);
+        let issue = make_issue(vec![]);
+        let tmpl = select_workflow(&issue, &policy);
+        assert_eq!(tmpl.name, "chore");
+    }
+
+    #[test]
+    fn no_label_no_default_falls_back_to_feature() {
+        let policy = make_policy(Default::default(), None, vec![]);
+        let issue = make_issue(vec![]);
+        let tmpl = select_workflow(&issue, &policy);
+        assert_eq!(tmpl.name, "feature");
+    }
+
+    #[test]
+    fn title_prefix_does_not_affect_selection() {
+        // Issues titled like "fix: ..." should still get "feature" without a label mapping.
+        let policy = make_policy(Default::default(), None, vec![]);
+        let mut issue = make_issue(vec![]);
+        issue.title = "fix: some bug".to_string();
+        let tmpl = select_workflow(&issue, &policy);
+        assert_eq!(tmpl.name, "feature");
+    }
+
+    #[test]
+    fn custom_template_shadows_builtin() {
+        let custom = WorkflowTemplate {
+            name: "bug".to_string(),
+            stages: vec![Stage {
+                kind: StageKind::Comment,
+                optional: false,
+                max_retries: 1,
+                timeout_secs: None,
+                condition: None,
+            }],
+        };
+        let mut workflows = std::collections::HashMap::new();
+        workflows.insert("bug".to_string(), "bug".to_string());
+        let policy = make_policy(workflows, None, vec![custom]);
+        let issue = make_issue(vec!["bug".to_string()]);
+        let tmpl = select_workflow(&issue, &policy);
+        assert_eq!(tmpl.name, "bug");
+        assert_eq!(tmpl.stages.len(), 1);
+        assert_eq!(tmpl.stages[0].kind, StageKind::Comment);
     }
 }
