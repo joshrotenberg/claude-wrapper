@@ -1,0 +1,13 @@
+repo = "joshrotenberg/claude-wrapper"
+eligible_labels = ["bug", "enhancement"]
+exclude_labels = ["blocked", "needs-design"]
+branch_pattern = "automation/{issue}-{slug}"
+max_concurrency = 3
+auto_merge = false
+agent = "claude"
+model = "claude-sonnet-4-6"
+validation_commands = [
+    "cargo fmt --all -- --check",
+    "cargo clippy --all-targets -- -D warnings",
+    "cargo test --lib",
+]

@@ -60,6 +60,54 @@ pub enum StageKind {
     Comment,
 }
 
+/// Select a workflow template for an issue based on labels and policy.
+pub fn select_workflow(
+    issue: &crate::github::IssueCandidate,
+    policy: &crate::policy::RepoPolicy,
+) -> WorkflowTemplate {
+    // Check policy workflow mappings first.
+    for label in &issue.labels {
+        if let Some(template_name) = policy.workflows.get(label)
+            && let Some(template) = builtin_templates()
+                .into_iter()
+                .find(|t| t.name == *template_name)
+        {
+            return template;
+        }
+    }
+
+    // Infer from title prefix.
+    let lower_title = issue.title.to_lowercase();
+    let inferred = if lower_title.starts_with("fix")
+        || lower_title.starts_with("bug")
+        || lower_title.contains("bug:")
+    {
+        "bug"
+    } else if lower_title.starts_with("chore")
+        || lower_title.starts_with("refactor")
+        || lower_title.contains("chore:")
+    {
+        "chore"
+    } else if lower_title.starts_with("research")
+        || lower_title.starts_with("discuss")
+        || lower_title.contains("research:")
+    {
+        "research"
+    } else {
+        "feature"
+    };
+
+    builtin_templates()
+        .into_iter()
+        .find(|t| t.name == inferred)
+        .unwrap_or_else(|| {
+            builtin_templates()
+                .into_iter()
+                .find(|t| t.name == "feature")
+                .unwrap()
+        })
+}
+
 /// Built-in workflow templates.
 pub fn builtin_templates() -> Vec<WorkflowTemplate> {
     vec![

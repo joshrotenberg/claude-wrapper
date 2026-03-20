@@ -64,4 +64,26 @@ impl RepoPolicy {
         let content = std::fs::read_to_string(path)?;
         toml::from_str(&content).map_err(|e| crate::error::Error::Policy(e.to_string()))
     }
+
+    /// Generate a branch name for an issue based on the pattern.
+    pub fn branch_for_issue(&self, issue: &crate::github::IssueCandidate) -> String {
+        let slug: String = issue
+            .title
+            .chars()
+            .take(40)
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+
+        self.branch_pattern
+            .replace("{issue}", &issue.number.to_string())
+            .replace("{slug}", &slug)
+    }
 }

@@ -39,6 +39,26 @@ pub struct PlannedStage {
     pub max_retries: u32,
 }
 
+impl PlannedStage {
+    /// Human-readable name for this stage kind.
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            StageKind::Triage => "triage",
+            StageKind::Clarify => "clarify",
+            StageKind::Plan => "plan",
+            StageKind::Implement => "implement",
+            StageKind::Test => "test",
+            StageKind::Review => "review",
+            StageKind::OpenPr => "open_pr",
+            StageKind::RevisePr => "revise_pr",
+            StageKind::FixCi => "fix_ci",
+            StageKind::Merge => "merge",
+            StageKind::Research => "research",
+            StageKind::Comment => "comment",
+        }
+    }
+}
+
 /// Generate a work plan from an issue and workflow template.
 pub fn create_plan(issue: &IssueCandidate, template: &WorkflowTemplate, branch: &str) -> WorkPlan {
     let stages = template

@@ -18,8 +18,11 @@ pub mod error;
 pub mod executor;
 pub mod github;
 pub mod isolation;
+pub mod orchestrator;
 pub mod planner;
 pub mod policy;
 pub mod state;
 pub mod triage;
 pub mod workflow;
+
+pub use orchestrator::{process_batch, process_issue};
