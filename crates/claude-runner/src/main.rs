@@ -152,7 +152,7 @@ async fn cmd_issue(args: IssueArgs, config: &claude_runner::RunnerConfig) -> Exi
         };
 
         let branch = config.branch_for_issue(&issue);
-        let plan = claude_runner::planner::create_plan(&issue, &template, &branch);
+        let plan = claude_runner::planner::create_plan(&issue, &template, &branch, None);
 
         println!("Issue:    #{} — {}", issue.number, issue.title);
         println!("Route:    {route_name}");
