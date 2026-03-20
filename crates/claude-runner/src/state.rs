@@ -203,6 +203,57 @@ pub fn load_run(run_id: &str, state_dir: &std::path::Path) -> Option<RunRecord> 
     serde_json::from_str(&content).ok()
 }
 
+/// Cost estimate derived from historical runs of the same workflow type.
+#[derive(Debug, Clone)]
+pub struct CostEstimate {
+    /// Minimum cost seen.
+    pub min: f64,
+    /// Maximum cost seen.
+    pub max: f64,
+    /// Average cost.
+    pub avg: f64,
+    /// Number of historical runs used.
+    pub count: usize,
+    /// Workflow name.
+    pub workflow: String,
+}
+
+/// Compute a cost estimate from previous completed runs of the same workflow type.
+///
+/// Returns `None` if no historical data is available.
+pub fn estimate_cost(workflow: &str, state_dir: &std::path::Path) -> Option<CostEstimate> {
+    let entries = std::fs::read_dir(state_dir).ok()?;
+    let costs: Vec<f64> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter_map(|e| {
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            let record: RunRecord = serde_json::from_str(&content).ok()?;
+            if record.workflow == workflow && record.status == RunStatus::Succeeded {
+                record.total_cost_usd
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if costs.is_empty() {
+        return None;
+    }
+
+    let min = costs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = costs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let avg = costs.iter().sum::<f64>() / costs.len() as f64;
+
+    Some(CostEstimate {
+        min,
+        max,
+        avg,
+        count: costs.len(),
+        workflow: workflow.to_string(),
+    })
+}
+
 fn generate_run_id() -> String {
     let now = chrono::Utc::now();
     let timestamp = now.format("%Y%m%d-%H%M%S");
@@ -212,4 +263,104 @@ fn generate_run_id() -> String {
         .as_nanos() as u64;
     let suffix = (nanos ^ (nanos >> 24)) & 0xFFFF_FFFF;
     format!("run-{timestamp}-{suffix:08x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_record(workflow: &str, status: RunStatus, cost: Option<f64>) -> RunRecord {
+        RunRecord {
+            run_id: generate_run_id(),
+            repo: "owner/repo".into(),
+            issue_number: 1,
+            status,
+            workflow: workflow.to_string(),
+            branch: "fix/test".into(),
+            pr_number: None,
+            stages: Vec::new(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            total_cost_usd: cost,
+        }
+    }
+
+    #[test]
+    fn estimate_cost_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(estimate_cost("bug", dir.path()).is_none());
+    }
+
+    #[test]
+    fn estimate_cost_no_matching_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = make_record("feature", RunStatus::Succeeded, Some(1.00));
+        save_run(&record, dir.path()).unwrap();
+        assert!(estimate_cost("bug", dir.path()).is_none());
+    }
+
+    #[test]
+    fn estimate_cost_excludes_failed_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = make_record("bug", RunStatus::Failed, Some(0.50));
+        save_run(&record, dir.path()).unwrap();
+        assert!(estimate_cost("bug", dir.path()).is_none());
+    }
+
+    #[test]
+    fn estimate_cost_excludes_runs_without_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = make_record("bug", RunStatus::Succeeded, None);
+        save_run(&record, dir.path()).unwrap();
+        assert!(estimate_cost("bug", dir.path()).is_none());
+    }
+
+    #[test]
+    fn estimate_cost_single_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = make_record("bug", RunStatus::Succeeded, Some(1.05));
+        save_run(&record, dir.path()).unwrap();
+        let est = estimate_cost("bug", dir.path()).unwrap();
+        assert_eq!(est.count, 1);
+        assert!((est.min - 1.05).abs() < 1e-9);
+        assert!((est.max - 1.05).abs() < 1e-9);
+        assert!((est.avg - 1.05).abs() < 1e-9);
+        assert_eq!(est.workflow, "bug");
+    }
+
+    #[test]
+    fn estimate_cost_multiple_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        for cost in [0.70, 1.05, 1.50] {
+            // Need unique run IDs — generate_run_id uses nanos so sleep briefly
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let record = make_record("bug", RunStatus::Succeeded, Some(cost));
+            save_run(&record, dir.path()).unwrap();
+        }
+        let est = estimate_cost("bug", dir.path()).unwrap();
+        assert_eq!(est.count, 3);
+        assert!((est.min - 0.70).abs() < 1e-9);
+        assert!((est.max - 1.50).abs() < 1e-9);
+        assert!((est.avg - 1.0833333333333333).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimate_cost_mixed_workflows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let r1 = make_record("bug", RunStatus::Succeeded, Some(0.80));
+        save_run(&r1, dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let r2 = make_record("feature", RunStatus::Succeeded, Some(2.00));
+        save_run(&r2, dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let r3 = make_record("bug", RunStatus::Succeeded, Some(1.20));
+        save_run(&r3, dir.path()).unwrap();
+
+        let est = estimate_cost("bug", dir.path()).unwrap();
+        assert_eq!(est.count, 2);
+        assert!((est.min - 0.80).abs() < 1e-9);
+        assert!((est.max - 1.20).abs() < 1e-9);
+        assert!((est.avg - 1.00).abs() < 1e-9);
+    }
 }
