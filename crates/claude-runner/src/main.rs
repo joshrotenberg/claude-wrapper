@@ -150,6 +150,13 @@ async fn cmd_issue(args: IssueArgs) -> ExitCode {
             let optional = if stage.optional { " (optional)" } else { "" };
             println!("  {}. {}{optional}", i + 1, stage.kind_name());
         }
+        match claude_runner::state::estimate_cost(&template.name, &sd) {
+            Some(est) => println!(
+                "Estimated cost: ${:.2} - ${:.2} (avg ${:.2}, based on {} previous {} runs)",
+                est.min, est.max, est.avg, est.count, est.workflow
+            ),
+            None => println!("Estimated cost: no estimate available"),
+        }
         return ExitCode::SUCCESS;
     }
 
