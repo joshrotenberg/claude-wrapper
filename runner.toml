@@ -1,21 +1,30 @@
+[global]
 repo = "joshrotenberg/claude-wrapper"
-eligible_labels = ["runner:ready"]
-exclude_labels = ["blocked", "needs-design", "runner:in-progress", "runner:complete"]
-branch_pattern = "automation/{issue}-{slug}"
 max_concurrency = 3
-auto_merge = false
-agent = "claude"
 model = "claude-sonnet-4-6"
-validation_commands = [
+gate_label = "runner:ready"
+branch_pattern = "automation/{issue}-{slug}"
+
+[security]
+authorization_level = "contributor"
+
+[validation]
+commands = [
     "cargo fmt --all -- --check",
     "cargo clippy --all-targets -- -D warnings",
     "cargo test --lib",
 ]
 
-# Per-workflow concurrency limits.
-# 0 = unlimited (up to the global max_concurrency cap).
-# Workflows not listed here default to unlimited.
-[concurrency]
-bug = 1
-feature = 2
-research = 0
+[routes.bugfix]
+type = "issue"
+label = "bug"
+workflow = "bug"
+concurrency = 1
+poll_interval = 60
+
+[routes.features]
+type = "issue"
+label = "enhancement"
+workflow = "feature"
+concurrency = 2
+poll_interval = 300

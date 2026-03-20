@@ -15,6 +15,10 @@ use tracing::info;
         Agent-agnostic: uses Claude by default, pluggable for other agents."
 )]
 struct Cli {
+    /// Path to config file.
+    #[arg(long, short, default_value = "runner.toml", global = true)]
+    config: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -33,15 +37,8 @@ enum Command {
 
 #[derive(Debug, Parser)]
 struct IssueArgs {
-    /// Repository in owner/name format.
-    #[arg(long)]
-    repo: String,
     /// Issue number to process.
-    #[arg(long)]
     number: u64,
-    /// Path to policy config file.
-    #[arg(long, default_value = "runner.toml")]
-    config: PathBuf,
     /// Repository directory (default: current directory).
     #[arg(long)]
     repo_dir: Option<PathBuf>,
@@ -52,12 +49,6 @@ struct IssueArgs {
 
 #[derive(Debug, Parser)]
 struct RunArgs {
-    /// Repository in owner/name format.
-    #[arg(long)]
-    repo: String,
-    /// Path to policy config file.
-    #[arg(long, default_value = "runner.toml")]
-    config: PathBuf,
     /// Repository directory.
     #[arg(long)]
     repo_dir: Option<PathBuf>,
@@ -65,15 +56,12 @@ struct RunArgs {
 
 #[derive(Debug, Parser)]
 struct WatchArgs {
-    /// Repository in owner/name format.
+    /// Override poll interval in seconds (uses per-route intervals by default).
     #[arg(long)]
-    repo: String,
-    /// Path to policy config file.
-    #[arg(long, default_value = "runner.toml")]
-    config: PathBuf,
-    /// Poll interval in seconds.
-    #[arg(long, default_value = "300")]
-    interval: u64,
+    interval: Option<u64>,
+    /// Only run a specific route.
+    #[arg(long)]
+    route: Option<String>,
     /// Repository directory.
     #[arg(long)]
     repo_dir: Option<PathBuf>,
@@ -84,9 +72,6 @@ struct StatusArgs {
     /// Show a specific run by ID.
     #[arg(long)]
     run_id: Option<String>,
-    /// State directory.
-    #[arg(long)]
-    state_dir: Option<PathBuf>,
 }
 
 fn state_dir() -> PathBuf {
@@ -96,9 +81,20 @@ fn state_dir() -> PathBuf {
         .join("runs")
 }
 
-fn repo_dir(arg: &Option<PathBuf>) -> PathBuf {
+fn repo_dir(arg: &Option<PathBuf>, config: &claude_runner::RunnerConfig) -> PathBuf {
     arg.clone()
+        .or_else(|| config.global.repo_dir.as_ref().map(PathBuf::from))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn load_config(path: &std::path::Path) -> Result<claude_runner::RunnerConfig, ExitCode> {
+    match claude_runner::RunnerConfig::from_file(path) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            eprintln!("error loading config {}: {e}", path.display());
+            Err(ExitCode::FAILURE)
+        }
+    }
 }
 
 #[tokio::main]
@@ -108,97 +104,81 @@ async fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+    let config = match load_config(&cli.config) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
 
     match cli.command {
-        Command::Issue(args) => cmd_issue(args).await,
-        Command::Run(args) => cmd_run(args).await,
-        Command::Watch(args) => cmd_watch(args).await,
+        Command::Issue(args) => cmd_issue(args, &config).await,
+        Command::Run(args) => cmd_run(args, &config).await,
+        Command::Watch(args) => cmd_watch(args, &config).await,
         Command::Status(args) => cmd_status(args),
     }
 }
 
-async fn cmd_issue(args: IssueArgs) -> ExitCode {
-    let policy = match claude_runner::policy::RepoPolicy::from_file(&args.config) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error loading config: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let rd = repo_dir(&args.repo_dir);
+async fn cmd_issue(args: IssueArgs, config: &claude_runner::RunnerConfig) -> ExitCode {
+    let rd = repo_dir(&args.repo_dir, config);
     let sd = state_dir();
 
     if args.dry_run {
-        // Fetch and show the plan without executing.
-        let issue = match claude_runner::github::fetch_issue(&args.repo, args.number).await {
+        let issue = match claude_runner::github::fetch_issue(&config.global.repo, args.number).await
+        {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("error: {e}");
                 return ExitCode::FAILURE;
             }
         };
-        let template = claude_runner::workflow::select_workflow(&issue, &policy);
-        let branch = policy.branch_for_issue(&issue);
+
+        // Match route.
+        let (route_name, route) = match config.match_route(&issue) {
+            Some(r) => r,
+            None => {
+                eprintln!(
+                    "no route matches issue #{} (labels: {:?})",
+                    issue.number, issue.labels
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let template = match config.resolve_workflow(&route.workflow) {
+            Some(t) => t,
+            None => {
+                eprintln!("unknown workflow: {}", route.workflow);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let branch = config.branch_for_issue(&issue);
         let plan = claude_runner::planner::create_plan(&issue, &template, &branch);
 
-        println!("Issue: #{} — {}", issue.number, issue.title);
+        println!("Issue:    #{} — {}", issue.number, issue.title);
+        println!("Route:    {route_name}");
         println!("Workflow: {}", template.name);
-        println!("Branch: {branch}");
+        println!("Branch:   {branch}");
+        if let Some(model) = config.effective_model(route) {
+            println!("Model:    {model}");
+        }
         println!("Stages:");
         for (i, stage) in plan.stages.iter().enumerate() {
             let optional = if stage.optional { " (optional)" } else { "" };
             println!("  {}. {}{optional}", i + 1, stage.kind_name());
         }
-        match claude_runner::state::estimate_cost(&template.name, &sd) {
-            Some(est) => println!(
+        if let Some(est) = claude_runner::state::estimate_cost(&template.name, &sd) {
+            println!(
                 "Estimated cost: ${:.2} - ${:.2} (avg ${:.2}, based on {} previous {} runs)",
                 est.min, est.max, est.avg, est.count, est.workflow
-            ),
-            None => println!("Estimated cost: no estimate available"),
+            );
         }
         return ExitCode::SUCCESS;
     }
 
-    match claude_runner::process_issue(&args.repo, args.number, &policy, &sd, &rd).await {
-        Ok(record) => {
-            println!();
-            println!(
-                "Run {} — {} (issue #{})",
-                record.run_id,
-                record.status_text(),
-                record.issue_number
-            );
-            for stage in &record.stages {
-                let cost = stage
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.cost_usd)
-                    .map(|c| format!("  ${c:.2}"))
-                    .unwrap_or_default();
-                let duration = stage
-                    .result
-                    .as_ref()
-                    .map(|r| format!("  {:.0}s", r.duration_secs))
-                    .unwrap_or_default();
-                println!(
-                    "  {:<15} {:?}{duration}{cost}",
-                    stage.kind_name(),
-                    stage.status
-                );
-            }
-            if let Some(pr) = record.pr_number {
-                println!("PR: #{pr}");
-            }
-            if let Some(cost) = record.total_cost_usd {
-                println!("Total cost: ${cost:.2}");
-            }
-            if record.status == claude_runner::state::RunStatus::Succeeded {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+    match claude_runner::orchestrator::process_issue_with_config(args.number, config, &sd, &rd)
+        .await
+    {
+        Ok(record) => print_run_result(&record),
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -206,32 +186,24 @@ async fn cmd_issue(args: IssueArgs) -> ExitCode {
     }
 }
 
-async fn cmd_run(args: RunArgs) -> ExitCode {
-    let policy = match claude_runner::policy::RepoPolicy::from_file(&args.config) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error loading config: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let rd = repo_dir(&args.repo_dir);
+async fn cmd_run(args: RunArgs, config: &claude_runner::RunnerConfig) -> ExitCode {
+    let rd = repo_dir(&args.repo_dir, config);
     let sd = state_dir();
 
-    let records = claude_runner::process_batch(&args.repo, &policy, &sd, &rd).await;
+    let records = claude_runner::orchestrator::process_batch_with_config(config, &sd, &rd).await;
 
     println!();
+    let succeeded = records
+        .iter()
+        .filter(|r| r.status == claude_runner::state::RunStatus::Succeeded)
+        .count();
+    let failed = records
+        .iter()
+        .filter(|r| r.status == claude_runner::state::RunStatus::Failed)
+        .count();
     println!(
-        "Processed {} issues: {} succeeded, {} failed",
-        records.len(),
-        records
-            .iter()
-            .filter(|r| r.status == claude_runner::state::RunStatus::Succeeded)
-            .count(),
-        records
-            .iter()
-            .filter(|r| r.status == claude_runner::state::RunStatus::Failed)
-            .count(),
+        "Processed {} issues: {succeeded} succeeded, {failed} failed",
+        records.len()
     );
 
     if records
@@ -244,43 +216,41 @@ async fn cmd_run(args: RunArgs) -> ExitCode {
     }
 }
 
-async fn cmd_watch(args: WatchArgs) -> ExitCode {
-    let policy = match claude_runner::policy::RepoPolicy::from_file(&args.config) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error loading config: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let rd = repo_dir(&args.repo_dir);
+async fn cmd_watch(args: WatchArgs, config: &claude_runner::RunnerConfig) -> ExitCode {
+    let rd = repo_dir(&args.repo_dir, config);
     let sd = state_dir();
-    let interval = std::time::Duration::from_secs(args.interval);
+
+    // Use the override interval or the minimum interval across matched routes.
+    let interval = args.interval.unwrap_or(60);
+    let interval_dur = std::time::Duration::from_secs(interval);
 
     info!(
-        repo = args.repo,
-        interval_secs = args.interval,
+        repo = config.global.repo,
+        interval_secs = interval,
+        routes = config.routes.len(),
         "starting watch mode"
     );
 
     loop {
-        let records = claude_runner::process_batch(&args.repo, &policy, &sd, &rd).await;
+        let records =
+            claude_runner::orchestrator::process_batch_with_config(config, &sd, &rd).await;
         if !records.is_empty() {
+            let succeeded = records
+                .iter()
+                .filter(|r| r.status == claude_runner::state::RunStatus::Succeeded)
+                .count();
             info!(
                 processed = records.len(),
-                succeeded = records
-                    .iter()
-                    .filter(|r| r.status == claude_runner::state::RunStatus::Succeeded)
-                    .count(),
+                succeeded = succeeded,
                 "batch complete"
             );
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(interval_dur).await;
     }
 }
 
 fn cmd_status(args: StatusArgs) -> ExitCode {
-    let sd = args.state_dir.unwrap_or_else(state_dir);
+    let sd = state_dir();
 
     if let Some(ref run_id) = args.run_id {
         match claude_runner::state::load_run(run_id, &sd) {
@@ -295,14 +265,50 @@ fn cmd_status(args: StatusArgs) -> ExitCode {
         }
     } else {
         match claude_runner::state::load_latest(&sd) {
-            Some(record) => {
-                println!("{}", serde_json::to_string_pretty(&record).unwrap());
-                ExitCode::SUCCESS
-            }
+            Some(record) => print_run_result(&record),
             None => {
                 eprintln!("no runs found");
                 ExitCode::FAILURE
             }
         }
+    }
+}
+
+fn print_run_result(record: &claude_runner::state::RunRecord) -> ExitCode {
+    println!();
+    println!(
+        "Run {} — {} (issue #{})",
+        record.run_id,
+        record.status_text(),
+        record.issue_number
+    );
+    for stage in &record.stages {
+        let cost = stage
+            .result
+            .as_ref()
+            .and_then(|r| r.cost_usd)
+            .map(|c| format!("  ${c:.2}"))
+            .unwrap_or_default();
+        let duration = stage
+            .result
+            .as_ref()
+            .map(|r| format!("  {:.0}s", r.duration_secs))
+            .unwrap_or_default();
+        println!(
+            "  {:<15} {:?}{duration}{cost}",
+            stage.kind_name(),
+            stage.status
+        );
+    }
+    if let Some(pr) = record.pr_number {
+        println!("PR: #{pr}");
+    }
+    if let Some(cost) = record.total_cost_usd {
+        println!("Total cost: ${cost:.2}");
+    }
+    if record.status == claude_runner::state::RunStatus::Succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
