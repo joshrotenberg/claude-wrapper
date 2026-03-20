@@ -14,6 +14,7 @@
 //! - **Domain** (`policy`, `triage`, `planner`, `workflow`): Orchestration logic
 //! - **Execution** (`executor`, `isolation`): Agent invocation and work isolation
 
+pub mod config;
 pub mod error;
 pub mod executor;
 pub mod github;
@@ -25,4 +26,5 @@ pub mod state;
 pub mod triage;
 pub mod workflow;
 
+pub use config::RunnerConfig;
 pub use orchestrator::{process_batch, process_issue};

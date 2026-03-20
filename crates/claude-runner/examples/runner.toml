@@ -1,0 +1,185 @@
+# claude-runner configuration
+#
+# The runner watches GitHub for labeled issues and PRs, then processes them
+# through configurable workflow templates. Each route is a named lane with
+# its own label trigger, workflow, concurrency, and polling frequency.
+
+# ── Global settings ──────────────────────────────────────────────────
+
+[global]
+# Repository to watch (owner/name format).
+repo = "joshrotenberg/claude-wrapper"
+
+# Local checkout path. Default: current directory.
+# repo_dir = "/path/to/checkout"
+
+# Maximum concurrent runs across all routes.
+max_concurrency = 5
+
+# Cost guardrails.
+max_cost_per_issue = 5.00     # fail if a single issue exceeds this
+max_cost_per_hour = 20.00     # pause all routes if hourly spend exceeds this
+
+# Default agent and model (overridable per route).
+agent = "claude"
+model = "claude-sonnet-4-6"
+
+# Gate label — only process issues/PRs with this label.
+# Provides explicit opt-in. Remove to process all matching routes.
+gate_label = "runner:ready"
+
+# Lease labels (managed automatically).
+# in_progress_label = "runner:in-progress"
+# complete_label = "runner:complete"
+# failed_label = "runner:failed"
+
+# Default branch pattern. {issue} = number, {slug} = slugified title.
+branch_pattern = "automation/{issue}-{slug}"
+
+# Default workflow when an issue matches no route label.
+# Set to skip issues that don't match any route.
+# default_workflow = "feature"
+
+# Stale lease timeout in seconds. If a runner:in-progress label has been
+# on an issue longer than this, it's considered abandoned and re-eligible.
+# Default: 3600 (1 hour).
+# stale_lease_timeout = 3600
+
+# Notifications on completion.
+# [global.notifications]
+# on_success = "desktop"
+# on_failure = ["desktop", "slack"]
+# slack_webhook = "https://hooks.slack.com/..."
+
+# ── Security ─────────────────────────────────────────────────────────
+
+[security]
+# Authorization level: sandbox, local, contributor, trusted
+authorization_level = "contributor"
+
+# Only process issues from these authors. Empty = authenticated user only.
+allowed_authors = []
+
+# ── Validation ───────────────────────────────────────────────────────
+
+# Commands run between stages (in addition to per-stage hooks).
+[validation]
+commands = [
+    "cargo fmt --all -- --check",
+    "cargo clippy --all-targets -- -D warnings",
+    "cargo test --lib",
+]
+
+# ── Routes ───────────────────────────────────────────────────────────
+#
+# Each route maps a type (issue/pr) + label to a workflow template.
+# Routes have independent concurrency and polling frequency.
+
+[routes.bugfix]
+type = "issue"
+label = "bug"
+workflow = "bug"
+concurrency = 1           # one bug at a time (avoid conflicts)
+poll_interval = 60        # check every minute (bugs are urgent)
+# model = "claude-opus-4-6"  # override model for complex bugs
+# skills = ["./skills/debugging.md"]
+# validation_commands = ["cargo test --lib"]  # override global validation
+
+[routes.features]
+type = "issue"
+label = "enhancement"
+workflow = "feature"
+concurrency = 2           # two features in parallel
+poll_interval = 300       # check every 5 minutes
+
+[routes.chores]
+type = "issue"
+label = "chore"
+workflow = "chore"
+concurrency = 3           # chores are low-risk, parallelize freely
+poll_interval = 600       # check every 10 minutes
+
+[routes.research]
+type = "issue"
+label = "research"
+workflow = "research"
+concurrency = 3           # no git state, safe to parallelize
+poll_interval = 3600      # check hourly (not urgent)
+
+[routes.ci-repair]
+type = "pr"
+label = "ci-fix"
+workflow = "pr-fix-ci"
+concurrency = 5           # fix CI aggressively
+poll_interval = 30        # check every 30 seconds
+
+[routes.review]
+type = "pr"
+label = "needs-review"
+workflow = "pr-review"
+concurrency = 2
+poll_interval = 120       # check every 2 minutes
+
+# ── Workflow templates ───────────────────────────────────────────────
+#
+# Built-in templates: bug, feature, chore, research
+# Define custom templates here. Custom overrides built-in with same name.
+
+[[workflow_templates]]
+name = "hotfix"
+stages = [
+    { kind = "implement", max_retries = 1 },
+    { kind = "test", max_retries = 2 },
+    { kind = "open_pr" },
+]
+
+[[workflow_templates]]
+name = "discuss"
+stages = [
+    { kind = "research" },
+    { kind = "comment" },
+]
+
+[[workflow_templates]]
+name = "pr-fix-ci"
+stages = [
+    { kind = "fix_ci", max_retries = 2 },
+    { kind = "test" },
+]
+
+[[workflow_templates]]
+name = "pr-review"
+stages = [
+    { kind = "review" },
+    { kind = "comment" },
+]
+
+# ── Stage prompt overrides ───────────────────────────────────────────
+#
+# Override built-in stage prompts with files. Supports {issue_number},
+# {issue_title}, {issue_body}, {branch}, {repo} variables.
+
+# [prompt_templates]
+# plan = "prompts/plan.md"
+# implement = "prompts/implement.md"
+# review = "prompts/review.md"
+
+# ── Agent config ─────────────────────────────────────────────────────
+#
+# Skills and MCP servers available to all stages.
+
+# [agent_config]
+# skills = ["./skills/rust-workspace.md"]
+# mcp_config = ".mcp.json"
+# append_system_prompt = "Project-specific rules."
+
+# ── Per-stage hooks ──────────────────────────────────────────────────
+
+# [stage_hooks.implement]
+# post = ["cargo fmt --all"]
+
+# [stage_hooks.test]
+# post = ["cargo test --lib"]
+
+# [stage_hooks.open_pr]
+# pre = ["cargo test --all-features"]
