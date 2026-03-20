@@ -269,9 +269,17 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         let mut failed_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut task_work_dirs: std::collections::HashMap<String, PathBuf> =
             std::collections::HashMap::new();
+        let mut task_branches: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
 
         for layer in layers {
             let mut join_set = JoinSet::new();
+
+            // Snapshot branch names before consuming tasks in the loop.
+            let layer_branch_map: std::collections::HashMap<String, Option<String>> = layer
+                .iter()
+                .map(|t| (t.name.clone(), t.branch.clone()))
+                .collect();
 
             for task in layer {
                 // Check if any dependency failed — if so, skip this task.
@@ -357,8 +365,26 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                     ));
                 }
 
+                // Check if any dependency used the same branch and has a worktree
+                // we can reuse (avoids git error when branch is already checked out).
+                let reuse_work_dir = if let Some(branch) = &task.branch
+                    && let Some(deps) = &task.depends_on
+                {
+                    deps.iter().find_map(|dep| {
+                        if let Some(Some(dep_branch)) = task_branches.get(dep)
+                            && dep_branch == branch
+                        {
+                            task_work_dirs.get(dep).cloned()
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
                 let options = options.clone();
-                join_set.spawn(async move { run_task(&task, &options).await });
+                join_set.spawn(async move { run_task(&task, &options, reuse_work_dir).await });
             }
 
             while let Some(result) = join_set.join_next().await {
@@ -370,6 +396,9 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
                         }
                         task_work_dirs
                             .insert(task_result.name.clone(), task_result.work_dir.clone());
+                        if let Some(branch) = layer_branch_map.get(&task_result.name) {
+                            task_branches.insert(task_result.name.clone(), branch.clone());
+                        }
                         results.push(task_result);
                     }
                     Err(join_err) => {
@@ -385,7 +414,7 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
         for task in &manifest.tasks {
             let task = task.clone();
             let options = options.clone();
-            join_set.spawn(async move { run_task(&task, &options).await });
+            join_set.spawn(async move { run_task(&task, &options, None).await });
         }
 
         while let Some(result) = join_set.join_next().await {
@@ -401,14 +430,16 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
     crate::state::clear_running(&options.project_dir);
 
     // Auto-cleanup worktrees based on policy.
+    // Deduplicate by work_dir to avoid double-removal when chained tasks share a worktree.
     if options.cleanup != CleanupPolicy::None {
+        let mut cleaned_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for task_result in &results {
             let should_clean = match options.cleanup {
                 CleanupPolicy::Always => true,
                 CleanupPolicy::OnSuccess => task_result.success,
                 CleanupPolicy::None => false,
             };
-            if should_clean {
+            if should_clean && cleaned_dirs.insert(task_result.work_dir.clone()) {
                 let env = IsolatedEnv {
                     work_dir: task_result.work_dir.clone(),
                     kind: isolation::IsolationKind::Worktree {
@@ -450,7 +481,14 @@ pub async fn run(manifest: &Manifest, options: &RunOptions) -> Result<RunResult>
 }
 
 /// Execute a single task.
-async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
+///
+/// If `reuse_work_dir` is `Some`, the task reuses an existing worktree directory
+/// instead of creating a new one (used when chained tasks share a branch).
+async fn run_task(
+    task: &Task,
+    options: &RunOptions,
+    reuse_work_dir: Option<PathBuf>,
+) -> TaskResult {
     let isolation_type = match &task.isolation {
         None | Some(crate::manifest::Isolation::Worktree { .. }) => "worktree",
         Some(crate::manifest::Isolation::None) => "none",
@@ -462,7 +500,9 @@ async fn run_task(task: &Task, options: &RunOptions) -> TaskResult {
         model = task.model.as_deref().unwrap_or(""),
         isolation = isolation_type,
     );
-    run_task_impl(task, options).instrument(span).await
+    run_task_impl(task, options, reuse_work_dir)
+        .instrument(span)
+        .await
 }
 
 /// Evaluate the task condition command.
@@ -490,7 +530,11 @@ async fn evaluate_condition(condition: &str, project_dir: &std::path::Path) -> b
 }
 
 /// Inner task execution body.
-async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
+async fn run_task_impl(
+    task: &Task,
+    options: &RunOptions,
+    reuse_work_dir: Option<PathBuf>,
+) -> TaskResult {
     let start = std::time::Instant::now();
     let task_name = task.name.clone();
 
@@ -534,7 +578,7 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
         );
     }
 
-    let result = run_task_inner(task, options).await;
+    let result = run_task_inner(task, options, reuse_work_dir).await;
 
     // Always run finally_hooks regardless of session outcome.
     // We need the work_dir — from the result if Ok, or from isolation setup.
@@ -614,6 +658,7 @@ async fn run_task_impl(task: &Task, options: &RunOptions) -> TaskResult {
 async fn run_task_inner(
     task: &Task,
     options: &RunOptions,
+    reuse_work_dir: Option<PathBuf>,
 ) -> Result<(
     claude_wrapper::exec::CommandOutput,
     IsolatedEnv,
@@ -630,8 +675,11 @@ async fn run_task_inner(
                 base_dir: ".worktrees".into(),
             });
 
-    // Set up isolation.
-    let env = if force {
+    // Set up isolation — reuse an existing worktree if provided (chained tasks
+    // sharing a branch), otherwise create a new one.
+    let env = if let Some(reuse_dir) = reuse_work_dir {
+        isolation::reuse_worktree(&reuse_dir)
+    } else if force {
         // If force, try to clean up existing worktree first.
         match isolation::setup(
             project_dir,

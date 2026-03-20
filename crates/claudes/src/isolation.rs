@@ -28,6 +28,20 @@ pub enum IsolationKind {
     None,
 }
 
+/// Reuse an existing worktree directory without running `git worktree add`.
+///
+/// Used when a chained task shares the same branch as a completed dependency —
+/// the second task continues in the first task's worktree.
+pub fn reuse_worktree(work_dir: &Path) -> IsolatedEnv {
+    info!(path = %work_dir.display(), "reusing existing worktree");
+    IsolatedEnv {
+        work_dir: work_dir.to_path_buf(),
+        kind: IsolationKind::Worktree {
+            path: work_dir.to_path_buf(),
+        },
+    }
+}
+
 /// Create an isolated environment for a task.
 pub async fn setup(
     project_dir: &Path,

@@ -1271,6 +1271,57 @@ fn load_nonexistent_run_returns_none() {
     assert!(claudes::state::load_run(dir.path(), "run-fake-0000").is_none());
 }
 
+/// Chained tasks sharing the same branch reuse the first task's worktree.
+#[tokio::test]
+#[ignore]
+async fn chained_tasks_reuse_worktree_for_same_branch() {
+    let dir = temp_git_repo();
+    let options = RunOptions {
+        project_dir: dir.path().to_path_buf(),
+        force: false,
+        binary: Some(fake_binary()),
+        env: vec![("FAKE_CLAUDE_OUTPUT".into(), "done".into())],
+        cleanup: CleanupPolicy::OnSuccess,
+        event_sender: None,
+    };
+
+    let mut task_a = Task::new("step-one", "first step");
+    task_a.branch = Some("feat/shared-branch".into());
+    task_a.isolation = Some(Isolation::Worktree {
+        base_dir: ".worktrees".into(),
+    });
+
+    let mut task_b = Task::new("step-two", "second step");
+    task_b.branch = Some("feat/shared-branch".into());
+    task_b.depends_on = Some(vec!["step-one".into()]);
+    task_b.isolation = Some(Isolation::Worktree {
+        base_dir: ".worktrees".into(),
+    });
+
+    let manifest = Manifest::new(vec![task_a, task_b]);
+
+    let result = claudes::run(&manifest, &options).await.unwrap();
+
+    // Both tasks should succeed.
+    assert!(result.all_succeeded(), "both chained tasks should succeed");
+    assert_eq!(result.tasks.len(), 2);
+
+    // The second task should reuse the first task's worktree directory.
+    let step_one = result.tasks.iter().find(|t| t.name == "step-one").unwrap();
+    let step_two = result.tasks.iter().find(|t| t.name == "step-two").unwrap();
+    assert_eq!(
+        step_one.work_dir, step_two.work_dir,
+        "chained tasks with same branch should share a worktree"
+    );
+
+    // With OnSuccess cleanup, the worktree should be cleaned up.
+    let wt_dir = dir.path().join(".worktrees").join("step-one");
+    assert!(
+        !wt_dir.exists(),
+        "worktree should be cleaned up after successful run"
+    );
+}
+
 /// CleanupPolicy::OnSuccess removes successful task worktrees.
 #[tokio::test]
 #[ignore]
