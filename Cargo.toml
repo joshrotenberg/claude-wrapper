@@ -5,6 +5,7 @@ members = [
     "crates/claude-pool",
     "crates/claude-pool-mcp",
     "crates/claudes",
+    "crates/claude-runner",
 ]
 
 [workspace.package]
