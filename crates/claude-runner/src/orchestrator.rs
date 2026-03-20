@@ -37,23 +37,18 @@ pub async fn process_issue(
 
     // 2. Triage.
     let decision = triage::triage(&issue, policy);
-    match &decision {
+    let needs_clarification = match &decision {
         TriageDecision::Ready => {
             info!(issue = number, "issue is ready for automation");
+            false
         }
         TriageDecision::NeedsClarification(questions) => {
-            warn!(issue = number, "issue needs clarification");
-            let body = format!(
-                "**Automation triage**: This issue needs clarification before work can begin:\n\n{}\n\n\
-                 Please update the issue with this information and the automation will retry.",
-                questions
-                    .iter()
-                    .map(|q| format!("- {q}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+            warn!(
+                issue = number,
+                ?questions,
+                "issue needs clarification, injecting clarify stage"
             );
-            github::comment_on_issue(repo, number, &body).await?;
-            return Err(Error::Triage("issue needs clarification".into()));
+            true
         }
         TriageDecision::OutOfScope(reason) => {
             info!(issue = number, reason = reason, "issue out of scope");
@@ -71,10 +66,34 @@ pub async fn process_issue(
             info!(issue = number, duplicate_of = other, "duplicate issue");
             return Err(Error::Triage(format!("duplicate of #{other}")));
         }
-    }
+    };
 
     // 3. Select workflow and generate branch.
-    let template = workflow::select_workflow(&issue, policy);
+    let mut template = workflow::select_workflow(&issue, policy);
+
+    // Inject Clarify stage before Plan when triage identified gaps.
+    if needs_clarification {
+        let clarify_stage = workflow::Stage {
+            kind: StageKind::Clarify,
+            optional: false,
+            max_retries: 1,
+            timeout_secs: None,
+        };
+        let plan_pos = template
+            .stages
+            .iter()
+            .position(|s| s.kind == StageKind::Plan);
+        if let Some(pos) = plan_pos {
+            template.stages.insert(pos, clarify_stage);
+        } else {
+            template.stages.insert(0, clarify_stage);
+        }
+        info!(
+            issue = number,
+            workflow = template.name,
+            "injected clarify stage before plan"
+        );
+    }
     let branch = policy.branch_for_issue(&issue);
     info!(
         issue = number,
