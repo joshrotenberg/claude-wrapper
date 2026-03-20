@@ -1,7 +1,10 @@
 //! Planner — turn an issue + workflow template into an execution plan.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
+use crate::config::RunnerConfig;
 use crate::github::IssueCandidate;
 use crate::workflow::{StageKind, WorkflowTemplate};
 
@@ -68,12 +71,33 @@ pub fn create_plan(
     branch: &str,
     policy: Option<&crate::policy::RepoPolicy>,
 ) -> WorkPlan {
+    create_plan_with_config(issue, template, branch, policy, None)
+}
+
+/// Generate a work plan, optionally loading stage prompts from files configured in
+/// `RunnerConfig.prompt_templates`. File-based overrides take precedence over
+/// `RepoPolicy.stage_prompts` in-memory overrides.
+///
+/// `config` is a tuple of `(RunnerConfig, base_dir)` where `base_dir` is the directory
+/// used to resolve relative file paths (typically the directory containing `runner.toml`).
+pub fn create_plan_with_config(
+    issue: &IssueCandidate,
+    template: &WorkflowTemplate,
+    branch: &str,
+    policy: Option<&crate::policy::RepoPolicy>,
+    config: Option<(&RunnerConfig, &Path)>,
+) -> WorkPlan {
     let stages = template
         .stages
         .iter()
         .map(|stage| {
             let stage_name = kind_name(stage.kind);
-            let prompt = if let Some(override_prompt) =
+            let prompt = if let Some((cfg, base_dir)) = config
+                && let Some(file_path) = cfg.prompt_templates.get(stage_name)
+                && let Some(content) = load_prompt_template(file_path, base_dir, issue, branch)
+            {
+                content
+            } else if let Some(override_prompt) =
                 policy.and_then(|p| p.stage_prompts.get(stage_name))
             {
                 override_prompt.clone()
@@ -105,6 +129,36 @@ pub fn create_plan(
         workflow: template.name.clone(),
         stages,
         branch: branch.to_string(),
+    }
+}
+
+/// Load a prompt template file and substitute issue/branch variables.
+///
+/// Returns `None` if the file cannot be read (logs a warning in that case).
+fn load_prompt_template(
+    file_path: &str,
+    base_dir: &Path,
+    issue: &IssueCandidate,
+    branch: &str,
+) -> Option<String> {
+    let full_path = base_dir.join(file_path);
+    match std::fs::read_to_string(&full_path) {
+        Ok(content) => Some(
+            content
+                .replace("{issue_number}", &issue.number.to_string())
+                .replace("{issue_title}", &issue.title)
+                .replace("{issue_body}", &issue.body)
+                .replace("{branch}", branch)
+                .replace("{repo}", &issue.repo),
+        ),
+        Err(e) => {
+            tracing::warn!(
+                path = %full_path.display(),
+                error = %e,
+                "failed to load prompt template file, falling back to built-in prompt"
+            );
+            None
+        }
     }
 }
 

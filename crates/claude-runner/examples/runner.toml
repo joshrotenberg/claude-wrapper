@@ -156,10 +156,14 @@ stages = [
 
 # ── Stage prompt overrides ───────────────────────────────────────────
 #
-# Override built-in stage prompts with files. Supports {issue_number},
-# {issue_title}, {issue_body}, {branch}, {repo} variables.
+# Override built-in stage prompts with files. Paths are relative to the
+# directory containing runner.toml. Supports these variables:
+#   {issue_number}, {issue_title}, {issue_body}, {branch}, {repo}
+#
+# File-based overrides take precedence over in-memory policy overrides.
+# If a file cannot be read, the built-in prompt is used as a fallback.
 
-# [prompt_templates]
+[prompt_templates]
 # plan = "prompts/plan.md"
 # implement = "prompts/implement.md"
 # review = "prompts/review.md"

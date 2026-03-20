@@ -61,7 +61,13 @@ pub async fn process_issue_with_config(
     );
 
     // 5. Create work plan.
-    let plan = planner::create_plan(&issue, &template, &branch, None);
+    let plan = planner::create_plan_with_config(
+        &issue,
+        &template,
+        &branch,
+        None,
+        Some((config, repo_dir)),
+    );
 
     // 6. Set up isolation.
     let worktree_dir = isolation::create_worktree(repo_dir, &branch, ".worktrees").await?;
