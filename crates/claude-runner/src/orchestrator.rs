@@ -356,6 +356,10 @@ async fn run_validation(commands: &[String], work_dir: &Path) {
 }
 
 /// Process multiple issues from a repo poll.
+///
+/// Respects both the global `max_concurrency` limit and per-workflow limits
+/// from the `concurrency` map. Active runs are identified by the
+/// `runner:in-progress` label on GitHub issues.
 pub async fn process_batch(
     repo: &str,
     policy: &RepoPolicy,
@@ -378,12 +382,76 @@ pub async fn process_batch(
 
     info!(repo = repo, count = issues.len(), "found eligible issues");
 
+    // Fetch currently active runs via the runner:in-progress lease label.
+    let active_issues = match github::fetch_issues_with_label(repo, "runner:in-progress").await {
+        Ok(issues) => issues,
+        Err(e) => {
+            warn!(error = %e, "failed to fetch in-progress issues, skipping batch");
+            return vec![];
+        }
+    };
+
+    let mut global_active = active_issues.len();
+    info!(
+        repo = repo,
+        active = global_active,
+        max = policy.max_concurrency,
+        "concurrency check"
+    );
+
+    // Count active runs per workflow type.
+    let mut workflow_active: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for active in &active_issues {
+        let wf = workflow::select_workflow(active, policy);
+        *workflow_active.entry(wf.name).or_insert(0) += 1;
+    }
+
     let mut records = Vec::new();
     for issue in issues {
+        // Check global concurrency limit.
+        if global_active >= policy.max_concurrency {
+            info!(
+                active = global_active,
+                max = policy.max_concurrency,
+                "global concurrency limit reached, stopping batch"
+            );
+            break;
+        }
+
+        // Check per-workflow concurrency limit.
+        let wf = workflow::select_workflow(&issue, policy);
+        if let Some(&limit) = policy.concurrency.get(&wf.name)
+            && limit > 0
+        {
+            let wf_count = workflow_active.get(&wf.name).copied().unwrap_or(0);
+            if wf_count >= limit {
+                info!(
+                    issue = issue.number,
+                    workflow = wf.name,
+                    active = wf_count,
+                    limit = limit,
+                    "per-workflow concurrency limit reached, skipping issue"
+                );
+                continue;
+            }
+        }
+
+        // Update local tracking before we start (optimistic — avoids
+        // starting two issues of the same workflow in the same batch).
+        global_active += 1;
+        *workflow_active.entry(wf.name.clone()).or_insert(0) += 1;
+
         match process_issue(repo, issue.number, policy, state_dir, repo_dir).await {
             Ok(record) => records.push(record),
             Err(e) => {
                 warn!(issue = issue.number, error = %e, "failed to process issue");
+                // Roll back the optimistic increment on error (the lease
+                // may not have been acquired).
+                global_active = global_active.saturating_sub(1);
+                if let Some(c) = workflow_active.get_mut(&wf.name) {
+                    *c = c.saturating_sub(1);
+                }
             }
         }
     }
