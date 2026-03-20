@@ -728,6 +728,14 @@ fn extract_tool_arg(tool_name: &str, block: &serde_json::Value) -> String {
             } else {
                 v.to_string()
             };
+            // For Bash commands, show only the first line.
+            let s = if tool_name == "Bash" {
+                s.lines().next().unwrap_or("").to_string()
+            } else {
+                s
+            };
+            // Strip leading/trailing whitespace.
+            let s = s.trim().to_string();
             // Strip cwd prefix.
             let s = if let Ok(cwd) = std::env::current_dir() {
                 let prefix = format!("{}/", cwd.display());
@@ -750,7 +758,7 @@ fn extract_tool_arg(tool_name: &str, block: &serde_json::Value) -> String {
             } else {
                 s
             };
-            truncate(&s, 60)
+            truncate(&s, 40)
         })
         .unwrap_or_default()
 }
