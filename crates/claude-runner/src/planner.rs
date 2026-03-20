@@ -328,6 +328,8 @@ mod tests {
             model: None,
             validation_commands,
             stage_prompts: Default::default(),
+            default_workflow: None,
+            workflow_templates: vec![],
         }
     }
 
