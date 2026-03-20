@@ -150,12 +150,6 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
             name: "feature".into(),
             stages: vec![
                 Stage {
-                    kind: StageKind::Clarify,
-                    optional: true,
-                    max_retries: 1,
-                    timeout_secs: None,
-                },
-                Stage {
                     kind: StageKind::Plan,
                     optional: false,
                     max_retries: 1,
@@ -228,4 +222,61 @@ pub fn builtin_templates() -> Vec<WorkflowTemplate> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feature_template_has_no_clarify_stage() {
+        let feature = builtin_templates()
+            .into_iter()
+            .find(|t| t.name == "feature")
+            .expect("feature template must exist");
+        assert!(
+            !feature.stages.iter().any(|s| s.kind == StageKind::Clarify),
+            "feature template should not include a Clarify stage by default"
+        );
+    }
+
+    #[test]
+    fn feature_template_starts_with_plan() {
+        let feature = builtin_templates()
+            .into_iter()
+            .find(|t| t.name == "feature")
+            .expect("feature template must exist");
+        assert_eq!(
+            feature.stages[0].kind,
+            StageKind::Plan,
+            "feature template should start with Plan"
+        );
+    }
+
+    #[test]
+    fn clarify_injection_before_plan() {
+        let mut template = builtin_templates()
+            .into_iter()
+            .find(|t| t.name == "feature")
+            .expect("feature template must exist");
+
+        let clarify_stage = Stage {
+            kind: StageKind::Clarify,
+            optional: false,
+            max_retries: 1,
+            timeout_secs: None,
+        };
+        let plan_pos = template
+            .stages
+            .iter()
+            .position(|s| s.kind == StageKind::Plan);
+        if let Some(pos) = plan_pos {
+            template.stages.insert(pos, clarify_stage);
+        } else {
+            template.stages.insert(0, clarify_stage);
+        }
+
+        assert_eq!(template.stages[0].kind, StageKind::Clarify);
+        assert_eq!(template.stages[1].kind, StageKind::Plan);
+    }
 }
