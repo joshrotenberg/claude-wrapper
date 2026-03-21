@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "created_at": "2026-03-19T15:30:00Z",
+
+  "shared": {
+    "model": "claude-sonnet-4-6",
+    "isolation": {"type": "worktree", "base_dir": ".worktrees"},
+    "append_system_prompt": "This is a Rust 2024 project using edition 2024. Use if-let chains: write `if let Some(x) = y && condition {` instead of nested if-let/if blocks. Do NOT modify any file not explicitly named in the task prompt. Do NOT modify CLAUDE.md or .gitignore. Always run `cargo fmt` before committing.",
+    "allowed_tools": [
+      "Read",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Bash(cargo *)",
+      "Bash(git *)",
+      "Bash(gh pr *)"
+    ],
+    "disallowed_tools": ["Write"],
+    "post_hooks": [
+      "cargo fmt --all -- --check",
+      "cargo clippy -p claudes --all-targets -- -D warnings",
+      "cargo test --lib -p claudes"
+    ]
+  },
+
+  "tasks": [
+    {
+      "name": "optional-created-at",
+
+      "prompt": "Make `created_at` and `version` optional during manifest deserialization. Work on issue #409.\n\nIn `crates/claudes/src/manifest.rs`, on the `Manifest` struct:\n\n1. Add `#[serde(default = \"default_version\")]` to the `version` field and create a `fn default_version() -> u32 { 1 }` helper.\n\n2. Add `#[serde(default = \"Utc::now\")]` to the `created_at` field (from chrono). This way hand-authored manifests don't need to specify either field.\n\n3. Add unit tests in the existing `#[cfg(test)] mod tests` block:\n   - Test that a JSON manifest without `created_at` deserializes with a default\n   - Test that a JSON manifest without `version` deserializes with version=1\n   - Test that a TOML manifest without either field works\n   - Test that explicit values are preserved\n\nOnly modify `crates/claudes/src/manifest.rs`. Do NOT modify any other file.\n\nCommit with message `fix(claudes): make created_at and version optional in manifest deserialization (#409)`.\n\nCreate a PR:\n  gh pr create --title 'fix(claudes): make created_at and version optional in manifest (#409)' --body '## Summary\n- Default version to 1 and created_at to Utc::now() during deserialization\n- Hand-authored manifests no longer need these metadata fields\n- Added unit tests for default and explicit values\n\nCloses #409\n\n## Test plan\n- [ ] cargo fmt --check\n- [ ] cargo clippy clean\n- [ ] cargo test --lib -p claudes'",
+
+      "branch": "fix/optional-created-at"
+    },
+    {
+      "name": "default-worktree-isolation",
+
+      "prompt": "Default task isolation to worktree when not specified. Work on issue #413.\n\nIn `crates/claudes/src/runner.rs`, in the `run_task_inner` function, when setting up isolation: if the task's `isolation` field is `None` after resolve, default it to `Isolation::Worktree { base_dir: \".worktrees\".into() }` instead of `Isolation::None`.\n\nLook for where `isolation::setup` is called and where the isolation type is determined. The change should be a simple default — if `task.isolation` is `None`, treat it as worktree.\n\nAlso update `run_task` where `isolation_type` is computed for the tracing span to reflect the actual default.\n\nAdd unit tests or update existing ones in the runner module's test block if there is one. If not, add integration tests in `crates/claudes/tests/fake_claude.rs`:\n- Test that a task with no isolation field set gets a worktree created\n- Test that `isolation: \"none\"` still works as explicit opt-out\n\nOnly modify:\n- `crates/claudes/src/runner.rs`\n- `crates/claudes/tests/fake_claude.rs` (if adding integration tests)\n\nDo NOT modify `crates/claudes/src/manifest.rs` or any other file.\n\nCommit with message `feat(claudes): default isolation to worktree (#413)`.\n\nCreate a PR:\n  gh pr create --title 'feat(claudes): default isolation to worktree (#413)' --body '## Summary\n- Tasks without explicit isolation now default to worktree instead of none\n- Parallel tasks no longer share git state by accident\n- Explicit isolation: none still works as opt-out\n- Added tests for default and explicit isolation behavior\n\nCloses #413\n\n## Test plan\n- [ ] cargo fmt --check\n- [ ] cargo clippy clean\n- [ ] cargo test --lib -p claudes\n- [ ] cargo test --test fake_claude -p claudes -- --ignored'",
+
+      "branch": "fix/default-worktree-isolation"
+    }
+  ]
+}

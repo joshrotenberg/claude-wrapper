@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "created_at": "2026-03-20T00:43:43.530681Z",
+  "shared": {
+    "model": "claude-sonnet-4-6",
+    "append_system_prompt": "This is a Rust 2024 project. Use if-let chains where appropriate. Do NOT modify any file not explicitly named in the task prompt. Never include 'Generated with Claude Code' or Co-Authored-By signatures in commits or PRs.",
+    "isolation": {
+      "type": "worktree",
+      "base_dir": ".worktrees"
+    }
+  },
+  "tasks": [
+    {
+      "name": "plan-fix",
+      "prompt": "Research and produce a detailed fix plan for GitHub issue #442: desugar chains before checking file overlaps.\n\nThe bug: In `crates/claudes/src/main.rs`, the `cmd_run` function calls `manifest.check_file_overlaps()` at 3 locations (around lines 81, 157, 215) on the raw manifest BEFORE `runner::run()` calls `manifest.desugar_chains()`. So chain-declared dependencies (e.g. `\"chains\": [[\"a\", \"b\"]]`) are not converted to `depends_on` yet, and `check_file_overlaps` sees them as parallel tasks and warns about overlapping files even though they are sequenced.\n\nThe fix per the issue: call `desugar_chains()` before the overlap check.\n\nRead these files:\n- `crates/claudes/src/main.rs` — find all 3 `check_file_overlaps()` call sites in `cmd_run`\n- `crates/claudes/src/manifest.rs` — understand `desugar_chains()`, `check_file_overlaps()`, and existing tests\n- `crates/claudes/src/runner.rs` — see that `desugar_chains` is already called first there\n\nWrite a plan to a file called `plan.md` covering:\n1. Exactly which lines in `main.rs` need to change and how\n2. Whether to desugar once at the top of `cmd_run` or before each call site\n3. A new test in `manifest.rs` that verifies chain-declared deps suppress overlap warnings (like the existing `check_file_overlaps_suppressed_when_direct_depends_on` test but using chains instead of depends_on)\n4. Any edge cases to consider (e.g., desugar_chains consuming `self.chains` via `.take()` — the clone implications)\n\nDo NOT edit any source files. Only produce plan.md.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Write"
+      ],
+      "isolation": {
+        "type": "none"
+      }
+    },
+    {
+      "name": "implement-fix",
+      "prompt": "Implement the fix for GitHub issue #442: desugar chains before checking file overlaps.\n\nYou MUST read the plan.md file first for detailed guidance.\n\nFiles you may modify:\n- `crates/claudes/src/main.rs` — call `desugar_chains()` before `check_file_overlaps()` at all 3 call sites in `cmd_run`\n- `crates/claudes/src/manifest.rs` — add a new test\n\nDo NOT modify any other files. Do NOT modify `Cargo.toml`, `.gitignore`, `runner.rs`, or any file not listed above.\n\nImplementation details:\n\n1. In `main.rs` `cmd_run` function: Before each of the 3 calls to `manifest.check_file_overlaps()`, ensure `desugar_chains()` has been called on that manifest. Since `desugar_chains()` uses `.take()` on `self.chains`, it is idempotent after the first call. The simplest approach is to call `manifest.desugar_chains()` once early in each code path (the --manifest path, the auto-discover path, and the ad-hoc prompts path), before the overlap check. Make sure the manifest is mutable (`let mut manifest = ...`) if it isn't already.\n\n2. In `manifest.rs`, add a unit test `check_file_overlaps_suppressed_by_chain` in the existing test module (near the other `check_file_overlaps_*` tests). The test should:\n   - Create a manifest with 2 tasks that both reference the same file path in their prompts\n   - Set `chains: Some(vec![vec![ChainStep::Single(\"a\".into()), ChainStep::Single(\"b\".into())]])` \n   - Call `manifest.desugar_chains()` then `manifest.check_file_overlaps()`\n   - Assert the warnings vec is empty (the chain-derived depends_on suppresses the warning)\n   - Also verify that WITHOUT calling desugar_chains first, the warning DOES fire (create a separate manifest or clone)\n\nCommit with message: `fix(claudes): desugar chains before checking file overlaps (#442)`",
+      "allowed_tools": [
+        "Read",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(cargo fmt *)"
+      ],
+      "disallowed_tools": [
+        "Write"
+      ],
+      "post_hooks": [
+        "cargo fmt --all -- --check",
+        "cargo clippy -p claudes --all-targets --all-features -- -D warnings",
+        "cargo test --lib -p claudes --all-features"
+      ]
+    },
+    {
+      "name": "review-fix",
+      "prompt": "Review the changes made for issue #442 (desugar chains before checking file overlaps).\n\nRun `git diff HEAD~1` to see what changed.\n\nVerify:\n1. All 3 `check_file_overlaps()` call sites in `main.rs` now have `desugar_chains()` called before them\n2. The new test in `manifest.rs` correctly tests the chain -> overlap suppression behavior\n3. No unrelated files were modified\n4. The commit message follows conventional commit format\n5. No regressions — the desugar call doesn't break anything downstream (runner.rs already calls desugar_chains again, which is idempotent due to .take())\n6. Edge cases: What happens if there are no chains? (desugar_chains returns early — fine)\n\nIf you find issues, write them to `review-notes.md`. If everything looks good, write `review-notes.md` with 'LGTM' and a brief summary of what was verified.\n\nDo NOT edit any source files.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git *)",
+        "Write"
+      ],
+      "disallowed_tools": [
+        "Edit"
+      ],
+      "isolation": {
+        "type": "none"
+      }
+    },
+    {
+      "name": "create-pr",
+      "prompt": "Create a pull request for the fix to issue #442.\n\nFirst read `review-notes.md` to confirm the review passed.\n\nThen create the PR:\n\n```bash\ngit push origin HEAD\ngh pr create --title 'fix(claudes): desugar chains before checking file overlaps' --body '## Summary\n\nFixes #442. Calls `desugar_chains()` before `check_file_overlaps()` in `cmd_run` so that chain-declared sequential dependencies correctly suppress file overlap warnings.\n\n## Problem\n\n`check_file_overlaps()` was called on the raw manifest before `desugar_chains()` converted chain declarations into `depends_on` fields. This caused false positive overlap warnings for tasks that were sequenced via chains.\n\n## Changes\n\n- `crates/claudes/src/main.rs`: Call `manifest.desugar_chains()` before `check_file_overlaps()` at all 3 call sites in `cmd_run`\n- `crates/claudes/src/manifest.rs`: Added `check_file_overlaps_suppressed_by_chain` test\n\n## Test Plan\n\n- New unit test verifies chain-declared dependencies suppress overlap warnings\n- All existing tests pass (`cargo test --lib -p claudes`)\n- `cargo clippy` and `cargo fmt` clean' --assignee @me\n```\n\nDo NOT merge the PR. Do NOT modify any source files.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git *)",
+        "Bash(gh pr *)"
+      ],
+      "disallowed_tools": [
+        "Edit",
+        "Write"
+      ]
+    }
+  ],
+  "chains": [
+    [
+      "plan-fix",
+      "implement-fix",
+      "review-fix",
+      "create-pr"
+    ]
+  ]
+}

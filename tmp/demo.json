@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "created_at": "2026-03-19T17:00:00Z",
+  "shared": {
+    "model": "claude-haiku-4-5-20251001",
+    "isolation": {"type": "none"},
+    "permission_mode": "bypassPermissions",
+    "max_turns": 2,
+    "no_session_persistence": true
+  },
+  "tasks": [
+    {
+      "name": "haiku-rust",
+      "prompt": "Write a haiku about Rust programming. Just output the haiku, nothing else."
+    },
+    {
+      "name": "haiku-parallel",
+      "prompt": "Write a haiku about parallel computing. Just output the haiku, nothing else."
+    },
+    {
+      "name": "haiku-testing",
+      "prompt": "Write a haiku about software testing. Just output the haiku, nothing else."
+    }
+  ]
+}

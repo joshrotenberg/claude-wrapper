@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "shared": {
+    "model": "claude-sonnet-4-6",
+    "isolation": { "type": "worktree", "base_dir": ".worktrees" },
+    "append_system_prompt": "This project uses Rust 2024 edition. Run `cargo fmt` after changes. Use `thiserror` for library errors. All public APIs need doc comments. Conventional commits: `feat(claudes): ...`. Reference issue #380 in commits. Target branch for PR is `main`."
+  },
+  "chains": [["plan", "code", "review", "pr"]],
+  "tasks": [
+    {
+      "name": "plan",
+      "prompt": "You are designing the implementation for issue #380 Phase 1: explicit skill injection and self-contained manifests.\n\nFirst, assess what already exists in the codebase. Read these files thoroughly:\n- crates/claudes/src/manifest.rs (Shared, Task structs, resolve(), resolve_files())\n- crates/claudes/src/runner.rs (build_query_command())\n- crates/claudes/src/cli.rs (RunArgs, PlanArgs)\n- crates/claudes/src/planner.rs (PlanOptions, plan())\n- crates/claudes/src/main.rs (how CLI args map to execution)\n\nPhase 1 requirements from the issue:\n1. `skills` field on Shared and Task (list of file paths) — resolved at manifest load, appended to system prompt\n2. `--skill` CLI flag on `claudes run`\n3. `settings` field (string path) on Shared and Task — maps to `--settings` on claude CLI\n4. `setting_sources` field (string) on Shared and Task — maps to `--setting-sources` on claude CLI\n\nFor each requirement, determine:\n- Is it already implemented? If so, note the line numbers.\n- What's missing or incomplete?\n- What files need changes and what those changes are?\n\nWrite a detailed implementation plan to your breadcrumb. Include:\n- Exact files to modify and what to add/change in each\n- Field names, types, serde attributes\n- How settings/setting_sources flow through resolve() and into build_query_command()\n- Any new QueryCommand methods needed in claude-wrapper\n\nDo NOT modify any files. Research only.",
+      "allowed_tools": ["Read", "Glob", "Grep"],
+      "isolation": { "type": "none" }
+    },
+    {
+      "name": "code",
+      "prompt": "Read the breadcrumb from the plan task for the implementation plan.\n\nImplement issue #380 Phase 1. The breadcrumb tells you exactly what exists and what's missing. Follow it closely.\n\nKey files you may modify:\n- crates/claudes/src/manifest.rs — Add missing fields to Shared/Task, update resolve(), resolve_files(), TaskBuilder, serde\n- crates/claudes/src/runner.rs — Update build_query_command() to pass new fields to QueryCommand\n- crates/claudes/src/cli.rs — Add any missing CLI flags (--skill, --settings, --setting-sources)\n- crates/claudes/src/planner.rs — Add new fields to PlanOptions/PlanOptionsBuilder, wire into plan()\n- crates/claudes/src/main.rs — Wire new CLI args into manifest/shared block\n- src/command/query.rs — Add settings/setting_sources methods if they don't exist on QueryCommand\n- src/types.rs — Add any new types if needed\n\nDo NOT modify test files — the next task handles that.\nDo NOT create a commit.\n\nAfter making changes, run:\n- cargo fmt --all\n- cargo clippy --all-targets --all-features -- -D warnings\n- cargo test --lib --all-features\n\nFix any errors before finishing.",
+      "post_hooks": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test --lib --all-features"
+      ]
+    },
+    {
+      "name": "review",
+      "prompt": "Read the breadcrumbs from plan and code tasks.\n\nReview and test the implementation of issue #380 Phase 1.\n\n1. Read all modified files and verify:\n   - Fields are correctly added with proper serde attributes (skip_serializing_if, default)\n   - resolve() merges settings/setting_sources with correct precedence (task > profile > shared)\n   - resolve_files() handles skill loading correctly\n   - build_query_command() passes new fields to QueryCommand\n   - CLI flags are wired through to the shared block\n   - Doc comments on all public fields/methods\n\n2. Add tests in crates/claudes/src/manifest.rs (in the existing #[cfg(test)] module):\n   - settings and setting_sources resolve with correct precedence\n   - settings and setting_sources appear in serialized manifest\n   - settings passthrough in build_query_command (if testable at unit level)\n   - Any edge cases the plan identified\n\n3. Run the full test suite:\n   - cargo test --lib --all-features\n   - cargo test --doc --all-features\n   - cargo doc --no-deps --all-features\n\n4. Fix any issues you find — both in the implementation and tests.\n\nDo NOT create a commit.\n\nFiles you may modify:\n- crates/claudes/src/manifest.rs (tests + any fixes)\n- crates/claudes/src/runner.rs (fixes only)\n- crates/claudes/src/cli.rs (fixes only)\n- crates/claudes/src/main.rs (fixes only)\n- src/command/query.rs (fixes only)",
+      "post_hooks": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test --lib --all-features",
+        "cargo test --doc --all-features"
+      ]
+    },
+    {
+      "name": "pr",
+      "prompt": "Read the breadcrumbs from all previous tasks.\n\nCreate a commit and PR for issue #380 Phase 1.\n\n1. Stage all changed files (use `git add` with specific file paths, not `git add -A`).\n2. Create a commit:\n   feat(claudes): explicit skill injection and settings passthrough (#380)\n3. Push the branch.\n4. Create a PR with `gh pr create`:\n   - Title: feat(claudes): explicit skill injection and settings passthrough (#380)\n   - Body: Summary of what was added (skills field, --skill CLI, settings/setting_sources passthrough), link to #380, test plan\n   - Base branch: main\n\nDo NOT merge the PR.\nDo NOT add Co-Authored-By lines.\nDo NOT include 'Generated with Claude Code' in the PR body.",
+      "allowed_tools": ["Bash", "Read", "Glob", "Grep"]
+    }
+  ]
+}

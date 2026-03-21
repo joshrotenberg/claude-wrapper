@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "created_at": "2026-03-19T20:00:00Z",
+  "shared": {
+    "model": "claude-haiku-4-5-20251001",
+    "isolation": {"type": "none"},
+    "permission_mode": "bypassPermissions",
+    "max_turns": 5,
+    "no_session_persistence": true,
+    "allowed_tools": ["Read", "Write", "Bash(ls *)", "Bash(mkdir *)"]
+  },
+  "chains": [
+    ["research", "summarize"]
+  ],
+  "tasks": [
+    {
+      "name": "research",
+      "prompt": "Research task: List 5 interesting facts about octopuses. Number them 1-5, one sentence each."
+    },
+    {
+      "name": "summarize",
+      "prompt": "Write a 2-sentence summary based on the research provided in your context. Start with 'Based on the research:'"
+    }
+  ]
+}

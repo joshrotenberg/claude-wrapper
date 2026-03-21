@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "created_at": "2026-03-19T14:30:00Z",
+
+  "shared": {
+    "model": "claude-sonnet-4-6",
+    "isolation": {"type": "worktree", "base_dir": ".worktrees"},
+    "append_system_prompt": "This is a Rust 2024 project using edition 2024. Use if-let chains: write `if let Some(x) = y && condition {` instead of nested if-let/if blocks. Do NOT modify any file not explicitly named in the task prompt. Do NOT modify CLAUDE.md, Cargo.toml (unless adding a dependency the task requires), or .gitignore. Always run `cargo fmt` before committing.",
+    "allowed_tools": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(cargo *)",
+      "Bash(git *)",
+      "Bash(gh pr *)"
+    ],
+    "post_hooks": [
+      "cargo fmt --all -- --check",
+      "cargo clippy -p claudes --all-targets -- -D warnings",
+      "cargo test --lib -p claudes"
+    ]
+  },
+
+  "tasks": [
+    {
+      "name": "output-formatting-polish",
+
+      "prompt": "Implement output formatting improvements for claudes. Work on issue #379.\n\nChanges needed:\n\n1. **Relative paths in -v output** (crates/claudes/src/output.rs): When displaying file paths from tool calls in verbose streaming output, strip the project/worktree prefix. Show `Read(src/manifest.rs)` not `Read(/Users/josh/Code/.worktrees/task/src/manifest.rs)`. The project_dir or worktree path should be stripped.\n\n2. **Elapsed time on task completion** (crates/claudes/src/output.rs): When a task completes, show duration and cost inline in the completion message. Format: `| task-name | complete (34s, $0.08)` for success, `| task-name | FAILED (12s)` for failure.\n\n3. **Colored task names in status output** (crates/claudes/src/state.rs): In the `display_status` function, use the same color scheme as streaming — green for success, red for failed, yellow for timeout. Import crossterm colors.\n\n4. **Fixed-width task name column**: Cap task name display at 30 chars, truncate with `...` if longer.\n\nOnly modify these files:\n- `crates/claudes/src/output.rs`\n- `crates/claudes/src/state.rs`\n\nDo NOT modify `crates/claudes/src/runner.rs`, `crates/claudes/src/main.rs`, or any other file.\n\nCommit with message `feat(claudes): output formatting polish (#379)`.\n\nCreate a PR:\n  gh pr create --title 'feat(claudes): output formatting polish (#379)' --body '## Summary\n- Relative paths in verbose streaming output\n- Elapsed time and cost on task completion lines\n- Colored task names in status output (green/red/yellow)\n- Fixed-width task name column (30 char max)\n\nCloses #379\n\n## Test plan\n- [ ] cargo fmt --check\n- [ ] cargo clippy clean\n- [ ] cargo test --lib -p claudes'",
+
+      "branch": "feat/output-formatting-polish"
+    },
+    {
+      "name": "indicatif-progress",
+
+      "prompt": "Add an optional indicatif progress display mode for claudes. Work on issue #381.\n\nWhen `--progress` is passed, show indicatif progress bars instead of streaming text output. Each task gets a progress bar showing elapsed time and status. Falls back to text mode when not a TTY.\n\nChanges needed:\n\n1. Add `indicatif` as a dependency in `crates/claudes/Cargo.toml`.\n\n2. Add `--progress` flag to `RunArgs` in `crates/claudes/src/cli.rs`.\n\n3. Create a new function `render_progress` in `crates/claudes/src/output.rs` that:\n   - Creates a `MultiProgress` with one `ProgressBar` per task\n   - Each bar shows: `[task-name] elapsed... status`\n   - Uses `ProgressStyle` with a spinner\n   - Consumes `TaskEvent`s from the channel (same as `render_stream`)\n   - On task completion, finishes the bar with green (success) or red (failed) message\n   - Shows total cost at the end\n\n4. Wire it up in `crates/claudes/src/main.rs`: if `--progress` is set AND stdout is a TTY, call `render_progress` instead of `render_stream`.\n\nOnly modify these files:\n- `crates/claudes/Cargo.toml` (add indicatif dependency)\n- `crates/claudes/src/cli.rs` (add --progress flag)\n- `crates/claudes/src/output.rs` (add render_progress function)\n- `crates/claudes/src/main.rs` (wire up --progress)\n\nDo NOT modify any other files.\n\nCommit with message `feat(claudes): optional indicatif progress display (#381)`.\n\nCreate a PR:\n  gh pr create --title 'feat(claudes): optional indicatif progress display (#381)' --body '## Summary\n- Add --progress flag for indicatif-based progress bars\n- Per-task spinner with elapsed time and status\n- Falls back to text mode when not a TTY\n- Shows total cost on completion\n\nCloses #381\n\n## Test plan\n- [ ] cargo fmt --check\n- [ ] cargo clippy clean\n- [ ] cargo test --lib -p claudes\n- [ ] Manual: claudes run --progress shows progress bars'",
+
+      "branch": "feat/indicatif-progress"
+    },
+    {
+      "name": "skill-injection",
+
+      "prompt": "Implement skill injection for claudes manifests. Work on issue #380 (phase 1).\n\nSkills are markdown/text files containing domain knowledge that get appended to the system prompt. This makes manifests self-contained for CI.\n\nChanges needed:\n\n1. **Add `skills` field to `Shared` and `Task`** in `crates/claudes/src/manifest.rs`:\n   - `pub skills: Option<Vec<String>>` with `#[serde(skip_serializing_if = \"Option::is_none\")]`\n   - Add to `Shared` struct and `Task` struct\n   - In `resolve()`, merge skills like hooks: shared skills first, then profile skills, then task skills (concatenate all)\n   - Add `resolve_skills(&mut self, base_dir: &Path) -> Result<()>` method on Manifest that reads each skill file path, loads its contents, and appends to `append_system_prompt` for each task. Call it from `resolve_files()` or alongside it.\n\n2. **Add `--skill` CLI flag** in `crates/claudes/src/cli.rs`:\n   - Add `#[arg(long)] pub skill: Vec<String>` to `RunArgs`\n   - In main.rs, if skills are provided via CLI, add them to the manifest's shared block before resolve\n\n3. **Add unit tests** in the manifest module's test section:\n   - Test that skills are resolved from shared to task\n   - Test that skill file contents are appended to append_system_prompt\n   - Test that missing skill file returns error\n\nOnly modify these files:\n- `crates/claudes/src/manifest.rs`\n- `crates/claudes/src/cli.rs`\n- `crates/claudes/src/main.rs`\n\nDo NOT modify any other files.\n\nCommit with message `feat(claudes): skill injection for self-contained manifests (#380)`.\n\nCreate a PR:\n  gh pr create --title 'feat(claudes): skill injection for self-contained manifests (#380)' --body '## Summary\n- Add skills field to Shared and Task for system prompt injection\n- Skills are markdown files resolved relative to manifest directory\n- Shared skills are prepended to task skills (like hooks)\n- Add --skill CLI flag for ad-hoc skill injection\n- Unit tests for skill resolution and error cases\n\nCloses #380\n\n## Test plan\n- [ ] cargo fmt --check\n- [ ] cargo clippy clean\n- [ ] cargo test --lib -p claudes\n- [ ] New unit tests pass for skill resolution'",
+
+      "branch": "feat/skill-injection"
+    }
+  ]
+}
