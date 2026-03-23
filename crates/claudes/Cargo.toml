@@ -22,7 +22,7 @@ thiserror = { workspace = true }
 tower-mcp = { workspace = true }
 schemars = { workspace = true }
 crossterm = "0.29"
-indicatif = "0.17"
+indicatif = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
