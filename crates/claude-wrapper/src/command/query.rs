@@ -234,6 +234,21 @@ impl QueryCommand {
         self
     }
 
+    /// Clear every session-related flag and set `--resume` to the given id.
+    ///
+    /// Used by `Session::execute` to override whatever session flags the
+    /// caller may have set on their command (including a stale `--resume`,
+    /// `--continue`, `--session-id`, or `--fork-session`). Keeping the
+    /// override logic in one place prevents conflicting flags from reaching
+    /// the CLI.
+    pub(crate) fn replace_session(mut self, id: impl Into<String>) -> Self {
+        self.continue_session = false;
+        self.resume = Some(id.into());
+        self.session_id = None;
+        self.fork_session = false;
+        self
+    }
+
     /// Set a fallback model for when the primary model is overloaded.
     #[must_use]
     pub fn fallback_model(mut self, model: impl Into<String>) -> Self {

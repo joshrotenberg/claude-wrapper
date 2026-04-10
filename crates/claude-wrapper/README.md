@@ -169,25 +169,43 @@ let output = QueryCommand::new("what did we find?")
     .await?;
 ```
 
-Session management (type-safe):
+Session management (multi-turn, auto-resume):
 
 ```rust
-use claude_wrapper::Session;
+use std::sync::Arc;
+use claude_wrapper::{Claude, QueryCommand};
+use claude_wrapper::session::Session;
 
-// Create from a previous query result
-let mut session = Session::from_result(&claude, &result);
+let claude = Arc::new(Claude::builder().build()?);
 
-// Auto-resumes the session
-let next = session.query("what did we find?").execute().await?;
+// Fresh session
+let mut session = Session::new(Arc::clone(&claude));
 
-// Fork to branch the conversation
-let mut forked = session.fork();
-let alt = forked.query("try a different approach").execute().await?;
+// Plain prompt: session_id is captured from the first turn
+let first = session.send("what's 2 + 2?").await?;
 
-// Track cumulative cost and turns
-println!("Total cost: ${}", session.cumulative_cost_usd());
-println!("Total turns: {}", session.cumulative_turns());
+// Full control: pass a configured QueryCommand. Any session-related
+// flags on `cmd` are overridden with this session's current id so
+// they can't conflict.
+let second = session
+    .execute(QueryCommand::new("explain").model("opus"))
+    .await?;
+
+// Reattach to an existing session id
+let mut resumed = Session::resume(claude, "sess-abc123");
+let next = resumed.send("pick up where we left off").await?;
+
+// Cumulative state
+println!("cost: ${:.4}", session.total_cost_usd());
+println!("turns: {}", session.total_turns());
+println!("history: {} turns", session.history().len());
 ```
+
+`Session` is `Send + Sync` and holds an `Arc<Claude>`, so it can be
+moved between tasks or stored in long-lived actor state. Streaming
+turns use `Session::stream` / `Session::stream_execute`, which capture
+the session id from the first event that carries one — and persist
+it even if the stream errors partway through.
 
 ## Streaming NDJSON Events
 

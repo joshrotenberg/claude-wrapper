@@ -61,7 +61,7 @@ if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
     printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
     printf '{"type":"assistant","message":{"id":"msg_fake","type":"message","role":"assistant","content":[{"type":"text","text":"%s"}],"model":"claude-fake","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":3}},"session_id":"%s"}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
-    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","cost_usd":%s,"total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$COST_USD" "$NUM_TURNS"
+    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS"
 elif [[ "$OUTPUT_FORMAT" == "json" ]]; then
     # Emit a single JSON object matching QueryResult.
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')

@@ -207,7 +207,7 @@ pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use retry::{BackoffStrategy, RetryPolicy};
 #[cfg(feature = "json")]
-pub use session::{Session, SessionQuery};
+pub use session::Session;
 pub use types::*;
 pub use version::{CliVersion, VersionParseError};
 

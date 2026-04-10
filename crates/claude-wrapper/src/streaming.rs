@@ -48,8 +48,14 @@ impl StreamEvent {
     }
 
     /// Get the cost in USD if present (usually on result events).
+    ///
+    /// Prefers `total_cost_usd` (the CLI's primary key) and falls back
+    /// to the legacy `cost_usd` alias.
     pub fn cost_usd(&self) -> Option<f64> {
-        self.data.get("cost_usd").and_then(|v| v.as_f64())
+        self.data
+            .get("total_cost_usd")
+            .or_else(|| self.data.get("cost_usd"))
+            .and_then(|v| v.as_f64())
     }
 }
 
