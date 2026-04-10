@@ -1,10 +1,16 @@
 # claude-pool
 
-Slot pool orchestration library for Claude CLI
+> **⚠ DEPRECATED — unmaintained and not published.**
+>
+> `claude-pool` is kept in the repo for git history but is `publish = false`, excluded from the workspace build, and will not receive updates. The maintained crate in this repo is [`claude-wrapper`](../claude-wrapper/).
+>
+> Old published versions of `claude-pool` (up to 0.4.0) remain on crates.io and will continue to resolve for existing dependents, but no further releases are planned. To revive this crate, move it from `[workspace] exclude` back into `[workspace] members` in the root `Cargo.toml`.
+
+---
+
+Slot pool orchestration library for Claude CLI.
 
 [![Crates.io](https://img.shields.io/crates/v/claude-pool.svg)](https://crates.io/crates/claude-pool)
-[![Documentation](https://docs.rs/claude-pool/badge.svg)](https://docs.rs/claude-pool)
-[![CI](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/claude-wrapper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/claude-pool.svg)](LICENSE-MIT)
 
 ## Overview

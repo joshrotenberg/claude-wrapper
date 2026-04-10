@@ -52,72 +52,70 @@ let claude = Claude::builder()
 ```
 
 Options:
-- `binary_path()` - Path to `claude` binary (auto-detected by default)
+- `binary()` - Path to `claude` binary (auto-detected from PATH by default)
 - `working_dir()` - Working directory for commands
-- `env()` - Set environment variables
-- `timeout_secs()` - Command timeout (default: 300)
-- `global_args()` - Additional global args
+- `env()` / `envs()` - Set environment variables
+- `timeout_secs()` / `timeout()` - Command timeout (no default)
+- `arg()` - Add a global argument applied to every command
+- `retry()` - Default [`RetryPolicy`] applied to every command
 
 ### Command Builders
 
-Each command is a separate builder. Available commands:
+Each CLI subcommand is a separate builder. Available commands:
 
-- **QueryCommand** - Execute queries with full option coverage (28 options)
-- **McpListCommand** - List MCP servers
-- **McpAddCommand** - Add HTTP or stdio MCP server
-- **McpAddJsonCommand** - Add server from JSON config
-- **McpRemoveCommand** - Remove MCP server
-- **McpAddFromDesktopCommand** - Add desktop MCP server
-- **McpResetProjectChoicesCommand** - Reset project-specific choices
-- **PluginListCommand** - List plugins
-- **PluginInstallCommand** - Install plugin
-- **PluginUninstallCommand** - Uninstall plugin
-- **PluginEnableCommand** - Enable plugin
-- **PluginDisableCommand** - Disable plugin
-- **PluginUpdateCommand** - Update plugin
-- **PluginValidateCommand** - Validate plugin
-- **AuthStatusCommand** - Check authentication status
-- **VersionCommand** - Get CLI version
-- **DoctorCommand** - Run health check
-- **AgentsListCommand** - List available agents
-- **RawCommand** - Escape hatch for unsupported options
+**Query**
+- `QueryCommand` - The workhorse; `claude -p` with full option coverage
+
+**MCP server management**
+- `McpListCommand` / `McpGetCommand` / `McpAddCommand` / `McpAddJsonCommand` / `McpRemoveCommand` / `McpAddFromDesktopCommand` / `McpResetProjectChoicesCommand` / `McpServeCommand`
+
+**Plugins**
+- `PluginListCommand` / `PluginInstallCommand` / `PluginUninstallCommand` / `PluginEnableCommand` / `PluginDisableCommand` / `PluginUpdateCommand` / `PluginValidateCommand`
+
+**Plugin marketplace**
+- `MarketplaceListCommand` / `MarketplaceAddCommand` / `MarketplaceRemoveCommand` / `MarketplaceUpdateCommand`
+
+**Auth**
+- `AuthStatusCommand` / `AuthLoginCommand` / `AuthLogoutCommand` / `SetupTokenCommand`
+
+**Misc**
+- `VersionCommand` - Get CLI version
+- `DoctorCommand` - Run health check
+- `AgentsCommand` - List available agents
+- `RawCommand` - Escape hatch for unsupported subcommands
 
 ## QueryCommand: The Workhorse
 
-Full coverage of `claude -p` (print mode) options.
+Full coverage of `claude -p` (print mode). `QueryCommand` exposes a builder method for every CLI flag; see [`docs.rs`](https://docs.rs/claude-wrapper/latest/claude_wrapper/struct.QueryCommand.html) for the full list. The common ones:
 
-### All QueryCommand Options
+| Method | CLI flag | Purpose |
+|---|---|---|
+| `model()` | `--model` | Model alias or full ID |
+| `system_prompt()` / `append_system_prompt()` | `--system-prompt` / `--append-system-prompt` | Override or extend the system prompt |
+| `output_format()` | `--output-format` | `text`, `json`, `stream-json` |
+| `effort()` | `--effort` | `low`, `medium`, `high` |
+| `max_turns()` | `--max-turns` | Turn cap |
+| `max_budget_usd()` | `--max-budget-usd` | Spend cap |
+| `permission_mode()` | `--permission-mode` | `default`, `acceptEdits`, `bypassPermissions`, `dontAsk`, `plan`, `auto` |
+| `allowed_tools()` / `disallowed_tools()` / `tools()` | tool-filter flags | Allow/deny/restrict tools |
+| `mcp_config()` / `strict_mcp_config()` | `--mcp-config` / `--strict-mcp-config` | MCP server config |
+| `json_schema()` | `--json-schema` | Structured output validation |
+| `agent()` / `agents_json()` | `--agent` / `--agents` | Agent or custom agents JSON |
+| `no_session_persistence()` | `--no-session-persistence` | Don't save the session to disk |
+| `dangerously_skip_permissions()` | `--dangerously-skip-permissions` | Sandbox escape hatch |
+| `input_format()` / `include_partial_messages()` | `--input-format` / `--include-partial-messages` | Input/streaming shape |
+| `settings()` / `fallback_model()` / `add_dir()` / `file()` | various | Misc per-turn knobs |
 
-| Method | CLI Flag | Type | Description |
-|--------|----------|------|-------------|
-| `model()` | `--model` | `&str` | Model alias or full ID |
-| `system_prompt()` | `--system-prompt` | `&str` | Replace default system prompt |
-| `append_system_prompt()` | `--append-system-prompt` | `&str` | Append to system prompt |
-| `output_format()` | `--output-format` | `OutputFormat` | text, json, stream-json |
-| `max_budget_usd()` | `--max-budget-usd` | `f64` | Spending cap |
-| `permission_mode()` | `--permission-mode` | `PermissionMode` | default, acceptEdits, bypassPermissions, plan, auto |
-| `allowed_tools()` | `--allowed-tools` | `&[&str]` | Tool permission allow list |
-| `disallowed_tools()` | `--disallowed-tools` | `&[&str]` | Tool permission deny list |
-| `tools()` | `--tools` | `&[&str]` | Restrict available tools |
-| `mcp_config()` | `--mcp-config` | `&str` | MCP server config file |
-| `strict_mcp_config()` | `--strict-mcp-config` | - | Only use MCP from config |
-| `add_dir()` | `--add-dir` | `&str` | Additional accessible directories |
-| `effort()` | `--effort` | `Effort` | low, medium, high |
-| `max_turns()` | `--max-turns` | `u32` | Conversation turn limit |
-| `json_schema()` | `--json-schema` | `&str` | Structured output validation |
-| `agent()` | `--agent` | `&str` | Agent for session |
-| `agents_json()` | `--agents` | `&str` | Custom agents JSON |
-| `continue_session()` | `--continue` | - | Resume most recent session |
-| `resume()` | `--resume` | `&str` | Resume by session ID |
-| `session_id()` | `--session-id` | `&str` | Use specific session ID |
-| `fork_session()` | `--fork-session` | - | Fork when resuming |
-| `fallback_model()` | `--fallback-model` | `&str` | Fallback model |
-| `no_session_persistence()` | `--no-session-persistence` | - | Don't save session |
-| `dangerously_skip_permissions()` | `--dangerously-skip-permissions` | - | Bypass permissions |
-| `file()` | `--file` | `&str` | File resources to download |
-| `input_format()` | `--input-format` | `InputFormat` | text or stream-json |
-| `include_partial_messages()` | `--include-partial-messages` | - | Partial chunks |
-| `settings()` | `--settings` | `&str` | Settings JSON file |
+### Raw session flags (prefer `Session` for multi-turn)
+
+| Method | CLI flag | Purpose |
+|---|---|---|
+| `continue_session()` | `--continue` | Resume most recent session |
+| `resume()` | `--resume` | Resume a specific session id |
+| `session_id()` | `--session-id` | Force a session id |
+| `fork_session()` | `--fork-session` | Fork when resuming |
+
+For multi-turn conversations you almost always want [`Session`](#session-management) instead, which threads the id across turns automatically.
 
 ### Usage Examples
 
@@ -153,10 +151,10 @@ let output = QueryCommand::new("implement the feature in TASK.md")
     .await?;
 ```
 
-Session management (low-level):
+Low-level session flags on `QueryCommand` (rarely needed):
 
 ```rust
-// Start new session
+// Force a specific session id
 let output = QueryCommand::new("analyze the codebase")
     .session_id("my-session")
     .execute(&claude)
@@ -169,7 +167,11 @@ let output = QueryCommand::new("what did we find?")
     .await?;
 ```
 
-Session management (multi-turn, auto-resume):
+<a id="session-management"></a>
+
+## Session management
+
+For multi-turn conversations, wrap the client in an `Arc` and use `Session`. It threads the CLI `session_id` across turns automatically, tracks cumulative cost + history, and supports both plain-prompt and streaming turns:
 
 ```rust
 use std::sync::Arc;
@@ -207,22 +209,31 @@ turns use `Session::stream` / `Session::stream_execute`, which capture
 the session id from the first event that carries one — and persist
 it even if the stream errors partway through.
 
-## Streaming NDJSON Events
+## Streaming NDJSON events
 
-For real-time output, use `stream_query()`:
+For real-time output, use `stream_query()`. The handler is called once per parsed NDJSON line:
 
 ```rust
-use claude_wrapper::streaming::stream_query;
+use claude_wrapper::{Claude, QueryCommand, OutputFormat};
+use claude_wrapper::streaming::{StreamEvent, stream_query};
 
-let output = stream_query(&claude, &cmd, |event| {
-    if event.is_result() {
-        println!("Result: {}", event.result_text().unwrap_or(""));
+let claude = Claude::builder().build()?;
+let cmd = QueryCommand::new("explain quicksort")
+    .output_format(OutputFormat::StreamJson);
+
+stream_query(&claude, &cmd, |event: StreamEvent| {
+    if let Some(t) = event.event_type() {
+        println!("[{t}]");
     }
-    if event.is_error() {
-        eprintln!("Error: {}", event.error().unwrap_or(""));
+    if event.is_result() {
+        println!("result: {}", event.result_text().unwrap_or(""));
+        println!("session: {}", event.session_id().unwrap_or(""));
+        println!("cost: ${:?}", event.cost_usd());
     }
 }).await?;
 ```
+
+For multi-turn streaming with automatic session-id capture, use `Session::stream` / `Session::stream_execute` instead.
 
 ## MCP Server Commands
 
@@ -270,7 +281,7 @@ McpRemoveCommand::new("old-server")
     .await?;
 ```
 
-## MCP Config Builder
+## MCP config builder
 
 Generate `.mcp.json` files programmatically:
 
@@ -283,9 +294,7 @@ McpConfigBuilder::new()
     .write_to("/tmp/my-project/.mcp.json")?;
 ```
 
-Also supports:
-- `env()` - Environment variables for servers
-- `environment_file()` - Load from env file
+With the `tempfile` feature (on by default), `build_temp()` writes to a temporary file that is deleted when the returned `TempMcpConfig` is dropped — useful for one-shot queries.
 
 ## Plugin Management
 
@@ -325,13 +334,12 @@ DoctorCommand::new().execute(&claude).await?;
 AgentsListCommand::new().execute(&claude).await?;
 ```
 
-## Escape Hatch: RawCommand
+## Escape hatch: RawCommand
 
-For unsupported options, use `RawCommand`:
+For subcommands not yet wrapped, use `RawCommand`. Pass the subcommand name to `new()` and any flags via `.arg()`:
 
 ```rust
-let output = RawCommand::new()
-    .arg("custom-subcommand")
+let output = RawCommand::new("custom-subcommand")
     .arg("--unsupported-flag")
     .arg("value")
     .execute(&claude)
