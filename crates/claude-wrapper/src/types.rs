@@ -57,15 +57,34 @@ impl FromStr for Transport {
     }
 }
 
-impl From<&str> for Transport {
-    /// Convert a string slice to a `Transport`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the string is not a recognized transport type.
-    /// Valid values are: `"stdio"`, `"http"`, `"sse"`.
-    fn from(s: &str) -> Self {
-        s.parse().unwrap_or_else(|e| panic!("{e}"))
+impl TryFrom<&str> for Transport {
+    type Error = TransportParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn from_str_accepts_known_variants() {
+        assert_eq!("stdio".parse::<Transport>().unwrap(), Transport::Stdio);
+        assert_eq!("http".parse::<Transport>().unwrap(), Transport::Http);
+        assert_eq!("sse".parse::<Transport>().unwrap(), Transport::Sse);
+    }
+
+    #[test]
+    fn from_str_returns_error_for_unknown() {
+        let err = "websocket".parse::<Transport>().unwrap_err();
+        assert!(err.to_string().contains("websocket"));
+    }
+
+    #[test]
+    fn try_from_str_returns_error_for_unknown() {
+        assert!(Transport::try_from("bogus").is_err());
     }
 }
 

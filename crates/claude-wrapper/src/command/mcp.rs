@@ -72,14 +72,14 @@ impl ClaudeCommand for McpGetCommand {
 /// # Example
 ///
 /// ```no_run
-/// use claude_wrapper::{Claude, ClaudeCommand, McpAddCommand, Scope};
+/// use claude_wrapper::{Claude, ClaudeCommand, McpAddCommand, Scope, Transport};
 ///
 /// # async fn example() -> claude_wrapper::Result<()> {
 /// let claude = Claude::builder().build()?;
 ///
 /// // Add an HTTP MCP server
 /// McpAddCommand::new("sentry", "https://mcp.sentry.dev/mcp")
-///     .transport("http")
+///     .transport(Transport::Http)
 ///     .scope(Scope::User)
 ///     .execute(&claude)
 ///     .await?;
@@ -128,8 +128,8 @@ impl McpAddCommand {
 
     /// Set the transport type.
     #[must_use]
-    pub fn transport(mut self, transport: impl Into<Transport>) -> Self {
-        self.transport = Some(transport.into());
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.transport = Some(transport);
         self
     }
 
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn test_mcp_add_http() {
         let cmd = McpAddCommand::new("sentry", "https://mcp.sentry.dev/mcp")
-            .transport("http")
+            .transport(Transport::Http)
             .scope(Scope::User);
 
         let args = cmd.args();
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn test_mcp_add_oauth_flags() {
         let cmd = McpAddCommand::new("my-server", "https://example.com/mcp")
-            .transport("http")
+            .transport(Transport::Http)
             .callback_port(8080)
             .client_id("my-app-id")
             .client_secret();

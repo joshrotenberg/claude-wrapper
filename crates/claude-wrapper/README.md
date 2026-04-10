@@ -221,7 +221,7 @@ println!("{}", output.stdout);
 
 ```rust
 McpAddCommand::new("sentry", "https://mcp.sentry.dev/mcp")
-    .transport("http")
+    .transport(Transport::Http)
     .execute(&claude)
     .await?;
 ```
