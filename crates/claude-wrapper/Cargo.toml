@@ -25,7 +25,7 @@ tempfile = ["dep:tempfile"]
 serde = { workspace = true }
 serde_json = { version = "1", optional = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["process", "time", "io-util"] }
+tokio = { version = "1", features = ["process", "time", "io-util", "macros"] }
 tracing = { workspace = true }
 tempfile = { version = "3", optional = true }
 which = "8"

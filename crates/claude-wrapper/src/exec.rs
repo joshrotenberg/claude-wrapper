@@ -1,7 +1,8 @@
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::Claude;
 use crate::error::{Error, Result};
@@ -149,6 +150,17 @@ async fn run_internal(
     })
 }
 
+/// Run a command with a timeout, killing and reaping the child on expiration.
+///
+/// Spawns the child explicitly (rather than wrapping `Command::output()` in a
+/// `tokio::time::timeout`) so that we retain the handle and can SIGKILL the
+/// child and wait for it when the timeout fires. Stdout and stderr are drained
+/// concurrently with `child.wait()` via `tokio::join!` so neither pipe buffer
+/// can fill up and deadlock the child.
+///
+/// On timeout, partial stdout/stderr captured before the kill is logged at
+/// warn level; the returned `Error::Timeout` itself does not carry the
+/// partial output.
 async fn run_with_timeout(
     binary: &std::path::Path,
     args: &[String],
@@ -156,9 +168,97 @@ async fn run_with_timeout(
     working_dir: Option<&std::path::Path>,
     timeout: Duration,
 ) -> Result<CommandOutput> {
-    tokio::time::timeout(timeout, run_internal(binary, args, env, working_dir))
-        .await
-        .map_err(|_| Error::Timeout {
-            timeout_seconds: timeout.as_secs(),
-        })?
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| Error::Io {
+        message: format!("failed to spawn claude: {e}"),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
+    // Drain stdout and stderr concurrently with the process wait so
+    // neither pipe buffer can fill up and deadlock the child.
+    // tokio::join! polls all three on the same task; no tokio::spawn
+    // (and therefore no `rt` feature) required.
+    let wait_and_drain = async {
+        let (status, stdout_str, stderr_str) =
+            tokio::join!(child.wait(), drain(&mut stdout), drain(&mut stderr));
+        (status, stdout_str, stderr_str)
+    };
+
+    match tokio::time::timeout(timeout, wait_and_drain).await {
+        Ok((Ok(status), stdout, stderr)) => {
+            let exit_code = status.code().unwrap_or(-1);
+
+            if !status.success() {
+                return Err(Error::CommandFailed {
+                    command: format!("{} {}", binary.display(), args.join(" ")),
+                    exit_code,
+                    stdout,
+                    stderr,
+                    working_dir: working_dir.map(|p| p.to_path_buf()),
+                });
+            }
+
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                exit_code,
+                success: true,
+            })
+        }
+        Ok((Err(e), _stdout, _stderr)) => Err(Error::Io {
+            message: "failed to wait for claude process".to_string(),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        }),
+        Err(_) => {
+            // Timeout: kill the child (reaps via start_kill + wait).
+            // Note that kill() only targets the direct child; if it has
+            // spawned its own subprocesses that are holding our pipe
+            // fds open, draining would block. Cap the drain with a
+            // short deadline so the timeout error returns promptly.
+            let _ = child.kill().await;
+            let drain_budget = Duration::from_millis(200);
+            let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout))
+                .await
+                .unwrap_or_default();
+            let stderr_str = tokio::time::timeout(drain_budget, drain(&mut stderr))
+                .await
+                .unwrap_or_default();
+            if !stdout_str.is_empty() || !stderr_str.is_empty() {
+                warn!(
+                    stdout = %stdout_str,
+                    stderr = %stderr_str,
+                    "partial output from timed-out process",
+                );
+            }
+            Err(Error::Timeout {
+                timeout_seconds: timeout.as_secs(),
+            })
+        }
+    }
+}
+
+async fn drain<R: AsyncReadExt + Unpin>(reader: &mut R) -> String {
+    let mut buf = Vec::new();
+    let _ = reader.read_to_end(&mut buf).await;
+    String::from_utf8_lossy(&buf).into_owned()
 }

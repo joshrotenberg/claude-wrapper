@@ -885,4 +885,37 @@ mod tests {
         let args = cmd.args();
         assert!(args.contains(&"--tmux".to_string()));
     }
+
+    // ─── shell_quote unit tests (#455) ───
+
+    #[test]
+    fn shell_quote_plain_word_is_unchanged() {
+        assert_eq!(shell_quote("simple"), "simple");
+        assert_eq!(shell_quote(""), "");
+        assert_eq!(shell_quote("file.rs"), "file.rs");
+    }
+
+    #[test]
+    fn shell_quote_whitespace_gets_single_quoted() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("a\tb"), "'a\tb'");
+    }
+
+    #[test]
+    fn shell_quote_metacharacters_get_quoted() {
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("$VAR"), "'$VAR'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+        assert_eq!(shell_quote("(x)"), "'(x)'");
+    }
+
+    #[test]
+    fn shell_quote_embedded_single_quote_is_escaped() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_double_quote_gets_single_quoted() {
+        assert_eq!(shell_quote(r#"say "hi""#), r#"'say "hi"'"#);
+    }
 }
