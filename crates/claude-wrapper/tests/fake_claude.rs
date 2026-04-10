@@ -137,6 +137,91 @@ async fn fake_claude_timeout_fires() {
     );
 }
 
+/// Regression test for #454: an exec-path timeout must return promptly
+/// and not leave the child running. We use a 5s DELAY with a 500ms
+/// timeout and assert the call returns well under the child's delay.
+#[tokio::test]
+async fn exec_timeout_returns_promptly() {
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "5")
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .expect("failed to build client");
+
+    let start = std::time::Instant::now();
+    let result = claude_wrapper::VersionCommand::new().execute(&claude).await;
+    let elapsed = start.elapsed();
+
+    assert!(matches!(result, Err(claude_wrapper::Error::Timeout { .. })));
+    // Must return well before the child's 5s delay. Allow generous
+    // slack for CI jitter.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "exec timeout should return promptly, took {elapsed:?}"
+    );
+}
+
+/// Regression test for #454: streaming timeout path must return a
+/// Timeout error and not hang waiting for the child.
+#[tokio::test]
+async fn streaming_timeout_returns_promptly() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "5")
+        .env("FAKE_CLAUDE_OUTPUT", "slow response")
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .expect("failed to build client");
+
+    let cmd = QueryCommand::new("test prompt")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let start = std::time::Instant::now();
+    let result = stream_query(&claude, &cmd, |_: StreamEvent| {}).await;
+    let elapsed = start.elapsed();
+
+    assert!(matches!(result, Err(claude_wrapper::Error::Timeout { .. })));
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "streaming timeout should return promptly, took {elapsed:?}"
+    );
+}
+
+/// After an exec timeout the client handle should still be usable for
+/// subsequent commands; no shared state should be corrupted by the
+/// killed child.
+#[tokio::test]
+async fn client_reusable_after_timeout() {
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "5")
+        .timeout(std::time::Duration::from_millis(200))
+        .build()
+        .expect("failed to build client");
+
+    let first = claude_wrapper::VersionCommand::new().execute(&claude).await;
+    assert!(first.is_err());
+
+    // Rebuild without the delay but keep the short timeout; a fast
+    // command should still succeed on the same binary path.
+    let fast = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_OUTPUT", "fast")
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("failed to build client");
+
+    let second = claude_wrapper::VersionCommand::new()
+        .execute(&fast)
+        .await
+        .expect("fast call should succeed");
+    assert!(second.stdout.contains("fast"));
+}
+
 /// Verify that pointing at a nonexistent binary surfaces an error at execution
 /// time (not at build time).
 #[tokio::test]

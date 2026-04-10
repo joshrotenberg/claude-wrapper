@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tracing::debug;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{ChildStderr, Command};
+use tracing::{debug, warn};
 
 use crate::Claude;
 use crate::error::{Error, Result};
@@ -88,18 +88,26 @@ pub async fn stream_query<F>(
 where
     F: FnMut(StreamEvent),
 {
-    if let Some(timeout) = claude.timeout {
-        stream_query_with_timeout(claude, cmd, handler, timeout).await
-    } else {
-        stream_query_internal(claude, cmd, handler).await
-    }
+    stream_query_impl(claude, cmd, handler, claude.timeout).await
 }
 
+/// Unified streaming implementation with optional timeout.
+///
+/// Reads stderr concurrently in a background task so a chatty child
+/// cannot deadlock by filling the stderr pipe buffer, and so any
+/// captured stderr is available even on timeout or IO error.
+///
+/// On timeout, the child is killed and reaped (`kill().await` sends
+/// SIGKILL and waits), and whatever stderr was produced is logged at
+/// warn level. The returned `Error::Timeout` does not carry partial
+/// output -- streamed stdout events were already dispatched to the
+/// handler as they arrived.
 #[cfg(feature = "json")]
-async fn stream_query_internal<F>(
+async fn stream_query_impl<F>(
     claude: &Claude,
     cmd: &crate::command::query::QueryCommand,
     mut handler: F,
+    timeout: Option<Duration>,
 ) -> Result<CommandOutput>
 where
     F: FnMut(StreamEvent),
@@ -112,7 +120,12 @@ where
     command_args.extend(claude.global_args.clone());
     command_args.extend(args);
 
-    debug!(binary = %claude.binary.display(), args = ?command_args, "streaming claude command");
+    debug!(
+        binary = %claude.binary.display(),
+        args = ?command_args,
+        timeout = ?timeout,
+        "streaming claude command"
+    );
 
     let mut cmd = Command::new(&claude.binary);
     cmd.args(&command_args)
@@ -133,137 +146,84 @@ where
     })?;
 
     let stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
     let mut reader = BufReader::new(stdout).lines();
 
-    while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
-        message: "failed to read stdout line".to_string(),
-        source: e,
-        working_dir: claude.working_dir.clone(),
-    })? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<StreamEvent>(&line) {
-            Ok(event) => handler(event),
-            Err(e) => {
-                debug!(line = %line, error = %e, "failed to parse stream event, skipping");
+    // Run stdout line reading and stderr draining concurrently so a
+    // chatty child can't deadlock by filling the stderr pipe buffer.
+    // tokio::join! polls both futures on the same task (no tokio::spawn
+    // needed, so we avoid pulling in the `rt` feature).
+    let drain = drain_stderr(&mut stderr);
+    let read_future = read_lines(&mut reader, &mut handler, claude.working_dir.clone());
+    let combined = async {
+        let (line_result, stderr_str) = tokio::join!(read_future, drain);
+        (line_result, stderr_str)
+    };
+
+    let (line_result, stderr_str) = match timeout {
+        Some(d) => match tokio::time::timeout(d, combined).await {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Timeout: kill the child (reaps via start_kill + wait)
+                // and try to drain whatever stderr remains. kill() only
+                // targets the direct child, so a subprocess tree holding
+                // our pipe fds could block the drain -- cap it with a
+                // short deadline.
+                let _ = child.kill().await;
+                let drain_budget = Duration::from_millis(200);
+                let stderr_str = tokio::time::timeout(drain_budget, drain_stderr(&mut stderr))
+                    .await
+                    .unwrap_or_default();
+                if !stderr_str.is_empty() {
+                    warn!(stderr = %stderr_str, "stderr from timed-out streaming process");
+                }
+                return Err(Error::Timeout {
+                    timeout_seconds: d.as_secs(),
+                });
             }
-        }
+        },
+        None => combined.await,
+    };
+
+    // If reading lines failed partway through (IO error, not timeout),
+    // clean up the child before returning.
+    if let Err(e) = line_result {
+        let _ = child.kill().await;
+        return Err(e);
     }
 
-    let output = child.wait_with_output().await.map_err(|e| Error::Io {
+    let status = child.wait().await.map_err(|e| Error::Io {
         message: "failed to wait for claude process".to_string(),
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
+    let exit_code = status.code().unwrap_or(-1);
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(Error::CommandFailed {
             command: format!("{} {}", claude.binary.display(), command_args.join(" ")),
             exit_code,
             stdout: String::new(),
-            stderr,
+            stderr: stderr_str,
             working_dir: claude.working_dir.clone(),
         });
     }
 
     Ok(CommandOutput {
         stdout: String::new(), // already consumed via streaming
-        stderr,
+        stderr: stderr_str,
         exit_code,
         success: true,
     })
 }
 
 #[cfg(feature = "json")]
-async fn stream_query_with_timeout<F>(
-    claude: &Claude,
-    cmd: &crate::command::query::QueryCommand,
-    mut handler: F,
-    timeout: Duration,
-) -> Result<CommandOutput>
-where
-    F: FnMut(StreamEvent),
-{
-    use crate::command::ClaudeCommand;
-
-    let args = cmd.args();
-
-    let mut command_args = Vec::new();
-    command_args.extend(claude.global_args.clone());
-    command_args.extend(args);
-
-    debug!(binary = %claude.binary.display(), args = ?command_args, "streaming claude command with timeout");
-
-    let mut cmd = Command::new(&claude.binary);
-    cmd.args(&command_args)
-        .env_remove("CLAUDECODE")
-        .envs(&claude.env)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
-
-    if let Some(ref dir) = claude.working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: claude.working_dir.clone(),
-    })?;
-
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let mut reader = BufReader::new(stdout).lines();
-
-    // Wrap the line-reading in a timeout
-    let result = tokio::time::timeout(
-        timeout,
-        read_lines(&mut reader, &mut handler, claude.working_dir.clone()),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(())) => {
-            // Successfully read all lines; now wait for the process
-            let output = child.wait_with_output().await.map_err(|e| Error::Io {
-                message: "failed to wait for claude process".to_string(),
-                source: e,
-                working_dir: claude.working_dir.clone(),
-            })?;
-
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            if !output.status.success() {
-                return Err(Error::CommandFailed {
-                    command: format!("{} {}", claude.binary.display(), command_args.join(" ")),
-                    exit_code,
-                    stdout: String::new(),
-                    stderr,
-                    working_dir: claude.working_dir.clone(),
-                });
-            }
-
-            Ok(CommandOutput {
-                stdout: String::new(), // already consumed via streaming
-                stderr,
-                exit_code,
-                success: true,
-            })
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            // Timeout occurred; kill the child process
-            let _ = child.kill().await;
-            Err(Error::Timeout {
-                timeout_seconds: timeout.as_secs(),
-            })
-        }
-    }
+async fn drain_stderr(stderr: &mut ChildStderr) -> String {
+    let mut buf = Vec::new();
+    let _ = stderr.read_to_end(&mut buf).await;
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 #[cfg(feature = "json")]
