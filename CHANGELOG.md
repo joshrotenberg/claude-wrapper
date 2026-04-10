@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.5.0...v0.5.1) - 2026-04-10
+
+### Other
+
+- deprecation banners on unmaintained crates; audit wrapper README ([#531](https://github.com/joshrotenberg/claude-wrapper/pull/531))
+- exclude deprecated crates from workspace ([#530](https://github.com/joshrotenberg/claude-wrapper/pull/530))
+
 ## [0.5.0] - 2026-04-10
 
 ### Bug Fixes
