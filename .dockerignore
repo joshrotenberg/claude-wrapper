@@ -1,6 +1,0 @@
-target/
-.git/
-.github/
-*.md
-.mcp.json
-.claude/
