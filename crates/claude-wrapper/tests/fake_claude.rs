@@ -322,100 +322,205 @@ async fn command_failed_without_working_dir_is_none() {
     }
 }
 
-/// Verify that Session tracks cumulative cost and turns across queries.
+// ── Session API (#523) ───────────────────────────────────────────────
+
+/// New session: first `send` discovers the id; second `send` reuses it
+/// via --resume, and cumulative cost/turns accumulate.
 #[tokio::test]
-async fn session_query_resumes_and_tracks_cost() {
+async fn session_send_accumulates_across_turns() {
     use claude_wrapper::session::Session;
+    use std::sync::Arc;
 
-    let claude = claude_with_env(&[
-        ("FAKE_CLAUDE_OUTPUT", "first"),
-        ("FAKE_CLAUDE_SESSION_ID", "sess-001"),
-        ("FAKE_CLAUDE_COST_USD", "0.05"),
-        ("FAKE_CLAUDE_NUM_TURNS", "3"),
-    ]);
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "hello")
+            .env("FAKE_CLAUDE_SESSION_ID", "sess-001")
+            .env("FAKE_CLAUDE_COST_USD", "0.05")
+            .env("FAKE_CLAUDE_NUM_TURNS", "2")
+            .build()
+            .expect("failed to build client"),
+    );
 
-    // Initial query to get a session
-    let first = QueryCommand::new("start")
-        .execute_json(&claude)
+    let mut session = Session::new(Arc::clone(&claude));
+    assert!(session.id().is_none());
+
+    let first = session
+        .send("start")
         .await
-        .expect("initial query should succeed");
-
+        .expect("first send should succeed");
     assert_eq!(first.session_id, "sess-001");
-
-    let mut session = Session::from_result(&claude, &first);
-    assert_eq!(session.id(), "sess-001");
+    assert_eq!(session.id(), Some("sess-001"));
     assert!((session.total_cost_usd() - 0.05).abs() < f64::EPSILON);
-    assert_eq!(session.total_turns(), 3);
+    assert_eq!(session.total_turns(), 2);
+    assert_eq!(session.history().len(), 1);
 
-    // Follow-up query accumulates
     let second = session
-        .query("follow up")
-        .execute()
+        .send("follow up")
         .await
-        .expect("follow-up query should succeed");
-
+        .expect("second send should succeed");
     assert_eq!(second.session_id, "sess-001");
     assert!((session.total_cost_usd() - 0.10).abs() < f64::EPSILON);
-    assert_eq!(session.total_turns(), 6);
-}
-
-/// Verify that Session::fork() uses --fork-session and returns a new session.
-#[tokio::test]
-async fn session_fork_creates_new_session() {
-    use claude_wrapper::session::Session;
-
-    let claude = claude_with_env(&[
-        ("FAKE_CLAUDE_OUTPUT", "forked"),
-        ("FAKE_CLAUDE_SESSION_ID", "sess-original"),
-        ("FAKE_CLAUDE_FORKED_SESSION_ID", "sess-forked"),
-        ("FAKE_CLAUDE_COST_USD", "0.02"),
-        ("FAKE_CLAUDE_NUM_TURNS", "1"),
-    ]);
-
-    let session = Session::from_id(&claude, "sess-original");
-
-    let (forked, result) = session
-        .fork("branch this conversation")
-        .await
-        .expect("fork should succeed");
-
-    assert_eq!(result.session_id, "sess-forked");
-    assert_eq!(forked.id(), "sess-forked");
-    // Original session is not modified
-    assert_eq!(session.id(), "sess-original");
-}
-
-/// Verify that Session::continue_recent() uses --continue on the first query.
-#[tokio::test]
-async fn session_continue_recent() {
-    use claude_wrapper::session::Session;
-
-    let claude = claude_with_env(&[
-        ("FAKE_CLAUDE_OUTPUT", "continued"),
-        ("FAKE_CLAUDE_SESSION_ID", "sess-recent"),
-        ("FAKE_CLAUDE_COST_USD", "0.01"),
-        ("FAKE_CLAUDE_NUM_TURNS", "2"),
-    ]);
-
-    let (mut session, first) = Session::continue_recent(&claude, "continue from before")
-        .await
-        .expect("continue_recent should succeed");
-
-    assert_eq!(first.session_id, "sess-recent");
-    assert_eq!(session.id(), "sess-recent");
-    assert!((session.total_cost_usd() - 0.01).abs() < f64::EPSILON);
-    assert_eq!(session.total_turns(), 2);
-
-    // Subsequent query uses --resume
-    let second = session
-        .query("and then?")
-        .execute()
-        .await
-        .expect("follow-up should succeed");
-
-    assert_eq!(second.session_id, "sess-recent");
-    assert!((session.total_cost_usd() - 0.02).abs() < f64::EPSILON);
     assert_eq!(session.total_turns(), 4);
+    assert_eq!(session.history().len(), 2);
+    assert_eq!(
+        session.last_result().map(|r| r.result.as_str()),
+        Some("hello")
+    );
+}
+
+/// Session::resume starts with a preset id that gets passed on the
+/// first turn.
+#[tokio::test]
+async fn session_resume_uses_preset_id() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "resumed")
+            .env("FAKE_CLAUDE_SESSION_ID", "sess-preset")
+            .build()
+            .expect("failed to build client"),
+    );
+
+    let mut session = Session::resume(claude, "sess-preset");
+    assert_eq!(session.id(), Some("sess-preset"));
+
+    let result = session
+        .send("pick up where we left off")
+        .await
+        .expect("resumed send should succeed");
+    assert_eq!(result.session_id, "sess-preset");
+}
+
+/// Session::execute accepts a caller-built QueryCommand and overrides
+/// any session-related flags the caller set.
+#[tokio::test]
+async fn session_execute_overrides_conflicting_flags() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "ok")
+            .env("FAKE_CLAUDE_SESSION_ID", "sess-real")
+            .build()
+            .expect("failed to build client"),
+    );
+
+    let mut session = Session::resume(Arc::clone(&claude), "sess-real");
+
+    // Caller builds a command with a stale/conflicting resume id +
+    // continue flag. Session::execute should clear those and inject
+    // the session's actual id.
+    let cmd = QueryCommand::new("hi")
+        .model("sonnet")
+        .resume("stale-id")
+        .continue_session();
+
+    let result = session.execute(cmd).await.expect("execute should succeed");
+    // The fake binary echoes whatever session id is in its env var,
+    // but the important check is that the call succeeded (it would
+    // have errored with conflicting --resume + --continue on a real
+    // CLI).
+    assert_eq!(result.session_id, "sess-real");
+}
+
+/// Session::stream captures the session id from the first event that
+/// carries one, even if the caller ignores the session_id field in
+/// their handler.
+#[tokio::test]
+async fn session_stream_captures_session_id() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "streamed")
+            .env("FAKE_CLAUDE_SESSION_ID", "sess-stream-1")
+            .env("FAKE_CLAUDE_COST_USD", "0.03")
+            .env("FAKE_CLAUDE_NUM_TURNS", "1")
+            .build()
+            .expect("failed to build client"),
+    );
+
+    let mut session = Session::new(Arc::clone(&claude));
+    let mut event_count = 0;
+
+    session
+        .stream("tell me a story", |_| {
+            event_count += 1;
+        })
+        .await
+        .expect("stream should succeed");
+
+    assert!(
+        event_count >= 3,
+        "expected at least 3 events (system/assistant/result)"
+    );
+    assert_eq!(session.id(), Some("sess-stream-1"));
+    assert!((session.total_cost_usd() - 0.03).abs() < f64::EPSILON);
+    assert_eq!(session.total_turns(), 1);
+    assert_eq!(session.history().len(), 1);
+}
+
+/// After a stream, a subsequent plain `send` resumes the captured id.
+#[tokio::test]
+async fn session_stream_then_send_resumes() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "x")
+            .env("FAKE_CLAUDE_SESSION_ID", "sess-stream-2")
+            .build()
+            .expect("failed to build client"),
+    );
+
+    let mut session = Session::new(Arc::clone(&claude));
+    session
+        .stream("first", |_| {})
+        .await
+        .expect("stream should succeed");
+    assert_eq!(session.id(), Some("sess-stream-2"));
+
+    let second = session
+        .send("second")
+        .await
+        .expect("follow-up send should succeed");
+    assert_eq!(second.session_id, "sess-stream-2");
+}
+
+/// Session is Send + Sync (compile check): Arc<Claude> unlocks this.
+#[tokio::test]
+async fn session_is_send_and_sync() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Session>();
+
+    // And can be moved into a spawned task.
+    let claude = Arc::new(
+        Claude::builder()
+            .binary(fake_binary())
+            .env("FAKE_CLAUDE_OUTPUT", "spawned")
+            .build()
+            .expect("failed to build client"),
+    );
+
+    let session = Session::new(claude);
+    let handle = tokio::spawn(async move {
+        // just exercise that Session moved in
+        session.id().map(|s| s.to_string())
+    });
+    let _ = handle.await.unwrap();
 }
 
 // ── Subcommand execution tests ───────────────────────────────────────

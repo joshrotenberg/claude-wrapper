@@ -323,6 +323,23 @@ mod tests {
     }
 
     #[test]
+    fn query_result_from_stream_result_event() {
+        // Exact shape of a --output-format stream-json "result" event.
+        // The flattened `extra` must absorb type/subtype without
+        // breaking typed field parsing.
+        let json = r#"{"type":"result","subtype":"success","result":"streamed","session_id":"sess-1","total_cost_usd":0.03,"num_turns":1,"is_error":false}"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.cost_usd, Some(0.03));
+        assert_eq!(qr.num_turns, Some(1));
+        assert_eq!(qr.session_id, "sess-1");
+        assert_eq!(qr.result, "streamed");
+        assert_eq!(
+            qr.extra.get("type").and_then(|v| v.as_str()),
+            Some("result")
+        );
+    }
+
+    #[test]
     fn query_result_deserializes_num_turns() {
         let json = r#"{"result":"done","session_id":"s2","total_cost_usd":0.1,"num_turns":5,"is_error":false}"#;
         let qr: QueryResult = serde_json::from_str(json).unwrap();
