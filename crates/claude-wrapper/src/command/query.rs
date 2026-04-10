@@ -241,6 +241,7 @@ impl QueryCommand {
     /// `--continue`, `--session-id`, or `--fork-session`). Keeping the
     /// override logic in one place prevents conflicting flags from reaching
     /// the CLI.
+    #[cfg(feature = "json")]
     pub(crate) fn replace_session(mut self, id: impl Into<String>) -> Self {
         self.continue_session = false;
         self.resume = Some(id.into());

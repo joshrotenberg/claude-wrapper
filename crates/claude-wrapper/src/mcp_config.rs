@@ -168,6 +168,7 @@ impl McpConfigBuilder {
                     std::io::ErrorKind::Unsupported,
                     "json feature not enabled",
                 ),
+                working_dir: None,
             })
         }
     }

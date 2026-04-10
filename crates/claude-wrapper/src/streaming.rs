@@ -1,11 +1,18 @@
+#[cfg(feature = "json")]
 use std::time::Duration;
 
+#[cfg(feature = "json")]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+#[cfg(feature = "json")]
 use tokio::process::{ChildStderr, Command};
+#[cfg(feature = "json")]
 use tracing::{debug, warn};
 
+#[cfg(feature = "json")]
 use crate::Claude;
+#[cfg(feature = "json")]
 use crate::error::{Error, Result};
+#[cfg(feature = "json")]
 use crate::exec::CommandOutput;
 
 /// A single line from `--output-format stream-json` output.
