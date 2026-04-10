@@ -1,7 +1,7 @@
 FROM rust:1.90-bookworm AS builder
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock dist-workspace.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
 RUN cargo build --release --bin claude-pool-server
