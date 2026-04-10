@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/claude-wrapper",
+members = ["crates/claude-wrapper"]
+# Deprecated, unmaintained crates. Kept on disk for history but excluded
+# from the workspace so they don't pollute CI, `cargo test`, or
+# dependabot scans. Revive by moving back into `members` if needed.
+exclude = [
     "crates/claude-pool",
     "crates/claude-pool-mcp",
     "crates/claudes",
@@ -17,7 +20,6 @@ repository = "https://github.com/joshrotenberg/claude-wrapper"
 
 [workspace.dependencies]
 claude-wrapper = { path = "crates/claude-wrapper", version = "0.5" }
-claude-pool = { path = "crates/claude-pool", version = "0.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
