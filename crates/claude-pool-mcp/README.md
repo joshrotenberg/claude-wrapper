@@ -1,5 +1,13 @@
 # claude-pool-mcp
 
+> **⚠ DEPRECATED — unmaintained and not published.**
+>
+> `claude-pool-mcp` is kept in the repo for git history but is `publish = false`, excluded from the workspace build, and will not receive updates. This crate depends on the also-deprecated [`claude-pool`](../claude-pool/). The maintained crate in this repo is [`claude-wrapper`](../claude-wrapper/).
+>
+> To revive this crate, move it from `[workspace] exclude` back into `[workspace] members` in the root `Cargo.toml`.
+
+---
+
 MCP server exposing claude-pool as tools for Claude Code.
 
 ## Overview

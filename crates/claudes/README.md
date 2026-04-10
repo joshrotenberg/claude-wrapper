@@ -1,5 +1,13 @@
 # claudes
 
+> **⚠ DEPRECATED — unmaintained and not published.**
+>
+> `claudes` is kept in the repo for git history but is `publish = false`, excluded from the workspace build, and will not receive updates. This tool was an experiment in manifest-driven parallel execution; similar functionality is being pursued in a separate project. The maintained crate in this repo is [`claude-wrapper`](../claude-wrapper/).
+>
+> To revive this crate, move it from `[workspace] exclude` back into `[workspace] members` in the root `Cargo.toml`.
+
+---
+
 Manifest-driven execution engine for headless Claude Code sessions.
 
 Write a manifest describing your tasks. claudes runs them in parallel, each in its own git
