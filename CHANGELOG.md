@@ -2,12 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.5.0...v0.5.1) - 2026-04-10
+## [0.5.1] - 2026-04-10
 
-### Other
+### Documentation
 
-- deprecation banners on unmaintained crates; audit wrapper README ([#531](https://github.com/joshrotenberg/claude-wrapper/pull/531))
-- exclude deprecated crates from workspace ([#530](https://github.com/joshrotenberg/claude-wrapper/pull/530))
+- Deprecation banners on unmaintained crates; audit wrapper README 
+
+### Miscellaneous
+
+- Update changelog 
+- Exclude deprecated crates from workspace 
+- Remove stale root-level files; rewrite AGENTS.md for 0.5.0 
+- Release v0.5.1 
 
 ## [0.5.0] - 2026-04-10
 
