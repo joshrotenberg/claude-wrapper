@@ -45,6 +45,14 @@ pub enum Error {
         found: crate::version::CliVersion,
         minimum: crate::version::CliVersion,
     },
+
+    /// Construction of a `dangerous::Client` was attempted without
+    /// the opt-in env-var set. The env-var name is a compile-time
+    /// constant exported from [`crate::dangerous::ALLOW_ENV`].
+    #[error(
+        "dangerous operations are not allowed; set the env var `{env_var}=1` at process start if you really mean it"
+    )]
+    DangerousNotAllowed { env_var: &'static str },
 }
 
 impl From<std::io::Error> for Error {

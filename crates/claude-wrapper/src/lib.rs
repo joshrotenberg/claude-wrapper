@@ -165,6 +165,7 @@
 //! ```
 
 pub mod command;
+pub mod dangerous;
 pub mod error;
 pub mod exec;
 pub mod mcp_config;

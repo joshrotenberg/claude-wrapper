@@ -120,6 +120,22 @@ pub enum PermissionMode {
     /// Auto-accept file edits.
     AcceptEdits,
     /// Bypass all permission checks.
+    ///
+    /// **Deprecated.** Reaching for this variant directly puts a
+    /// bypass-mode query one keystroke away in any code path, which
+    /// is exactly the footgun the variant enables. Use
+    /// [`crate::dangerous::DangerousClient`] instead, which gates
+    /// construction on the `CLAUDE_WRAPPER_ALLOW_DANGEROUS` env-var
+    /// and makes the intent obvious at the call site. The variant
+    /// itself will stay available through the current major version
+    /// so existing callers keep compiling (with a deprecation
+    /// warning).
+    #[deprecated(
+        since = "0.5.1",
+        note = "use claude_wrapper::dangerous::DangerousClient instead; \
+                direct BypassPermissions usage is a footgun and will go \
+                away in a future major release"
+    )]
     BypassPermissions,
     /// Don't ask for permissions (deny by default).
     DontAsk,
@@ -134,6 +150,7 @@ impl PermissionMode {
         match self {
             Self::Default => "default",
             Self::AcceptEdits => "acceptEdits",
+            #[allow(deprecated)]
             Self::BypassPermissions => "bypassPermissions",
             Self::DontAsk => "dontAsk",
             Self::Plan => "plan",

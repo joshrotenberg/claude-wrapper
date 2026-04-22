@@ -700,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises PermissionMode::BypassPermissions directly; prefer dangerous::DangerousClient in new code
     fn test_full_query_args() {
         let cmd = QueryCommand::new("explain this")
             .model("sonnet")
