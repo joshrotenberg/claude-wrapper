@@ -53,6 +53,12 @@ pub enum Error {
         "dangerous operations are not allowed; set the env var `{env_var}=1` at process start if you really mean it"
     )]
     DangerousNotAllowed { env_var: &'static str },
+
+    /// A configured [`BudgetTracker`](crate::budget::BudgetTracker) has
+    /// hit its `max_usd` ceiling. Raised before the next call is
+    /// dispatched, so the CLI is not invoked.
+    #[error("budget exceeded: ${total_usd:.4} spent, ${max_usd:.4} max")]
+    BudgetExceeded { total_usd: f64, max_usd: f64 },
 }
 
 impl From<std::io::Error> for Error {

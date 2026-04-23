@@ -164,6 +164,7 @@
 //! # }
 //! ```
 
+pub mod budget;
 pub mod command;
 pub mod dangerous;
 pub mod error;
@@ -180,6 +181,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use budget::{BudgetBuilder, BudgetTracker};
 pub use command::ClaudeCommand;
 pub use command::agents::AgentsCommand;
 pub use command::auth::{
