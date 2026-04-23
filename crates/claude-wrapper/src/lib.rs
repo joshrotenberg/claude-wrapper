@@ -174,6 +174,7 @@ pub mod retry;
 #[cfg(feature = "json")]
 pub mod session;
 pub mod streaming;
+pub mod tool_pattern;
 pub mod types;
 pub mod version;
 
@@ -211,6 +212,7 @@ pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use retry::{BackoffStrategy, RetryPolicy};
 #[cfg(feature = "json")]
 pub use session::Session;
+pub use tool_pattern::{PatternError, ToolPattern};
 pub use types::*;
 pub use version::{CliVersion, VersionParseError};
 
