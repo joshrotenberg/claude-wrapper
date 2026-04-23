@@ -121,3 +121,90 @@ fn sync_large_output_does_not_deadlock_with_timeout() {
     assert!(output.success);
     assert!(output.stdout.len() >= big.len());
 }
+
+// ── command-surface tests ─────────────────────────────────────────
+
+#[test]
+fn sync_version_command_via_blanket_trait() {
+    use claude_wrapper::{ClaudeCommandSyncExt, VersionCommand};
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "1.2.3 (Claude Code)")]);
+    let output = VersionCommand::new()
+        .execute_sync(&claude)
+        .expect("VersionCommand::execute_sync should succeed");
+    assert!(output.success);
+    assert!(output.stdout.contains("1.2.3"));
+}
+
+#[test]
+fn sync_claude_cli_version_helper() {
+    use claude_wrapper::CliVersion;
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "1.2.3 (Claude Code)")]);
+    let version = claude
+        .cli_version_sync()
+        .expect("cli_version_sync should succeed");
+    assert_eq!(version, CliVersion::new(1, 2, 3));
+}
+
+#[test]
+fn sync_claude_check_version_helper() {
+    use claude_wrapper::CliVersion;
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "2.0.0 (Claude Code)")]);
+    let v = claude
+        .check_version_sync(&CliVersion::new(1, 0, 0))
+        .expect("check_version_sync should satisfy minimum");
+    assert_eq!(v, CliVersion::new(2, 0, 0));
+
+    let err = claude
+        .check_version_sync(&CliVersion::new(3, 0, 0))
+        .expect_err("check_version_sync should reject too-low version");
+    assert!(
+        err.to_string()
+            .contains("does not meet minimum requirement")
+    );
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn sync_query_execute_json_parses_result() {
+    use claude_wrapper::QueryCommand;
+
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "42"),
+        ("FAKE_CLAUDE_SESSION_ID", "sync-sess"),
+    ]);
+
+    let result = QueryCommand::new("what is 2+2?")
+        .no_session_persistence()
+        .execute_json_sync(&claude)
+        .expect("execute_json_sync should succeed");
+
+    assert_eq!(result.result, "42");
+    assert_eq!(result.session_id, "sync-sess");
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn sync_query_execute_retries_via_policy() {
+    // Sync execute_sync on QueryCommand must go through the retry-aware
+    // helper. We exercise that path indirectly: set a policy and let
+    // a successful call go through without errors.
+    use claude_wrapper::{QueryCommand, RetryPolicy};
+    use std::time::Duration;
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "ok")]);
+    let cmd = QueryCommand::new("ping").no_session_persistence().retry(
+        RetryPolicy::new()
+            .max_attempts(2)
+            .initial_backoff(Duration::from_millis(1))
+            .retry_on_timeout(true),
+    );
+
+    let out = cmd
+        .execute_sync(&claude)
+        .expect("sync query with retry policy should succeed");
+    assert!(out.success);
+    assert!(out.stdout.contains("ok"));
+}

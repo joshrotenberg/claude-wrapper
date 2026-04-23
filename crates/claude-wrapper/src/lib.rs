@@ -184,6 +184,8 @@ use std::time::Duration;
 
 pub use budget::{BudgetBuilder, BudgetTracker};
 pub use command::ClaudeCommand;
+#[cfg(feature = "sync")]
+pub use command::ClaudeCommandSyncExt;
 pub use command::agents::AgentsCommand;
 pub use command::auth::{
     AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, SetupTokenCommand,
@@ -298,6 +300,33 @@ impl Claude {
     /// ```
     pub async fn check_version(&self, minimum: &CliVersion) -> Result<CliVersion> {
         let version = self.cli_version().await?;
+        if version.satisfies_minimum(minimum) {
+            Ok(version)
+        } else {
+            Err(Error::VersionMismatch {
+                found: version,
+                minimum: *minimum,
+            })
+        }
+    }
+
+    /// Blocking mirror of [`Claude::cli_version`]. Requires the
+    /// `sync` feature.
+    #[cfg(feature = "sync")]
+    pub fn cli_version_sync(&self) -> Result<CliVersion> {
+        let output = VersionCommand::new().execute_sync(self)?;
+        CliVersion::parse_version_output(&output.stdout).map_err(|e| Error::Io {
+            message: format!("failed to parse CLI version: {e}"),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+            working_dir: None,
+        })
+    }
+
+    /// Blocking mirror of [`Claude::check_version`]. Requires the
+    /// `sync` feature.
+    #[cfg(feature = "sync")]
+    pub fn check_version_sync(&self, minimum: &CliVersion) -> Result<CliVersion> {
+        let version = self.cli_version_sync()?;
         if version.satisfies_minimum(minimum) {
             Ok(version)
         } else {
