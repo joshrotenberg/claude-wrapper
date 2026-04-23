@@ -2,6 +2,7 @@ use crate::Claude;
 use crate::command::ClaudeCommand;
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
+use crate::tool_pattern::ToolPattern;
 use crate::types::{Effort, InputFormat, OutputFormat, PermissionMode};
 
 /// Builder for `claude -p <prompt>` (oneshot print-mode queries).
@@ -35,8 +36,8 @@ pub struct QueryCommand {
     output_format: Option<OutputFormat>,
     max_budget_usd: Option<f64>,
     permission_mode: Option<PermissionMode>,
-    allowed_tools: Vec<String>,
-    disallowed_tools: Vec<String>,
+    allowed_tools: Vec<ToolPattern>,
+    disallowed_tools: Vec<ToolPattern>,
     mcp_config: Vec<String>,
     add_dir: Vec<String>,
     effort: Option<Effort>,
@@ -156,25 +157,54 @@ impl QueryCommand {
         self
     }
 
-    /// Add allowed tools (e.g. "Bash", "Read", "mcp__my-server__*").
+    /// Add allowed tool patterns.
+    ///
+    /// Accepts anything convertible into [`ToolPattern`], including
+    /// bare strings (e.g. `"Bash"`, `"Bash(git log:*)"`,
+    /// `"mcp__my-server__*"`) and values produced by
+    /// [`ToolPattern`]'s constructors.
+    ///
+    /// ```
+    /// use claude_wrapper::{QueryCommand, ToolPattern};
+    ///
+    /// let cmd = QueryCommand::new("hi")
+    ///     .allowed_tools(["Bash", "Read"]) // raw strings still work
+    ///     .allowed_tool(ToolPattern::tool_with_args("Bash", "git log:*"))
+    ///     .allowed_tool(ToolPattern::all("Write"));
+    /// ```
     #[must_use]
-    pub fn allowed_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn allowed_tools<I, T>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<ToolPattern>,
+    {
         self.allowed_tools.extend(tools.into_iter().map(Into::into));
         self
     }
 
-    /// Add a single allowed tool.
+    /// Add a single allowed tool pattern.
     #[must_use]
-    pub fn allowed_tool(mut self, tool: impl Into<String>) -> Self {
+    pub fn allowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
         self.allowed_tools.push(tool.into());
         self
     }
 
-    /// Add disallowed tools.
+    /// Add disallowed tool patterns.
     #[must_use]
-    pub fn disallowed_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn disallowed_tools<I, T>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<ToolPattern>,
+    {
         self.disallowed_tools
             .extend(tools.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a single disallowed tool pattern.
+    #[must_use]
+    pub fn disallowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
+        self.disallowed_tools.push(tool.into());
         self
     }
 
@@ -518,12 +548,12 @@ impl QueryCommand {
 
         if !self.allowed_tools.is_empty() {
             args.push("--allowed-tools".to_string());
-            args.push(self.allowed_tools.join(","));
+            args.push(join_patterns(&self.allowed_tools));
         }
 
         if !self.disallowed_tools.is_empty() {
             args.push("--disallowed-tools".to_string());
-            args.push(self.disallowed_tools.join(","));
+            args.push(join_patterns(&self.disallowed_tools));
         }
 
         for config in &self.mcp_config {
@@ -688,6 +718,17 @@ fn shell_quote(arg: &str) -> String {
     }
 }
 
+fn join_patterns(patterns: &[ToolPattern]) -> String {
+    let mut out = String::new();
+    for (i, p) in patterns.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(p.as_str());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +776,54 @@ mod tests {
         // Prompt is last, preceded by -- separator
         assert_eq!(args.last().unwrap(), "explain this");
         assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
+    fn typed_patterns_render_in_allowed_tools() {
+        use crate::ToolPattern;
+
+        let cmd = QueryCommand::new("hi")
+            .allowed_tool(ToolPattern::tool("Read"))
+            .allowed_tool(ToolPattern::tool_with_args("Bash", "git log:*"))
+            .allowed_tool(ToolPattern::all("Write"))
+            .allowed_tool(ToolPattern::mcp("srv", "*"));
+
+        let args = cmd.args();
+        let joined = args
+            .iter()
+            .position(|a| a == "--allowed-tools")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert_eq!(joined, "Read,Bash(git log:*),Write(*),mcp__srv__*");
+    }
+
+    #[test]
+    fn disallowed_tool_singular_appends() {
+        use crate::ToolPattern;
+
+        let cmd = QueryCommand::new("hi")
+            .disallowed_tool("Write")
+            .disallowed_tool(ToolPattern::tool_with_args("Bash", "rm*"));
+
+        let args = cmd.args();
+        let joined = args
+            .iter()
+            .position(|a| a == "--disallowed-tools")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert_eq!(joined, "Write,Bash(rm*)");
+    }
+
+    #[test]
+    fn mixed_string_and_typed_patterns_both_accepted() {
+        use crate::ToolPattern;
+
+        // Smoke test for API ergonomics: one plural call with mixed
+        // inputs should compile even though the builder is generic
+        // over T: Into<ToolPattern>.
+        let strs: Vec<ToolPattern> = vec!["Bash".into(), ToolPattern::all("Read")];
+        let cmd = QueryCommand::new("hi").allowed_tools(strs);
+        assert!(cmd.args().contains(&"--allowed-tools".to_string()));
     }
 
     #[test]
