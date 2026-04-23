@@ -271,6 +271,9 @@ pub use command::agents::AgentsCommand;
 pub use command::auth::{
     AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, SetupTokenCommand,
 };
+pub use command::auto_mode::{
+    AutoModeConfigCommand, AutoModeCritiqueCommand, AutoModeDefaultsCommand,
+};
 pub use command::doctor::DoctorCommand;
 pub use command::marketplace::{
     MarketplaceAddCommand, MarketplaceListCommand, MarketplaceRemoveCommand,

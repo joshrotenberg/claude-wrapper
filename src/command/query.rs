@@ -67,6 +67,11 @@ pub struct QueryCommand {
     plugin_dirs: Vec<String>,
     setting_sources: Option<String>,
     tmux: bool,
+    bare: bool,
+    disable_slash_commands: bool,
+    include_hook_events: bool,
+    exclude_dynamic_system_prompt_sections: bool,
+    name: Option<String>,
 }
 
 impl QueryCommand {
@@ -112,6 +117,11 @@ impl QueryCommand {
             plugin_dirs: Vec::new(),
             setting_sources: None,
             tmux: false,
+            bare: false,
+            disable_slash_commands: false,
+            include_hook_events: false,
+            exclude_dynamic_system_prompt_sections: false,
+            name: None,
         }
     }
 
@@ -430,6 +440,62 @@ impl QueryCommand {
         self
     }
 
+    /// Run in minimal mode (`--bare`).
+    ///
+    /// Skips hooks, LSP, plugin sync, attribution, auto-memory,
+    /// background prefetches, keychain reads, and CLAUDE.md
+    /// auto-discovery. Sets `CLAUDE_CODE_SIMPLE=1` inside the child.
+    /// Anthropic auth is restricted to `ANTHROPIC_API_KEY` or
+    /// `apiKeyHelper` via `--settings`; OAuth and keychain are never
+    /// read. Third-party providers (Bedrock/Vertex/Foundry) use their
+    /// own credentials as normal.
+    ///
+    /// Intended for headless/CI use where you want deterministic
+    /// context: provide everything explicitly via `--system-prompt`,
+    /// `--append-system-prompt`, `--add-dir`, `--mcp-config`,
+    /// `--settings`, `--agents`, and `--plugin-dir`. Skills still
+    /// resolve via explicit `/skill-name` references.
+    #[must_use]
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
+    /// Disable all slash-command skills (`--disable-slash-commands`).
+    #[must_use]
+    pub fn disable_slash_commands(mut self) -> Self {
+        self.disable_slash_commands = true;
+        self
+    }
+
+    /// Include every hook lifecycle event in the stream-json output
+    /// (`--include-hook-events`). Only meaningful with
+    /// `OutputFormat::StreamJson`.
+    #[must_use]
+    pub fn include_hook_events(mut self) -> Self {
+        self.include_hook_events = true;
+        self
+    }
+
+    /// Move per-machine sections (cwd, env info, memory paths, git
+    /// status) out of the system prompt and into the first user
+    /// message (`--exclude-dynamic-system-prompt-sections`). Improves
+    /// cross-user prompt-cache reuse. Only applies with the default
+    /// system prompt; ignored with `--system-prompt`.
+    #[must_use]
+    pub fn exclude_dynamic_system_prompt_sections(mut self) -> Self {
+        self.exclude_dynamic_system_prompt_sections = true;
+        self
+    }
+
+    /// Set a display name for this session (`--name`). Shown in the
+    /// prompt box, `/resume` picker, and terminal title.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     /// Set a per-command retry policy, overriding the client default.
     ///
     /// # Example
@@ -716,6 +782,27 @@ impl QueryCommand {
             args.push("--tmux".to_string());
         }
 
+        if self.bare {
+            args.push("--bare".to_string());
+        }
+
+        if self.disable_slash_commands {
+            args.push("--disable-slash-commands".to_string());
+        }
+
+        if self.include_hook_events {
+            args.push("--include-hook-events".to_string());
+        }
+
+        if self.exclude_dynamic_system_prompt_sections {
+            args.push("--exclude-dynamic-system-prompt-sections".to_string());
+        }
+
+        if let Some(ref name) = self.name {
+            args.push("--name".to_string());
+            args.push(name.clone());
+        }
+
         // Separator to prevent flags like --allowed-tools from consuming the prompt.
         args.push("--".to_string());
         args.push(self.prompt.clone());
@@ -854,6 +941,37 @@ mod tests {
         let strs: Vec<ToolPattern> = vec!["Bash".into(), ToolPattern::all("Read")];
         let cmd = QueryCommand::new("hi").allowed_tools(strs);
         assert!(cmd.args().contains(&"--allowed-tools".to_string()));
+    }
+
+    #[test]
+    fn new_bool_flags_emit_correct_cli_args() {
+        let args = QueryCommand::new("hi")
+            .bare()
+            .disable_slash_commands()
+            .include_hook_events()
+            .exclude_dynamic_system_prompt_sections()
+            .args();
+        assert!(args.contains(&"--bare".to_string()));
+        assert!(args.contains(&"--disable-slash-commands".to_string()));
+        assert!(args.contains(&"--include-hook-events".to_string()));
+        assert!(args.contains(&"--exclude-dynamic-system-prompt-sections".to_string()));
+    }
+
+    #[test]
+    fn name_flag_renders_with_value() {
+        let args = QueryCommand::new("hi").name("my session").args();
+        let pos = args.iter().position(|a| a == "--name").unwrap();
+        assert_eq!(args[pos + 1], "my session");
+    }
+
+    #[test]
+    fn new_bool_flags_default_to_off() {
+        let args = QueryCommand::new("hi").args();
+        assert!(!args.contains(&"--bare".to_string()));
+        assert!(!args.contains(&"--disable-slash-commands".to_string()));
+        assert!(!args.contains(&"--include-hook-events".to_string()));
+        assert!(!args.contains(&"--exclude-dynamic-system-prompt-sections".to_string()));
+        assert!(!args.contains(&"--name".to_string()));
     }
 
     #[test]
