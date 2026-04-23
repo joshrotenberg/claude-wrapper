@@ -72,6 +72,7 @@ pub struct QueryCommand {
     include_hook_events: bool,
     exclude_dynamic_system_prompt_sections: bool,
     name: Option<String>,
+    from_pr: Option<String>,
 }
 
 impl QueryCommand {
@@ -122,6 +123,7 @@ impl QueryCommand {
             include_hook_events: false,
             exclude_dynamic_system_prompt_sections: false,
             name: None,
+            from_pr: None,
         }
     }
 
@@ -496,6 +498,18 @@ impl QueryCommand {
         self
     }
 
+    /// Resume a session linked to a PR by number or URL
+    /// (`--from-pr <value>`).
+    ///
+    /// This wrapper only supports the valued form; the CLI's
+    /// no-value mode opens an interactive picker and would hang a
+    /// headless caller.
+    #[must_use]
+    pub fn from_pr(mut self, pr: impl Into<String>) -> Self {
+        self.from_pr = Some(pr.into());
+        self
+    }
+
     /// Set a per-command retry policy, overriding the client default.
     ///
     /// # Example
@@ -803,6 +817,11 @@ impl QueryCommand {
             args.push(name.clone());
         }
 
+        if let Some(ref pr) = self.from_pr {
+            args.push("--from-pr".to_string());
+            args.push(pr.clone());
+        }
+
         // Separator to prevent flags like --allowed-tools from consuming the prompt.
         args.push("--".to_string());
         args.push(self.prompt.clone());
@@ -962,6 +981,13 @@ mod tests {
         let args = QueryCommand::new("hi").name("my session").args();
         let pos = args.iter().position(|a| a == "--name").unwrap();
         assert_eq!(args[pos + 1], "my session");
+    }
+
+    #[test]
+    fn from_pr_flag_renders_with_value() {
+        let args = QueryCommand::new("hi").from_pr("42").args();
+        let pos = args.iter().position(|a| a == "--from-pr").unwrap();
+        assert_eq!(args[pos + 1], "42");
     }
 
     #[test]
