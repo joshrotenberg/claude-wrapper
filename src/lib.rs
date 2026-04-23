@@ -275,6 +275,7 @@ pub use command::auto_mode::{
     AutoModeConfigCommand, AutoModeCritiqueCommand, AutoModeDefaultsCommand,
 };
 pub use command::doctor::DoctorCommand;
+pub use command::install::InstallCommand;
 pub use command::marketplace::{
     MarketplaceAddCommand, MarketplaceListCommand, MarketplaceRemoveCommand,
     MarketplaceUpdateCommand,
@@ -285,10 +286,11 @@ pub use command::mcp::{
 };
 pub use command::plugin::{
     PluginDisableCommand, PluginEnableCommand, PluginInstallCommand, PluginListCommand,
-    PluginUninstallCommand, PluginUpdateCommand, PluginValidateCommand,
+    PluginTagCommand, PluginUninstallCommand, PluginUpdateCommand, PluginValidateCommand,
 };
 pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
+pub use command::update::UpdateCommand;
 pub use command::version::VersionCommand;
 pub use error::{Error, Result};
 pub use exec::CommandOutput;

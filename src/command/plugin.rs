@@ -353,6 +353,125 @@ impl ClaudeCommand for PluginValidateCommand {
     }
 }
 
+/// Create a `{name}--v{version}` git tag for a plugin release.
+///
+/// Runs `claude plugin tag [path]`, validating that the plugin's
+/// `plugin.json` and any enclosing marketplace entry agree on the
+/// version before tagging.
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(feature = "async")] {
+/// use claude_wrapper::{Claude, ClaudeCommand, PluginTagCommand};
+///
+/// # async fn example() -> claude_wrapper::Result<()> {
+/// let claude = Claude::builder().build()?;
+/// let out = PluginTagCommand::new()
+///     .path("./my-plugin")
+///     .message("release %s")
+///     .push()
+///     .execute(&claude)
+///     .await?;
+/// println!("{}", out.stdout);
+/// # Ok(()) }
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct PluginTagCommand {
+    path: Option<String>,
+    dry_run: bool,
+    force: bool,
+    message: Option<String>,
+    push: bool,
+    remote: Option<String>,
+}
+
+impl PluginTagCommand {
+    /// Create a new tag command. Without [`path`](Self::path), the CLI
+    /// uses the current directory.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Path to the plugin directory.
+    #[must_use]
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    /// Print what would be tagged without creating anything.
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
+    /// Skip dirty-working-tree and tag-already-exists checks.
+    #[must_use]
+    pub fn force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+
+    /// Tag annotation message; `%s` is substituted with the version.
+    #[must_use]
+    pub fn message(mut self, msg: impl Into<String>) -> Self {
+        self.message = Some(msg.into());
+        self
+    }
+
+    /// Push the tag after creating it.
+    #[must_use]
+    pub fn push(mut self) -> Self {
+        self.push = true;
+        self
+    }
+
+    /// Override the remote pushed to with [`push`](Self::push) (default `origin`).
+    #[must_use]
+    pub fn remote(mut self, remote: impl Into<String>) -> Self {
+        self.remote = Some(remote.into());
+        self
+    }
+}
+
+impl ClaudeCommand for PluginTagCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["plugin".to_string(), "tag".to_string()];
+        if self.dry_run {
+            args.push("--dry-run".to_string());
+        }
+        if self.force {
+            args.push("--force".to_string());
+        }
+        if let Some(ref msg) = self.message {
+            args.push("--message".to_string());
+            args.push(msg.clone());
+        }
+        if self.push {
+            args.push("--push".to_string());
+        }
+        if let Some(ref remote) = self.remote {
+            args.push("--remote".to_string());
+            args.push(remote.clone());
+        }
+        if let Some(ref path) = self.path {
+            args.push(path.clone());
+        }
+        args
+    }
+
+    #[cfg(feature = "async")]
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +546,38 @@ mod tests {
         assert_eq!(
             ClaudeCommand::args(&cmd),
             vec!["plugin", "validate", "/path/to/manifest"]
+        );
+    }
+
+    #[test]
+    fn plugin_tag_defaults_to_just_subcommand() {
+        let cmd = PluginTagCommand::new();
+        assert_eq!(ClaudeCommand::args(&cmd), vec!["plugin", "tag"]);
+    }
+
+    #[test]
+    fn plugin_tag_with_all_options() {
+        let cmd = PluginTagCommand::new()
+            .path("./plugin")
+            .dry_run()
+            .force()
+            .message("release %s")
+            .push()
+            .remote("upstream");
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec![
+                "plugin",
+                "tag",
+                "--dry-run",
+                "--force",
+                "--message",
+                "release %s",
+                "--push",
+                "--remote",
+                "upstream",
+                "./plugin",
+            ]
         );
     }
 }

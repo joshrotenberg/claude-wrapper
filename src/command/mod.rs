@@ -2,11 +2,13 @@ pub mod agents;
 pub mod auth;
 pub mod auto_mode;
 pub mod doctor;
+pub mod install;
 pub mod marketplace;
 pub mod mcp;
 pub mod plugin;
 pub mod query;
 pub mod raw;
+pub mod update;
 pub mod version;
 
 #[cfg(feature = "async")]
