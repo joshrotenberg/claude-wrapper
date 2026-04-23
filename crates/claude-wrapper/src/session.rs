@@ -69,6 +69,7 @@
 use std::sync::Arc;
 
 use crate::Claude;
+use crate::budget::BudgetTracker;
 use crate::command::query::QueryCommand;
 use crate::error::Result;
 use crate::types::QueryResult;
@@ -88,6 +89,7 @@ pub struct Session {
     history: Vec<QueryResult>,
     cumulative_cost_usd: f64,
     cumulative_turns: u32,
+    budget: Option<BudgetTracker>,
 }
 
 impl Session {
@@ -100,6 +102,7 @@ impl Session {
             history: Vec::new(),
             cumulative_cost_usd: 0.0,
             cumulative_turns: 0,
+            budget: None,
         }
     }
 
@@ -113,7 +116,26 @@ impl Session {
             history: Vec::new(),
             cumulative_cost_usd: 0.0,
             cumulative_turns: 0,
+            budget: None,
         }
+    }
+
+    /// Attach a [`BudgetTracker`] to this session. Every turn's cost
+    /// (from [`QueryResult::cost_usd`]) is recorded on the tracker, and
+    /// [`Session::execute`]/[`Session::stream_execute`] return
+    /// [`crate::error::Error::BudgetExceeded`]
+    /// before dispatching a turn if the tracker's ceiling has been hit.
+    ///
+    /// Clone a tracker across several sessions to enforce a shared
+    /// ceiling; each `Session` then sees the same running total.
+    pub fn with_budget(mut self, budget: BudgetTracker) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// The attached [`BudgetTracker`], if any.
+    pub fn budget(&self) -> Option<&BudgetTracker> {
+        self.budget.as_ref()
     }
 
     /// Send a plain-prompt turn. Equivalent to
@@ -130,6 +152,10 @@ impl Session {
     /// session's current id, so they can't conflict.
     #[cfg(feature = "json")]
     pub async fn execute(&mut self, cmd: QueryCommand) -> Result<QueryResult> {
+        if let Some(b) = &self.budget {
+            b.check()?;
+        }
+
         let cmd = match &self.session_id {
             Some(id) => cmd.replace_session(id),
             None => cmd,
@@ -164,6 +190,10 @@ impl Session {
         F: FnMut(StreamEvent),
     {
         use crate::types::OutputFormat;
+
+        if let Some(b) = &self.budget {
+            b.check()?;
+        }
 
         let cmd = match &self.session_id {
             Some(id) => cmd.replace_session(id),
@@ -233,8 +263,12 @@ impl Session {
 
     fn record(&mut self, result: &QueryResult) {
         self.session_id = Some(result.session_id.clone());
-        self.cumulative_cost_usd += result.cost_usd.unwrap_or(0.0);
+        let cost = result.cost_usd.unwrap_or(0.0);
+        self.cumulative_cost_usd += cost;
         self.cumulative_turns += result.num_turns.unwrap_or(0);
+        if let Some(b) = &self.budget {
+            b.record(cost);
+        }
         self.history.push(result.clone());
     }
 }
@@ -319,6 +353,49 @@ mod tests {
         assert_eq!(session.total_turns(), 3);
         assert!((session.total_cost_usd() - 0.03).abs() < f64::EPSILON);
         assert_eq!(session.history().len(), 2);
+    }
+
+    #[test]
+    fn record_forwards_cost_to_budget() {
+        use crate::budget::BudgetTracker;
+
+        let budget = BudgetTracker::builder().build();
+        let mut session = Session::new(test_claude()).with_budget(budget.clone());
+
+        let r = QueryResult {
+            result: "ok".into(),
+            session_id: "sess-1".into(),
+            cost_usd: Some(0.07),
+            duration_ms: None,
+            num_turns: Some(1),
+            is_error: false,
+            extra: Default::default(),
+        };
+        session.record(&r);
+
+        assert!((budget.total_usd() - 0.07).abs() < 1e-9);
+        assert!((session.total_cost_usd() - 0.07).abs() < 1e-9);
+    }
+
+    #[test]
+    fn budget_pre_check_would_block_next_turn() {
+        use crate::budget::BudgetTracker;
+        use crate::error::Error;
+
+        // The execute() pre-check defers to BudgetTracker::check().
+        // Exercise that directly with a pre-loaded tracker, so we don't
+        // need a live Claude CLI.
+        let budget = BudgetTracker::builder().max_usd(0.10).build();
+        budget.record(0.15);
+
+        let session = Session::new(test_claude()).with_budget(budget);
+        match session.budget().unwrap().check() {
+            Err(Error::BudgetExceeded { total_usd, max_usd }) => {
+                assert!((total_usd - 0.15).abs() < 1e-9);
+                assert!((max_usd - 0.10).abs() < 1e-9);
+            }
+            other => panic!("expected BudgetExceeded, got {other:?}"),
+        }
     }
 
     #[test]
