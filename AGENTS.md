@@ -2,22 +2,21 @@
 
 Guidance for AI assistants working on this repo.
 
-## Project overview
+## What this is
 
-This repo publishes a single crate: [`claude-wrapper`](crates/claude-wrapper/), a type-safe Rust wrapper around the Claude Code CLI. Builder pattern for each subcommand, typed outputs, async execution via tokio, and a multi-turn `Session` API with streaming support.
+`claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: multi-turn `Session` with streaming, cumulative cost + optional `BudgetTracker` hard-stops, typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation.
 
-Four other crates (`claude-pool`, `claude-pool-mcp`, `claudes`, `claude-runner`) live in-tree for git history but are `publish = false` and excluded from the workspace build via `[workspace] exclude`. They will not receive updates. Do not touch them in normal work. If someone asks to revive one, move it from `exclude` back into `members` in the root `Cargo.toml`.
+This is the only crate in the repo.
 
-## Workspace layout
+## Layout
+
+Flat single-crate layout:
 
 ```
-crates/
-  claude-wrapper/     # The published crate (edit this)
-  test-helpers/       # fake-claude.sh script used by claude-wrapper integration tests
-  claude-pool/        # DEPRECATED (excluded from workspace)
-  claude-pool-mcp/    # DEPRECATED (excluded from workspace)
-  claudes/            # DEPRECATED (excluded from workspace)
-  claude-runner/      # DEPRECATED (excluded from workspace)
+Cargo.toml        # package + deps + feature flags
+src/              # library
+tests/            # integration tests + fake-claude.sh
+examples/         # runnable examples (async-only)
 ```
 
 ## Build and test
@@ -31,18 +30,37 @@ cargo test --lib --all-features
 cargo test --doc --all-features
 ```
 
-CI also runs `cargo build --no-default-features`, which exercises the `#[cfg(not(feature = "json"))]` branches. If you add code behind a feature gate, verify it compiles both ways.
-
-Integration tests against the bundled `fake-claude.sh` (no real CLI required):
+The crate has overlapping feature gates. CI exercises the interesting
+combinations; if you add a new code path behind a feature, verify:
 
 ```bash
-cargo test -p claude-wrapper --test fake_claude --all-features
+# Default: ["async", "json", "tempfile"] -- the happy path
+cargo build
+cargo clippy --all-targets -- -D warnings
+
+# All features enabled (adds `sync`)
+cargo build --all-features
+
+# Sync-only, no tokio in the runtime dep tree
+cargo build --no-default-features --features "json,sync"
+cargo clippy --all-targets --no-default-features --features "json,sync" -- -D warnings
+```
+
+Integration tests against the bundled `fake-claude.sh`:
+
+```bash
+# Async paths
+cargo test --test fake_claude --all-features
+
+# Sync paths (exec, retry, streaming, command surface)
+cargo test --test fake_claude_sync --all-features
+cargo test --test fake_claude_sync --no-default-features --features "json,sync"
 ```
 
 Integration tests against a real `claude` binary (ignored by default, requires auth):
 
 ```bash
-cargo test -p claude-wrapper --test integration -- --ignored
+cargo test --test integration -- --ignored
 ```
 
 ## Architecture
@@ -50,22 +68,34 @@ cargo test -p claude-wrapper --test integration -- --ignored
 `claude-wrapper` is a two-layer builder:
 
 1. **`Claude` client** -- shared config (binary path, working dir, env, timeout, global args, default retry policy). Built via `Claude::builder()`.
-2. **Command builders** -- per-subcommand options. Each implements the `ClaudeCommand` trait and is invoked with `cmd.execute(&claude).await` returning a typed `CommandOutput` or, for JSON-returning commands, `execute_json(&claude)` returning a parsed struct.
+2. **Command builders** -- per-subcommand options. Each implements the `ClaudeCommand` trait. Async callers use `cmd.execute(&claude).await`; sync callers enable the `sync` feature, `use claude_wrapper::ClaudeCommandSyncExt`, and call `cmd.execute_sync(&claude)`.
 
 Key modules:
 
-- `src/lib.rs` -- `Claude` + `ClaudeBuilder`, top-level re-exports
-- `src/command/mod.rs` -- `ClaudeCommand` trait
-- `src/command/query.rs` -- `QueryCommand`, the workhorse
+- `src/lib.rs` -- `Claude` + `ClaudeBuilder`, top-level re-exports, `cli_version` / `cli_version_sync`
+- `src/command/mod.rs` -- `ClaudeCommand` trait (async `execute` gated on `feature = "async"`), `ClaudeCommandSyncExt` blanket-impl trait (sync)
+- `src/command/query.rs` -- `QueryCommand`, the workhorse; has both `execute` / `execute_json` and `execute_sync` / `execute_json_sync`
 - `src/command/mcp.rs` -- MCP server management
 - `src/command/plugin.rs`, `marketplace.rs`, `auth.rs`, `doctor.rs`, `agents.rs`, `version.rs`, `raw.rs` -- other subcommands
-- `src/exec.rs` -- process spawning, timeout, child cleanup
-- `src/streaming.rs` -- `stream_query()` for NDJSON streaming
-- `src/session.rs` -- `Session` for multi-turn conversations (holds `Arc<Claude>`, auto-threads session_id, tracks history/cost, supports streaming)
+- `src/exec.rs` -- process spawning (tokio for async, `std::process` + `wait-timeout` for sync), concurrent pipe drain, timeout cleanup
+- `src/streaming.rs` -- `stream_query` / `stream_query_sync` for NDJSON streaming
+- `src/session.rs` -- `Session` for multi-turn conversations (async-only; holds `Arc<Claude>`, auto-threads session_id, tracks history/cost, supports streaming, optional `BudgetTracker` attachment)
+- `src/budget.rs` -- `BudgetTracker` with fire-once warn/exceeded callbacks and `Error::BudgetExceeded` hard-stop
+- `src/tool_pattern.rs` -- `ToolPattern` for typed `--allowed-tools` / `--disallowed-tools` patterns (`tool`, `tool_with_args`, `all`, `mcp` constructors; `parse()` validation; loose `From<&str>` for back-compat)
 - `src/mcp_config.rs` -- `McpConfigBuilder` for generating `.mcp.json` files
-- `src/retry.rs` -- `RetryPolicy`, `BackoffStrategy`, `with_retry()` wrapper
+- `src/retry.rs` -- `RetryPolicy`, `BackoffStrategy`, `with_retry` (async) and `with_retry_sync`
+- `src/dangerous.rs` -- `DangerousClient` + env-var gate for bypass-permissions mode (isolated from the default API surface)
 - `src/types.rs` -- `QueryResult`, `Transport`, `PermissionMode`, `Effort`, etc.
 - `src/error.rs` -- `Error` enum (thiserror)
+
+## Feature flags
+
+- `async` (default) -- tokio-backed async API. Disabling drops tokio from the runtime dep tree.
+- `json` (default) -- JSON output parsing via serde_json; also gates `Session`, `stream_query`, `execute_json`, `StreamEvent`.
+- `tempfile` (default) -- `McpConfigBuilder::build_temp` via `TempMcpConfig`.
+- `sync` -- blocking API: `*_sync` functions on `exec::`, `retry::`, each command builder, and `Claude`. Pulls in `wait-timeout` only.
+
+The `Session` module and every `async fn execute` / `async fn execute_json` are gated on `feature = "async"`. Everything touching `serde_json` or `StreamEvent` is gated on `feature = "json"`. `ClaudeCommandSyncExt` and the `*_sync` methods are gated on `feature = "sync"`.
 
 ## Code conventions
 
@@ -76,7 +106,7 @@ Key modules:
 - No em dashes in documentation, code comments, or commit messages -- use double hyphens
 - Builder pattern: methods return `Self` (by value), take `impl Into<String>` / `impl Into<PathBuf>` for string-ish args
 - Prefer editing existing files over creating new ones
-- Feature gates: `json` is on by default; `tempfile` is on by default. Anything touching `serde_json` or `StreamEvent` must be `#[cfg(feature = "json")]`. Anything touching tempfile-backed MCP config must be `#[cfg(feature = "tempfile")]`.
+- When adding code behind a feature gate, verify every build configuration compiles (see Build and test)
 
 ## Session API notes
 
@@ -88,8 +118,11 @@ Key modules:
 - Streaming via `stream(prompt, handler)` / `stream_execute(cmd, handler)` -- session id is captured from the first event that carries one and persists even on stream error
 - `execute` / `stream_execute` internally call `QueryCommand::replace_session` to override any conflicting session flags on the caller's command
 - Tracks `history()`, `total_cost_usd()`, `total_turns()`, `last_result()`
+- Attach a `BudgetTracker` via `with_budget(tracker)` for fleet-wide or session-scoped cost ceilings; `execute` short-circuits with `Error::BudgetExceeded` if the ceiling is hit before the turn runs
 
 Do not add a `SessionQuery`-style delegated builder. The old version mirrored 30 QueryCommand methods and was deleted in the 0.5.0 reshape for good reasons. If a caller needs per-turn options, they construct a `QueryCommand` and pass it to `execute` / `stream_execute`.
+
+There is no sync twin of `Session` yet. Sync callers compose `Session`-like state by hand using `execute_sync` / `execute_json_sync` and `BudgetTracker`. If a sync `Session` lands, it should use the existing `Arc<Claude>` shape and share the same history/cost accounting.
 
 ## Git workflow
 
@@ -99,6 +132,7 @@ Do not add a `SessionQuery`-style delegated builder. The old version mirrored 30
 - Reference issues in PR bodies with `Closes #N` for auto-close
 - Do not merge PRs -- the human will do it
 - Never include "Generated with Claude Code" or `Co-Authored-By` signatures in commits or PRs
+- PR bodies that include code fences via `<<'EOF'` heredoc must use plain triple-backticks -- do not escape them. Escaping inside a single-quoted heredoc lands literally in the body and breaks GitHub's code fence rendering.
 
 ## Release process
 
@@ -108,12 +142,10 @@ Releases are driven by [`release-plz`](https://github.com/release-plz/release-pl
 - On every push to `main`, the `release-plz` workflow updates a long-running "chore: release" PR with the pending version bump + changelog
 - Merging that PR tags `v{version}`, creates a GitHub release, and publishes to crates.io
 
-The deprecated crates are all `publish = false`, so they are not touched by release-plz.
-
 ## What to avoid
 
-- Don't add new features to the deprecated crates.
 - Don't re-introduce `cargo-dist` or `Dockerfile` infrastructure -- both were removed deliberately in PR #524 when the repo pivoted to pure-wrapper.
 - Don't add a `SessionQuery`-style delegated builder (see Session API notes above).
 - Don't validate conflicting `QueryCommand` flags at the builder layer -- the CLI is the source of truth, and the `Session` layer handles conflict resolution via `replace_session`.
 - Don't add `#![deny(missing_docs)]` to the crate root without checking that every public item has a doc comment first.
+- Don't reintroduce the deprecated `claude-pool` / `claude-pool-mcp` / `claudes` / `claude-runner` crates. They were removed in favour of letting `claude-wrapper` be the single focus of this repo.

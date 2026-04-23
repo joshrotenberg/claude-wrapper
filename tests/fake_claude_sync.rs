@@ -13,10 +13,7 @@ use std::time::{Duration, Instant};
 use claude_wrapper::Claude;
 use claude_wrapper::exec::run_claude_sync;
 
-const FAKE_CLAUDE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../test-helpers/fake-claude.sh"
-);
+const FAKE_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude.sh");
 
 fn fake_binary() -> PathBuf {
     PathBuf::from(FAKE_CLAUDE)
