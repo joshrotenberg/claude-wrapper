@@ -20,6 +20,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["json", "tempfile"]
 json = ["serde_json"]
 tempfile = ["dep:tempfile"]
+# Blocking/synchronous API alongside the async default. Enables the
+# *_sync execution paths in exec::/retry:: (no tokio runtime required
+# at call sites). tokio is still pulled in by default; future work
+# will let sync-only callers drop it via `default-features = false`.
+sync = ["dep:wait-timeout"]
 
 [dependencies]
 serde = { workspace = true }
@@ -28,6 +33,7 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["process", "time", "io-util", "macros"] }
 tracing = { workspace = true }
 tempfile = { version = "3", optional = true }
+wait-timeout = { version = "0.2", optional = true }
 which = "8"
 
 [dev-dependencies]
