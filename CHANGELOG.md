@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.6.0...v0.7.0) - 2026-04-23
+
+### Added
+
+- wrap remaining #552 items (from_pr, plugin tag, update, install) ([#554](https://github.com/joshrotenberg/claude-wrapper/pull/554))
+- wrap --bare + 4 other query flags, add auto-mode subcommands ([#553](https://github.com/joshrotenberg/claude-wrapper/pull/553))
+- [**breaking**] make tokio optional via new async feature ([#550](https://github.com/joshrotenberg/claude-wrapper/pull/550))
+- stream_query_sync for blocking NDJSON streaming ([#549](https://github.com/joshrotenberg/claude-wrapper/pull/549))
+- sync execute_sync on commands + Claude version helpers ([#548](https://github.com/joshrotenberg/claude-wrapper/pull/548))
+- add sync feature with blocking exec/retry twins ([#547](https://github.com/joshrotenberg/claude-wrapper/pull/547))
+- typed ToolPattern for allowed/disallowed tool lists ([#545](https://github.com/joshrotenberg/claude-wrapper/pull/545))
+- add BudgetTracker with warning/exceeded callbacks ([#543](https://github.com/joshrotenberg/claude-wrapper/pull/543))
+
+### Other
+
+- [**breaking**] drop deprecated crates, flatten workspace, rewrite docs ([#551](https://github.com/joshrotenberg/claude-wrapper/pull/551))
+- update changelog ([#542](https://github.com/joshrotenberg/claude-wrapper/pull/542))
+
 ## [0.6.0] - 2026-04-23
 
 ### Features
