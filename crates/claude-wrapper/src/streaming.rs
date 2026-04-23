@@ -1,9 +1,9 @@
 #[cfg(feature = "json")]
 use std::time::Duration;
 
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 use tokio::process::{ChildStderr, Command};
 #[cfg(feature = "json")]
 use tracing::{debug, warn};
@@ -92,7 +92,7 @@ impl StreamEvent {
 /// # Ok(())
 /// # }
 /// ```
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 pub async fn stream_query<F>(
     claude: &Claude,
     cmd: &crate::command::query::QueryCommand,
@@ -115,7 +115,7 @@ where
 /// warn level. The returned `Error::Timeout` does not carry partial
 /// output -- streamed stdout events were already dispatched to the
 /// handler as they arrived.
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 async fn stream_query_impl<F>(
     claude: &Claude,
     cmd: &crate::command::query::QueryCommand,
@@ -232,14 +232,14 @@ where
     })
 }
 
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 async fn drain_stderr(stderr: &mut ChildStderr) -> String {
     let mut buf = Vec::new();
     let _ = stderr.read_to_end(&mut buf).await;
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 async fn read_lines<F>(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     handler: &mut F,

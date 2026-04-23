@@ -5,6 +5,8 @@
 //! cargo test --test integration -- --ignored
 //! ```
 
+#![cfg(feature = "async")]
+
 use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, VersionCommand};
 
 fn claude_client() -> Claude {

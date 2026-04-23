@@ -271,7 +271,7 @@ impl QueryCommand {
     /// `--continue`, `--session-id`, or `--fork-session`). Keeping the
     /// override logic in one place prevents conflicting flags from reaching
     /// the CLI.
-    #[cfg(feature = "json")]
+    #[cfg(all(feature = "json", feature = "async"))]
     pub(crate) fn replace_session(mut self, id: impl Into<String>) -> Self {
         self.continue_session = false;
         self.resume = Some(id.into());
@@ -490,7 +490,7 @@ impl QueryCommand {
     ///
     /// This is a convenience method that sets `OutputFormat::Json` and
     /// deserializes the response into a [`QueryResult`](crate::types::QueryResult).
-    #[cfg(feature = "json")]
+    #[cfg(all(feature = "json", feature = "async"))]
     pub async fn execute_json(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
         // Build args with JSON output format forced
         let mut args = self.build_args();
@@ -731,6 +731,7 @@ impl ClaudeCommand for QueryCommand {
         self.build_args()
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude_with_retry(claude, self.args(), self.retry_policy.as_ref()).await
     }

@@ -37,7 +37,7 @@ impl AuthStatusCommand {
     }
 
     /// Execute and parse the JSON result into an [`AuthStatus`](crate::types::AuthStatus).
-    #[cfg(feature = "json")]
+    #[cfg(all(feature = "json", feature = "async"))]
     pub async fn execute_json(&self, claude: &Claude) -> Result<crate::types::AuthStatus> {
         let mut cmd = self.clone();
         cmd.json = true;
@@ -78,6 +78,7 @@ impl ClaudeCommand for AuthStatusCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -143,6 +144,7 @@ impl ClaudeCommand for AuthLoginCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -179,6 +181,7 @@ impl ClaudeCommand for AuthLogoutCommand {
         vec!["auth".to_string(), "logout".to_string()]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -215,6 +218,7 @@ impl ClaudeCommand for SetupTokenCommand {
         vec!["setup-token".to_string()]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }

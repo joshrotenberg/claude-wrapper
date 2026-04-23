@@ -133,6 +133,7 @@ impl RetryPolicy {
 }
 
 /// Execute a fallible async operation with retry.
+#[cfg(feature = "async")]
 pub(crate) async fn with_retry<F, Fut, T>(
     policy: &RetryPolicy,
     mut operation: F,
@@ -304,6 +305,7 @@ mod tests {
         assert!(!policy.should_retry(&error));
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_with_retry_succeeds_first_try() {
         let policy = RetryPolicy::new().max_attempts(3);
@@ -311,6 +313,7 @@ mod tests {
         assert_eq!(result.unwrap(), 42);
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_with_retry_succeeds_after_failures() {
         let policy = RetryPolicy::new()
@@ -340,6 +343,7 @@ mod tests {
         assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_with_retry_exhausts_attempts() {
         let policy = RetryPolicy::new()
@@ -357,6 +361,7 @@ mod tests {
         assert!(matches!(result, Err(Error::Timeout { .. })));
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_with_retry_no_retry_on_non_retryable() {
         let policy = RetryPolicy::new()

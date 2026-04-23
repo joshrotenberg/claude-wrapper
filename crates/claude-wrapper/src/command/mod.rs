@@ -8,6 +8,7 @@ pub mod query;
 pub mod raw;
 pub mod version;
 
+#[cfg(feature = "async")]
 use std::future::Future;
 
 use crate::Claude;
@@ -18,6 +19,10 @@ use crate::error::Result;
 /// Each command defines its own `Output` type and builds its argument
 /// list via `args()`. Execution is dispatched through the shared `Claude`
 /// client which provides binary path, environment, and timeout config.
+///
+/// The async `execute` method is only present when the `async` feature
+/// is enabled. In sync-only builds, callers reach the blocking path
+/// via [`ClaudeCommandSyncExt::execute_sync`].
 pub trait ClaudeCommand: Send + Sync {
     /// The typed result of executing this command.
     type Output: Send;
@@ -26,6 +31,7 @@ pub trait ClaudeCommand: Send + Sync {
     fn args(&self) -> Vec<String>;
 
     /// Execute the command using the given claude client.
+    #[cfg(feature = "async")]
     fn execute(&self, claude: &Claude) -> impl Future<Output = Result<Self::Output>> + Send;
 }
 

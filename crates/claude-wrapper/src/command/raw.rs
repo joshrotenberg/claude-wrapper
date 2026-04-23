@@ -1,7 +1,11 @@
+#[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;
+#[cfg(feature = "async")]
 use crate::error::Result;
-use crate::exec::{self, CommandOutput};
+#[cfg(feature = "async")]
+use crate::exec;
+use crate::exec::CommandOutput;
 
 /// Escape hatch for running arbitrary claude subcommands not yet
 /// covered by dedicated command builders.
@@ -60,6 +64,7 @@ impl ClaudeCommand for RawCommand {
         self.command_args.clone()
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
