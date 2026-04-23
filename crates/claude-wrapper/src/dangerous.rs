@@ -51,7 +51,9 @@
 //! through `DangerousClient`.
 
 use crate::Claude;
-use crate::command::{ClaudeCommand, query::QueryCommand};
+#[cfg(feature = "async")]
+use crate::command::ClaudeCommand;
+use crate::command::query::QueryCommand;
 use crate::error::{Error, Result};
 use crate::exec::CommandOutput;
 #[allow(deprecated)]
@@ -91,11 +93,21 @@ impl DangerousClient {
 
     /// Run `cmd` with `--permission-mode bypassPermissions`
     /// unconditionally overridden. Any permission mode the caller
-    /// already set on `cmd` is replaced.
+    /// already set on `cmd` is replaced. Requires the `async` feature.
+    #[cfg(feature = "async")]
     pub async fn query_bypass(&self, cmd: QueryCommand) -> Result<CommandOutput> {
         #[allow(deprecated)]
         let cmd = cmd.permission_mode(PermissionMode::BypassPermissions);
         cmd.execute(&self.inner).await
+    }
+
+    /// Blocking mirror of [`DangerousClient::query_bypass`]. Requires
+    /// the `sync` feature.
+    #[cfg(feature = "sync")]
+    pub fn query_bypass_sync(&self, cmd: QueryCommand) -> Result<CommandOutput> {
+        #[allow(deprecated)]
+        let cmd = cmd.permission_mode(PermissionMode::BypassPermissions);
+        cmd.execute_sync(&self.inner)
     }
 }
 

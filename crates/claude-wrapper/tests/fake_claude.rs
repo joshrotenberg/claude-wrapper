@@ -2,6 +2,8 @@
 //!
 //! These tests do not require a real `claude` binary or authentication.
 
+#![cfg(feature = "async")]
+
 use std::path::PathBuf;
 
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand, RetryPolicy};

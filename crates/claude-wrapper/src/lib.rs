@@ -171,7 +171,7 @@ pub mod error;
 pub mod exec;
 pub mod mcp_config;
 pub mod retry;
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
 pub mod streaming;
 pub mod tool_pattern;
@@ -212,7 +212,7 @@ pub use exec::CommandOutput;
 pub use mcp_config::TempMcpConfig;
 pub use mcp_config::{McpConfigBuilder, McpServerConfig};
 pub use retry::{BackoffStrategy, RetryPolicy};
-#[cfg(feature = "json")]
+#[cfg(all(feature = "json", feature = "async"))]
 pub use session::Session;
 pub use tool_pattern::{PatternError, ToolPattern};
 pub use types::*;
@@ -272,6 +272,7 @@ impl Claude {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "async")]
     pub async fn cli_version(&self) -> Result<CliVersion> {
         let output = VersionCommand::new().execute(self).await?;
         CliVersion::parse_version_output(&output.stdout).map_err(|e| Error::Io {
@@ -298,6 +299,7 @@ impl Claude {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "async")]
     pub async fn check_version(&self, minimum: &CliVersion) -> Result<CliVersion> {
         let version = self.cli_version().await?;
         if version.satisfies_minimum(minimum) {

@@ -17,20 +17,21 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["json", "tempfile"]
+default = ["async", "json", "tempfile"]
+# Async API (tokio-backed). In default features for back-compat;
+# disable via `default-features = false` to drop the tokio dep.
+async = ["dep:tokio"]
 json = ["serde_json"]
 tempfile = ["dep:tempfile"]
-# Blocking/synchronous API alongside the async default. Enables the
-# *_sync execution paths in exec::/retry:: (no tokio runtime required
-# at call sites). tokio is still pulled in by default; future work
-# will let sync-only callers drop it via `default-features = false`.
+# Blocking/synchronous API. With `default-features = false,
+# features = ["json", "sync"]` you get a tokio-free build.
 sync = ["dep:wait-timeout"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { version = "1", optional = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["process", "time", "io-util", "macros"] }
+tokio = { version = "1", features = ["process", "time", "io-util", "macros"], optional = true }
 tracing = { workspace = true }
 tempfile = { version = "3", optional = true }
 wait-timeout = { version = "0.2", optional = true }
@@ -40,3 +41,33 @@ which = "8"
 serde_json = "1"
 tempfile = "3"
 tokio = { workspace = true }
+
+# All examples use the async API; require the feature so they're
+# skipped automatically on sync-only builds.
+[[example]]
+name = "agent_worker"
+required-features = ["async", "json"]
+
+[[example]]
+name = "health_check"
+required-features = ["async"]
+
+[[example]]
+name = "json_output"
+required-features = ["async", "json"]
+
+[[example]]
+name = "mcp_config"
+required-features = ["async"]
+
+[[example]]
+name = "oneshot"
+required-features = ["async"]
+
+[[example]]
+name = "stream_query"
+required-features = ["async", "json"]
+
+[[example]]
+name = "supervised_worker"
+required-features = ["async", "json"]

@@ -1,7 +1,11 @@
+#[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;
+#[cfg(feature = "async")]
 use crate::error::Result;
-use crate::exec::{self, CommandOutput};
+#[cfg(feature = "async")]
+use crate::exec;
+use crate::exec::CommandOutput;
 use crate::types::Scope;
 
 /// List configured plugin marketplaces.
@@ -53,6 +57,7 @@ impl ClaudeCommand for MarketplaceListCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -128,6 +133,7 @@ impl ClaudeCommand for MarketplaceAddCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -159,6 +165,7 @@ impl ClaudeCommand for MarketplaceRemoveCommand {
         ]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -201,6 +208,7 @@ impl ClaudeCommand for MarketplaceUpdateCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }

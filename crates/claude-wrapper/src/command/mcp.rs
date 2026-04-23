@@ -1,7 +1,11 @@
+#[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;
+#[cfg(feature = "async")]
 use crate::error::Result;
-use crate::exec::{self, CommandOutput};
+#[cfg(feature = "async")]
+use crate::exec;
+use crate::exec::CommandOutput;
 use crate::types::{Scope, Transport};
 
 /// List configured MCP servers.
@@ -36,6 +40,7 @@ impl ClaudeCommand for McpListCommand {
         vec!["mcp".to_string(), "list".to_string()]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -62,6 +67,7 @@ impl ClaudeCommand for McpGetCommand {
         vec!["mcp".to_string(), "get".to_string(), self.name.clone()]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -234,6 +240,7 @@ impl ClaudeCommand for McpAddCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -283,6 +290,7 @@ impl ClaudeCommand for McpAddJsonCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -329,6 +337,7 @@ impl ClaudeCommand for McpRemoveCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -367,6 +376,7 @@ impl ClaudeCommand for McpAddFromDesktopCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -430,6 +440,7 @@ impl ClaudeCommand for McpServeCommand {
         args
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }
@@ -453,6 +464,7 @@ impl ClaudeCommand for McpResetProjectChoicesCommand {
         vec!["mcp".to_string(), "reset-project-choices".to_string()]
     }
 
+    #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
         exec::run_claude(claude, self.args()).await
     }

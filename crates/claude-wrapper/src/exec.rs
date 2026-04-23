@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+#[cfg(feature = "async")]
 use tokio::io::AsyncReadExt;
+#[cfg(feature = "async")]
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -21,11 +23,13 @@ pub struct CommandOutput {
 /// If the [`Claude`] client has a retry policy set, transient errors will be
 /// retried according to that policy. A per-command retry policy can be passed
 /// to override the client default.
+#[cfg(feature = "async")]
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     run_claude_with_retry(claude, args, None).await
 }
 
 /// Run a claude command with an optional per-command retry policy override.
+#[cfg(feature = "async")]
 pub async fn run_claude_with_retry(
     claude: &Claude,
     args: Vec<String>,
@@ -41,6 +45,7 @@ pub async fn run_claude_with_retry(
     }
 }
 
+#[cfg(feature = "async")]
 async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     let mut command_args = Vec::new();
 
@@ -75,6 +80,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
 }
 
 /// Run a claude command and allow specific non-zero exit codes.
+#[cfg(feature = "async")]
 pub async fn run_claude_allow_exit_codes(
     claude: &Claude,
     args: Vec<String>,
@@ -98,6 +104,7 @@ pub async fn run_claude_allow_exit_codes(
     }
 }
 
+#[cfg(feature = "async")]
 async fn run_internal(
     binary: &std::path::Path,
     args: &[String],
@@ -161,6 +168,7 @@ async fn run_internal(
 /// On timeout, partial stdout/stderr captured before the kill is logged at
 /// warn level; the returned `Error::Timeout` itself does not carry the
 /// partial output.
+#[cfg(feature = "async")]
 async fn run_with_timeout(
     binary: &std::path::Path,
     args: &[String],
@@ -257,6 +265,7 @@ async fn run_with_timeout(
     }
 }
 
+#[cfg(feature = "async")]
 async fn drain<R: AsyncReadExt + Unpin>(reader: &mut R) -> String {
     let mut buf = Vec::new();
     let _ = reader.read_to_end(&mut buf).await;
