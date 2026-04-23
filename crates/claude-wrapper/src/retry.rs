@@ -168,6 +168,43 @@ where
     Err(last_error.expect("at least one attempt was made"))
 }
 
+/// Execute a fallible blocking operation with retry. Sync mirror of
+/// [`with_retry`]; waits between attempts with [`std::thread::sleep`].
+#[cfg(feature = "sync")]
+pub(crate) fn with_retry_sync<F, T>(
+    policy: &RetryPolicy,
+    mut operation: F,
+) -> crate::error::Result<T>
+where
+    F: FnMut() -> crate::error::Result<T>,
+{
+    let mut last_error = None;
+
+    for attempt in 0..policy.max_attempts {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if attempt + 1 < policy.max_attempts && policy.should_retry(&e) {
+                    let delay = policy.delay_for_attempt(attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_attempts = policy.max_attempts,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        "retrying after transient error"
+                    );
+                    std::thread::sleep(delay);
+                    last_error = Some(e);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("at least one attempt was made"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +381,78 @@ mod tests {
         assert!(result.is_err());
         // Should only attempt once since timeout is not retryable
         assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_with_retry_sync_succeeds_first_try() {
+        let policy = RetryPolicy::new().max_attempts(3);
+        let result = with_retry_sync(&policy, || Ok::<_, Error>(42));
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_with_retry_sync_succeeds_after_failures() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = RetryPolicy::new()
+            .max_attempts(3)
+            .initial_backoff(Duration::from_millis(1))
+            .retry_on_timeout(true);
+
+        let attempt = AtomicU32::new(0);
+        let result = with_retry_sync(&policy, || {
+            let n = attempt.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(Error::Timeout {
+                    timeout_seconds: 60,
+                })
+            } else {
+                Ok(42)
+            }
+        });
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempt.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_with_retry_sync_exhausts_attempts() {
+        let policy = RetryPolicy::new()
+            .max_attempts(2)
+            .initial_backoff(Duration::from_millis(1))
+            .retry_on_timeout(true);
+
+        let result: crate::error::Result<()> = with_retry_sync(&policy, || {
+            Err(Error::Timeout {
+                timeout_seconds: 60,
+            })
+        });
+
+        assert!(matches!(result, Err(Error::Timeout { .. })));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_with_retry_sync_no_retry_on_non_retryable() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = RetryPolicy::new()
+            .max_attempts(3)
+            .initial_backoff(Duration::from_millis(1))
+            .retry_on_timeout(false);
+
+        let attempt = AtomicU32::new(0);
+        let result: crate::error::Result<()> = with_retry_sync(&policy, || {
+            attempt.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Timeout {
+                timeout_seconds: 60,
+            })
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempt.load(Ordering::SeqCst), 1);
     }
 }
