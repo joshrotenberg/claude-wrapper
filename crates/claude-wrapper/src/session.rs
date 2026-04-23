@@ -123,7 +123,7 @@ impl Session {
     /// Attach a [`BudgetTracker`] to this session. Every turn's cost
     /// (from [`QueryResult::cost_usd`]) is recorded on the tracker, and
     /// [`Session::execute`]/[`Session::stream_execute`] return
-    /// [`Error::BudgetExceeded`](crate::error::Error::BudgetExceeded)
+    /// [`crate::error::Error::BudgetExceeded`]
     /// before dispatching a turn if the tracker's ceiling has been hit.
     ///
     /// Clone a tracker across several sessions to enforce a shared

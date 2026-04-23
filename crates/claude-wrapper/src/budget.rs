@@ -3,7 +3,7 @@
 //! A [`BudgetTracker`] accumulates cost across turns and fires
 //! caller-supplied callbacks when configurable thresholds are crossed.
 //! When a `max_usd` ceiling is set, [`BudgetTracker::check`] returns
-//! [`Error::BudgetExceeded`](crate::error::Error::BudgetExceeded) once
+//! [`Error::BudgetExceeded`] once
 //! the total is at or above the ceiling, giving callers a hard stop
 //! before the next CLI invocation.
 //!
