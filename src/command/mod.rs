@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod auth;
+pub mod auto_mode;
 pub mod doctor;
 pub mod marketplace;
 pub mod mcp;
