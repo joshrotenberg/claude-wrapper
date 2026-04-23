@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.5.1...v0.6.0) - 2026-04-22
+
+### Added
+
+- isolate bypass-permissions behind `dangerous` module + env-var gate ([#540](https://github.com/joshrotenberg/claude-wrapper/pull/540))
+
 ## [0.5.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.5.0...v0.5.1) - 2026-04-10
 
 ### Other
