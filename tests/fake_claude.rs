@@ -8,10 +8,7 @@ use std::path::PathBuf;
 
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand, RetryPolicy};
 
-const FAKE_CLAUDE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../test-helpers/fake-claude.sh"
-);
+const FAKE_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude.sh");
 
 fn fake_binary() -> PathBuf {
     PathBuf::from(FAKE_CLAUDE)

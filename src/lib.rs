@@ -1,48 +1,77 @@
 //! A type-safe Claude Code CLI wrapper for Rust.
 //!
 //! `claude-wrapper` provides a builder-pattern interface for invoking the
-//! `claude` CLI programmatically. It follows the same design philosophy as
+//! `claude` CLI programmatically. Each subcommand is a typed builder that
+//! produces typed output. The design follows the same shape as
 //! [`docker-wrapper`](https://crates.io/crates/docker-wrapper) and
-//! [`terraform-wrapper`](https://crates.io/crates/terraform-wrapper):
-//! each CLI subcommand is a builder struct that produces typed output.
+//! [`terraform-wrapper`](https://crates.io/crates/terraform-wrapper).
 //!
-//! # Quick Start
+//! # Feature flags
+//!
+//! | Feature | Default | Purpose |
+//! |---|---|---|
+//! | `async` | yes | tokio-backed async API. Disabling drops tokio from the runtime dep tree. |
+//! | `json` | yes | JSON output parsing ([`QueryCommand::execute_json`], [`streaming::StreamEvent`], [`session::Session`], [`streaming::stream_query`]). |
+//! | `tempfile` | yes | [`TempMcpConfig`] for one-shot MCP config files. |
+//! | `sync` | no | Blocking API: `*_sync` methods on [`exec`], [`retry`], every command builder, and [`Claude`]. |
+//!
+//! Sync-only (tokio-free) build:
+//!
+//! ```toml
+//! claude-wrapper = { version = "0.6", default-features = false, features = ["json", "sync"] }
+//! ```
+//!
+//! # Quick start (async)
 //!
 //! ```no_run
-//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, OutputFormat};
+//! # #[cfg(feature = "async")] {
+//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
 //! let claude = Claude::builder().build()?;
-//!
-//! // Simple oneshot query
 //! let output = QueryCommand::new("explain this error: file not found")
 //!     .model("sonnet")
-//!     .output_format(OutputFormat::Json)
 //!     .execute(&claude)
 //!     .await?;
-//!
 //! println!("{}", output.stdout);
-//! # Ok(())
+//! # Ok(()) }
 //! # }
 //! ```
 //!
-//! # Two-Layer Builder
+//! # Quick start (sync)
 //!
-//! The [`Claude`] client holds shared config (binary path, env vars, timeout).
-//! Command builders hold per-invocation options and call `execute(&claude)`.
+//! Enable the `sync` feature and bring [`ClaudeCommandSyncExt`] into scope:
 //!
 //! ```no_run
-//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, PermissionMode, Effort};
+//! # #[cfg(feature = "sync")] {
+//! use claude_wrapper::{Claude, ClaudeCommandSyncExt, QueryCommand};
+//!
+//! # fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let output = QueryCommand::new("explain this error")
+//!     .execute_sync(&claude)?;
+//! println!("{}", output.stdout);
+//! # Ok(()) }
+//! # }
+//! ```
+//!
+//! # Two-layer builder
+//!
+//! The [`Claude`] client holds shared config (binary path, env, timeout,
+//! default retry policy). Command builders hold per-invocation options
+//! and call `execute(&claude)` (or `execute_sync`).
+//!
+//! ```no_run
+//! # #[cfg(feature = "async")] {
+//! use claude_wrapper::{Claude, ClaudeCommand, Effort, PermissionMode, QueryCommand};
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
-//! // Configure once, reuse across commands
 //! let claude = Claude::builder()
 //!     .env("AWS_REGION", "us-west-2")
 //!     .timeout_secs(300)
 //!     .build()?;
 //!
-//! // Each command is a separate builder
-//! let output = QueryCommand::new("review the code in src/main.rs")
+//! let output = QueryCommand::new("review src/main.rs")
 //!     .model("opus")
 //!     .system_prompt("You are a senior Rust developer")
 //!     .permission_mode(PermissionMode::Plan)
@@ -51,15 +80,14 @@
 //!     .no_session_persistence()
 //!     .execute(&claude)
 //!     .await?;
-//! # Ok(())
+//! # Ok(()) }
 //! # }
 //! ```
 //!
-//! # JSON Output Parsing
-//!
-//! Use `execute_json()` to get structured results:
+//! # JSON output
 //!
 //! ```no_run
+//! # #[cfg(all(feature = "async", feature = "json"))] {
 //! use claude_wrapper::{Claude, QueryCommand};
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
@@ -67,69 +95,91 @@
 //! let result = QueryCommand::new("what is 2+2?")
 //!     .execute_json(&claude)
 //!     .await?;
-//!
 //! println!("answer: {}", result.result);
 //! println!("cost: ${:.4}", result.cost_usd.unwrap_or(0.0));
-//! println!("session: {}", result.session_id);
-//! # Ok(())
+//! # Ok(()) }
 //! # }
 //! ```
 //!
-//! # MCP Config Generation
+//! # Session management
 //!
-//! Generate `.mcp.json` files for use with `--mcp-config`:
+//! For multi-turn conversations use [`session::Session`]. It threads the
+//! CLI `session_id` across turns, tracks cumulative cost + history, and
+//! supports streaming. See the [session module docs](session) for the
+//! full API.
 //!
 //! ```no_run
-//! use claude_wrapper::{Claude, ClaudeCommand, McpConfigBuilder, QueryCommand};
+//! # #[cfg(all(feature = "async", feature = "json"))] {
+//! use std::sync::Arc;
+//! use claude_wrapper::Claude;
+//! use claude_wrapper::session::Session;
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
-//! // Build a config file with multiple servers
-//! let config_path = McpConfigBuilder::new()
-//!     .http_server("my-hub", "http://127.0.0.1:9090")
-//!     .stdio_server("my-tool", "npx", ["my-mcp-server"])
-//!     .stdio_server_with_env(
-//!         "secure-tool", "node", ["server.js"],
-//!         [("API_KEY", "secret")],
-//!     )
-//!     .write_to("/tmp/my-project/.mcp.json")?;
-//!
-//! // Use it in a query
-//! let claude = Claude::builder().build()?;
-//! let output = QueryCommand::new("list available tools")
-//!     .mcp_config("/tmp/my-project/.mcp.json")
-//!     .execute(&claude)
-//!     .await?;
-//! # Ok(())
+//! let claude = Arc::new(Claude::builder().build()?);
+//! let mut session = Session::new(claude);
+//! let _first = session.send("what's 2 + 2?").await?;
+//! let _second = session.send("and squared?").await?;
+//! println!("cost: ${:.4}", session.total_cost_usd());
+//! # Ok(()) }
 //! # }
 //! ```
 //!
-//! # Working with Multiple Directories
+//! # Budget tracking
 //!
-//! Clone the client with a different working directory:
+//! Attach a [`BudgetTracker`] to a session (or share one across several
+//! sessions) to enforce a cumulative USD ceiling. Callbacks fire
+//! exactly once when thresholds are crossed; pre-turn checks
+//! short-circuit with [`Error::BudgetExceeded`]
+//! once the ceiling is hit.
 //!
 //! ```no_run
-//! use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
+//! # #[cfg(all(feature = "async", feature = "json"))] {
+//! use std::sync::Arc;
+//! use claude_wrapper::{BudgetTracker, Claude};
+//! use claude_wrapper::session::Session;
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
-//! let claude = Claude::builder().build()?;
+//! let budget = BudgetTracker::builder()
+//!     .max_usd(5.00)
+//!     .warn_at_usd(4.00)
+//!     .on_warning(|t| eprintln!("warning: ${t:.2}"))
+//!     .on_exceeded(|t| eprintln!("budget hit: ${t:.2}"))
+//!     .build();
 //!
-//! for project in &["/srv/project-a", "/srv/project-b"] {
-//!     let local = claude.with_working_dir(project);
-//!     QueryCommand::new("summarize this project")
-//!         .no_session_persistence()
-//!         .execute(&local)
-//!         .await?;
-//! }
-//! # Ok(())
+//! let claude = Arc::new(Claude::builder().build()?);
+//! let mut session = Session::new(claude).with_budget(budget.clone());
+//! session.send("hello").await?;
+//! println!("spent: ${:.4}", budget.total_usd());
+//! # Ok(()) }
 //! # }
+//! ```
+//!
+//! # Tool permissions
+//!
+//! Use [`ToolPattern`] for typed `--allowed-tools` / `--disallowed-tools`
+//! entries. Typed constructors always produce valid patterns; loose
+//! `From<&str>` keeps bare strings working for back-compat.
+//!
+//! ```
+//! use claude_wrapper::{QueryCommand, ToolPattern};
+//!
+//! let cmd = QueryCommand::new("review")
+//!     .allowed_tool(ToolPattern::tool("Read"))
+//!     .allowed_tool(ToolPattern::tool_with_args("Bash", "git log:*"))
+//!     .allowed_tool(ToolPattern::all("Write"))
+//!     .allowed_tool(ToolPattern::mcp("my-server", "*"))
+//!     .disallowed_tool(ToolPattern::tool_with_args("Bash", "rm*"));
 //! ```
 //!
 //! # Streaming
 //!
-//! Process NDJSON events in real time:
+//! Process NDJSON events in real time with [`streaming::stream_query`]
+//! (async) or [`streaming::stream_query_sync`] (blocking; non-`Send`
+//! handler supported).
 //!
 //! ```no_run
-//! use claude_wrapper::{Claude, QueryCommand, OutputFormat};
+//! # #[cfg(all(feature = "async", feature = "json"))] {
+//! use claude_wrapper::{Claude, OutputFormat, QueryCommand};
 //! use claude_wrapper::streaming::{StreamEvent, stream_query};
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
@@ -137,20 +187,51 @@
 //! let cmd = QueryCommand::new("explain quicksort")
 //!     .output_format(OutputFormat::StreamJson);
 //!
-//! let output = stream_query(&claude, &cmd, |event: StreamEvent| {
+//! stream_query(&claude, &cmd, |event: StreamEvent| {
 //!     if event.is_result() {
-//!         println!("Result: {}", event.result_text().unwrap_or(""));
+//!         println!("result: {}", event.result_text().unwrap_or(""));
 //!     }
 //! }).await?;
-//! # Ok(())
+//! # Ok(()) }
 //! # }
 //! ```
 //!
-//! # Escape Hatch
+//! # MCP config generation
 //!
-//! For subcommands or flags not yet covered by the typed API:
+//! Generate `.mcp.json` files for `--mcp-config`:
 //!
 //! ```no_run
+//! # #[cfg(feature = "async")] {
+//! use claude_wrapper::{Claude, ClaudeCommand, McpConfigBuilder, QueryCommand};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! McpConfigBuilder::new()
+//!     .http_server("hub", "http://127.0.0.1:9090")
+//!     .stdio_server("tool", "npx", ["my-server"])
+//!     .write_to("/tmp/my-project/.mcp.json")?;
+//!
+//! let claude = Claude::builder().build()?;
+//! QueryCommand::new("list tools")
+//!     .mcp_config("/tmp/my-project/.mcp.json")
+//!     .execute(&claude)
+//!     .await?;
+//! # Ok(()) }
+//! # }
+//! ```
+//!
+//! # Dangerous: bypass mode
+//!
+//! `--permission-mode bypassPermissions` is isolated behind
+//! [`dangerous::DangerousClient`], which requires an env-var
+//! acknowledgement ([`dangerous::ALLOW_ENV`] = `"1"`) at process start.
+//! See the [dangerous module docs](dangerous) for details.
+//!
+//! # Escape hatch
+//!
+//! For subcommands not yet wrapped, use [`RawCommand`]:
+//!
+//! ```no_run
+//! # #[cfg(feature = "async")] {
 //! use claude_wrapper::{Claude, ClaudeCommand, RawCommand};
 //!
 //! # async fn example() -> claude_wrapper::Result<()> {
@@ -160,7 +241,7 @@
 //!     .arg("value")
 //!     .execute(&claude)
 //!     .await?;
-//! # Ok(())
+//! # Ok(()) }
 //! # }
 //! ```
 
