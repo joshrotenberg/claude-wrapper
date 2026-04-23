@@ -49,6 +49,20 @@ impl AuthStatusCommand {
             source: e,
         })
     }
+
+    /// Blocking mirror of [`AuthStatusCommand::execute_json`].
+    #[cfg(all(feature = "sync", feature = "json"))]
+    pub fn execute_json_sync(&self, claude: &Claude) -> Result<crate::types::AuthStatus> {
+        let mut cmd = self.clone();
+        cmd.json = true;
+
+        let output = exec::run_claude_sync(claude, cmd.args())?;
+
+        serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
+            message: format!("failed to parse auth status: {e}"),
+            source: e,
+        })
+    }
 }
 
 impl ClaudeCommand for AuthStatusCommand {

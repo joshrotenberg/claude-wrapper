@@ -509,6 +509,35 @@ impl QueryCommand {
         })
     }
 
+    /// Blocking analog of [`QueryCommand::execute`] that honours the
+    /// configured [`RetryPolicy`](crate::retry::RetryPolicy).
+    ///
+    /// Overrides the blanket
+    /// [`ClaudeCommandSyncExt::execute_sync`](crate::ClaudeCommandSyncExt)
+    /// impl so retries still fire on the sync path.
+    #[cfg(feature = "sync")]
+    pub fn execute_sync(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude_with_retry_sync(claude, self.args(), self.retry_policy.as_ref())
+    }
+
+    /// Blocking mirror of [`QueryCommand::execute_json`].
+    #[cfg(all(feature = "sync", feature = "json"))]
+    pub fn execute_json_sync(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
+        let mut args = self.build_args();
+
+        if self.output_format.is_none() {
+            args.push("--output-format".to_string());
+            args.push("json".to_string());
+        }
+
+        let output = exec::run_claude_with_retry_sync(claude, args, self.retry_policy.as_ref())?;
+
+        serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
+            message: format!("failed to parse query result: {e}"),
+            source: e,
+        })
+    }
+
     fn build_args(&self) -> Vec<String> {
         let mut args = vec!["--print".to_string()];
 

@@ -28,3 +28,45 @@ pub trait ClaudeCommand: Send + Sync {
     /// Execute the command using the given claude client.
     fn execute(&self, claude: &Claude) -> impl Future<Output = Result<Self::Output>> + Send;
 }
+
+/// Blocking `execute_sync` for any command that returns `CommandOutput`.
+///
+/// Most command builders (all except the json-decoding convenience
+/// methods) produce `CommandOutput` — this extension trait gives them
+/// a one-line blocking entry point that routes through
+/// [`crate::exec::run_claude_sync`].
+///
+/// ```no_run
+/// # #[cfg(feature = "sync")]
+/// # {
+/// use claude_wrapper::{Claude, ClaudeCommandSyncExt, VersionCommand};
+///
+/// # fn example() -> claude_wrapper::Result<()> {
+/// let claude = Claude::builder().build()?;
+/// let out = VersionCommand::new().execute_sync(&claude)?;
+/// println!("{}", out.stdout);
+/// # Ok(())
+/// # }
+/// # }
+/// ```
+///
+/// Commands with custom execute paths (e.g. [`crate::QueryCommand`],
+/// which honours `retry_policy`) override this via an inherent method
+/// of the same name — inherent-method resolution wins, so callers
+/// don't need to disambiguate.
+#[cfg(feature = "sync")]
+pub trait ClaudeCommandSyncExt {
+    /// Blocking analog of [`ClaudeCommand::execute`] for commands
+    /// producing `CommandOutput`.
+    fn execute_sync(&self, claude: &Claude) -> Result<crate::exec::CommandOutput>;
+}
+
+#[cfg(feature = "sync")]
+impl<T> ClaudeCommandSyncExt for T
+where
+    T: ClaudeCommand<Output = crate::exec::CommandOutput>,
+{
+    fn execute_sync(&self, claude: &Claude) -> Result<crate::exec::CommandOutput> {
+        crate::exec::run_claude_sync(claude, self.args())
+    }
+}
