@@ -252,6 +252,8 @@ pub mod error;
 pub mod exec;
 pub mod mcp_config;
 pub mod retry;
+#[cfg(feature = "server")]
+pub mod server;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
 pub mod streaming;
