@@ -28,10 +28,12 @@ pub struct ServerConfig {
     /// cli surface `query`/`query_json` calls.
     pub budget: Option<BudgetConfig>,
 
-    /// Filesystem isolation for the inner claude. When enabled, the
-    /// server overrides `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`,
-    /// and the working dir on every CLI invocation so the inner claude
-    /// sees a sandbox tree instead of the host's real `~/.claude`.
+    /// Context isolation for the inner claude. When enabled, the
+    /// server overrides `HOME`, `XDG_CONFIG_HOME`, and the working
+    /// dir on every CLI invocation so the inner claude sees its own
+    /// `~/.claude` tree (memory, skills, plugins, project state)
+    /// instead of the host's. Credential isolation is a separate
+    /// concern controlled by [`SandboxConfig::auth_strategy`].
     pub sandbox: SandboxConfig,
 }
 
@@ -141,19 +143,22 @@ pub struct BudgetConfig {
     pub warn_at_usd: Option<f64>,
 }
 
-/// Sandbox isolation mechanism.
+/// Sandbox isolation mechanism for the inner claude's *context*
+/// (memory, skills, plugins, project state, CLAUDE.md discovery).
 ///
-/// Names describe *how* isolation is achieved, not *what scope*; today
-/// scope is implicitly per-server (one sandbox shared by every tool
-/// call). Per-chat / per-call scoping would be a separate config axis
-/// when added.
+/// Names describe *how* isolation is achieved, not *what scope*;
+/// today scope is implicitly per-server (one sandbox shared by every
+/// tool call). Per-chat / per-call scoping would be a separate
+/// config axis when added.
+///
+/// Credential isolation is orthogonal -- see [`AuthStrategy`].
 ///
 /// - `Off`: no isolation. The inner claude inherits the server
 ///   process's environment and reads/writes `~/.claude` as the host
 ///   user. Fine for "I trust the server because I run it." Default.
 /// - `Env`: env-var + cwd redirection. The inner claude sees an
-///   isolated `HOME` / `XDG_CONFIG_HOME` / `CLAUDE_CONFIG_DIR` and
-///   runs in `<sandbox>/workspace`. No Docker, no privileges.
+///   isolated `HOME` / `XDG_CONFIG_HOME` and runs in
+///   `<sandbox>/workspace`. No Docker, no privileges.
 ///
 /// Future: `Bwrap` (Linux user namespaces), `Container` (Docker /
 /// Podman), `Vm` (Firecracker). Each is a stronger isolation
@@ -168,10 +173,24 @@ pub enum SandboxMode {
 
 /// How the sandboxed claude obtains Anthropic auth.
 ///
-/// The sandbox isolates by design -- redirecting `HOME` and
-/// `CLAUDE_CONFIG_DIR` cuts off the host's `~/.claude` and the
-/// macOS keychain. So an explicit auth strategy is required, not a
-/// nice-to-have.
+/// Independent of [`SandboxMode`] -- the sandbox isolates *context*
+/// (claude's `~/.claude` state); this enum decides *credentials*
+/// (how the inner claude authenticates to Anthropic).
+///
+/// | Variant   | Context isolated | Credentials isolated |
+/// |-----------|:----------------:|:--------------------:|
+/// | `None`    |        ✓         |  N/A (no auth)       |
+/// | `Inherit` |        ✓         |  shared with host    |
+/// | `ApiKey`  |        ✓         |        ✓             |
+///
+/// The "shared with host" case for `Inherit` matters: on macOS we
+/// symlink the host's keychain into the sandbox, so a sandbox token
+/// refresh writes back to the host's keychain file and a sandbox
+/// signout signs out the host too. Pick `Inherit` when "personal
+/// claude personas backed by my one Anthropic account" is what you
+/// want (typical case). Pick `ApiKey` when you want billing /
+/// account isolation between sandboxes (multi-tenant, multi-account,
+/// or just "headless deploy with no host coupling").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthStrategy {
@@ -181,24 +200,38 @@ pub enum AuthStrategy {
     /// Anthropic fail with "Not logged in." Useful for testing,
     /// version checks, and the "outer claude has auth, inner
     /// claude shouldn't" composition pattern.
+    ///
+    /// **Isolation**: context only. No credentials to leak.
     None,
-    /// Copy host's credential-bearing files (`~/.claude/credentials.json`
-    /// and `~/.claude.json`) into the sandbox at boot. Works on Linux.
-    /// macOS keychain users (Pro / Max plan) still hit "Not logged in"
-    /// because keychain auth doesn't follow `HOME` redirection -- this
-    /// is the sandbox doing its job, not a bug. Documented and
-    /// intentional. Default.
+    /// Copy the host's `oauthAccount`-bearing `~/.claude.json` into
+    /// the sandbox at boot, plus `~/.claude/credentials.json` if
+    /// present (Linux). On macOS, also symlink the host's keychain
+    /// into the sandbox so keychain auth survives the HOME redirect.
+    ///
+    /// **Isolation**: context only. Credentials are shared with the
+    /// host -- the sandbox can read, write, and refresh the same
+    /// keychain entry / credentials file. If you sign out of the
+    /// sandbox, you sign out of the host. This is the right choice
+    /// when you have one Anthropic account and want multiple
+    /// sandboxed claude personas backed by it. Default.
     #[default]
     Inherit,
     /// Read `ANTHROPIC_API_KEY` from the server process's environment
     /// (or from `[claude.env]` in the config) and inject it into the
-    /// sandbox. Works everywhere; requires the user has an API key.
-    /// If `ANTHROPIC_API_KEY` is not set anywhere reachable, server
-    /// startup fails with a clear error.
+    /// sandbox. Works on every platform; requires you have an API
+    /// key. Fails fast at server boot if the env var is missing.
+    ///
+    /// **Isolation**: context AND credentials. Each sandbox can be
+    /// configured with its own key (different server processes,
+    /// different env), and there's no shared keychain to leak
+    /// through. Pick this for multi-tenant or multi-account use,
+    /// for CI, or for any deploy where you don't want host keychain
+    /// state to bleed in.
     ApiKey,
     // Future: `Oauth` — interactive first-run flow that produces
-    // sandbox-local credentials. The real answer for Pro / Max users
-    // on macOS who don't want to fall back to API keys.
+    // sandbox-local credentials. The OAuth-equivalent of `ApiKey` for
+    // Pro/Max users who don't have an API key handy. Same isolation
+    // properties as `ApiKey` once the first-run flow completes.
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

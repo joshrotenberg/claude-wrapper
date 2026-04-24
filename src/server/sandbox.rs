@@ -1,4 +1,25 @@
-//! Filesystem isolation for the inner claude.
+//! Context isolation for the inner claude.
+//!
+//! The point of the sandbox is to give the inner claude its own
+//! view of `~/.claude` -- separate memory, skills, plugins, project
+//! state, and CLAUDE.md auto-discovery roots from the host. The
+//! host's accumulated claude state (and other sandboxes' state)
+//! stays invisible.
+//!
+//! Context isolation is independent of credential isolation, which
+//! is controlled by [`AuthStrategy`]:
+//!
+//! - `None`: no auth set up. Context isolated; nothing to leak.
+//! - `Inherit`: copy the host's `.claude.json`; on macOS, symlink
+//!   the host's keychain. Context isolated; credentials shared with
+//!   the host (same OAuth account, refresh tokens go through the
+//!   same file). Pick this for "personal claude personas backed
+//!   by my one Anthropic account" -- the most common case.
+//! - `ApiKey`: inject `ANTHROPIC_API_KEY` from the server env.
+//!   Context isolated AND credentials isolated -- each sandbox can
+//!   be configured with its own key, no shared keychain. Pick this
+//!   for multi-tenant or multi-account use, or for headless deploys
+//!   where you don't want host keychain in the picture at all.
 //!
 //! When [`SandboxMode::Env`] is enabled, the server creates an
 //! isolated tree on disk:
@@ -27,11 +48,12 @@
 //! Keychains dir or auth fails. On Linux, where keychain isn't a
 //! thing, the symlink helper is a no-op.
 //!
-//! This is the lighter-weight alternative to running the server in a
-//! container: same isolation goal (pin claude's view of the
-//! filesystem to a known dir we control), no Docker dependency.
-//! Containers can layer on top later for callers who want full
-//! filesystem / network / process isolation in addition.
+//! This is the lighter-weight alternative to running the server in
+//! a container: same context-isolation goal (pin claude's view of
+//! `~/.claude` to a known dir we control), no Docker dependency.
+//! Containers can layer on top later for callers who additionally
+//! want process/network/full-filesystem isolation; that's a
+//! separate concern from what `Env` mode delivers.
 
 use std::path::{Path, PathBuf};
 
