@@ -8,11 +8,12 @@
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tower_mcp::extract::{Json, State};
+use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
-use crate::QueryCommand;
 use crate::session::Session;
+use crate::streaming::{StreamEvent, stream_query};
+use crate::{OutputFormat, QueryCommand};
 
 use super::error::error_to_result;
 use super::state::ServerState;
@@ -22,8 +23,10 @@ use super::surface_a::parse_permission_mode;
 pub(crate) fn agent_tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_ask(state),
+        tool_ask_stream(state),
         tool_chat_open(state),
         tool_chat_send(state),
+        tool_chat_send_stream(state),
         tool_chat_close(state),
         tool_chat_list(state),
         tool_budget(state),
@@ -39,6 +42,13 @@ struct AgentOverrides {
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
     permission_mode: Option<String>,
+    /// Override the server's default `bare` setting for this call.
+    /// `--bare` restricts auth to ANTHROPIC_API_KEY/apiKeyHelper only
+    /// and disables hooks, LSP, plugin sync, keychain reads, and
+    /// CLAUDE.md auto-discovery. Set true for deterministic headless
+    /// invocations; set false (default) when you want the host's
+    /// authed claude environment.
+    bare: Option<bool>,
 }
 
 /// Build a `QueryCommand` for Surface B: server defaults first, then
@@ -89,7 +99,8 @@ fn build_b_command(
         cmd = cmd.permission_mode(parsed);
     }
 
-    if cfg.bare {
+    let bare = ov.bare.unwrap_or(cfg.bare);
+    if bare {
         cmd = cmd.bare();
     }
 
@@ -124,6 +135,7 @@ fn tool_ask(state: &ServerState) -> Tool {
                     Ok(c) => c,
                     Err(e) => return Ok(CallToolResult::error(e)),
                 };
+                let _g = state.lock_default_cwd().await;
                 match cmd.execute_json(&state.claude).await {
                     Ok(result) => {
                         if let Some(ref b) = state.budget {
@@ -138,6 +150,89 @@ fn tool_ask(state: &ServerState) -> Tool {
                     }
                     Err(e) => Ok(error_to_result(e)),
                 }
+            },
+        )
+        .build()
+}
+
+// -- agent.ask_stream -----------------------------------------------
+
+fn tool_ask_stream(state: &ServerState) -> Tool {
+    ToolBuilder::new("agent.ask_stream")
+        .description(
+            "Streaming variant of agent.ask. Each event from the underlying claude --output-format \
+             stream-json invocation is emitted as an MCP progress notification. Final return is the \
+             same as agent.ask (result text, session_id, cost). Honours MCP cancellation: if the \
+             client cancels mid-flight, the call returns early.",
+        )
+        .extractor_handler(
+            state.clone(),
+            |State(state): State<ServerState>,
+             ctx: Context,
+             Json(input): Json<AskInput>| async move {
+                if let Some(ref b) = state.budget
+                    && b.check().is_err()
+                {
+                    return Ok(error_to_result(crate::error::Error::BudgetExceeded {
+                        total_usd: b.total_usd(),
+                        max_usd: b.max_usd().unwrap_or(0.0),
+                    }));
+                }
+                let mut cmd = match build_b_command(&state, input.prompt, input.overrides) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(CallToolResult::error(e)),
+                };
+                cmd = cmd.output_format(OutputFormat::StreamJson);
+
+                let _g = state.lock_default_cwd().await;
+
+                // Capture the result event for the final return value
+                // while forwarding everything as progress notifications.
+                let counter = std::sync::atomic::AtomicU64::new(0);
+                let captured_result: std::sync::Mutex<Option<crate::types::QueryResult>> =
+                    std::sync::Mutex::new(None);
+                let outcome = stream_query(&state.claude, &cmd, |event: StreamEvent| {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let payload = serde_json::to_string(&event.data).unwrap_or_default();
+                    ctx.report_progress_sync(n as f64, None, Some(&payload));
+
+                    if event.is_result()
+                        && let Ok(qr) =
+                            serde_json::from_value::<crate::types::QueryResult>(event.data.clone())
+                    {
+                        *captured_result.lock().expect("captured_result poisoned") = Some(qr);
+                    }
+                })
+                .await;
+
+                if ctx.is_cancelled() {
+                    return Ok(CallToolResult::error(
+                        "agent.ask_stream cancelled by client",
+                    ));
+                }
+
+                if let Err(e) = outcome {
+                    return Ok(error_to_result(e));
+                }
+
+                let captured = captured_result
+                    .into_inner()
+                    .expect("captured_result poisoned");
+                let Some(result) = captured else {
+                    return Ok(CallToolResult::error(
+                        "stream completed but no result event was emitted",
+                    ));
+                };
+
+                if let Some(ref b) = state.budget {
+                    b.record(result.cost_usd.unwrap_or(0.0));
+                }
+                CallToolResult::from_serialize(&serde_json::json!({
+                    "result": result.result,
+                    "session_id": result.session_id,
+                    "cost_usd": result.cost_usd,
+                    "num_turns": result.num_turns,
+                }))
             },
         )
         .build()
@@ -222,7 +317,10 @@ fn tool_chat_send(state: &ServerState) -> Tool {
                     }
                 };
 
-                let outcome = session.execute(cmd).await;
+                let outcome = {
+                    let _g = state.lock_default_cwd().await;
+                    session.execute(cmd).await
+                };
 
                 // Write the (possibly mutated) session back. We replace via
                 // close+open-with-same-id semantics: ChatRegistry doesn't
@@ -243,6 +341,96 @@ fn tool_chat_send(state: &ServerState) -> Tool {
                     }))?),
                     Err(e) => Ok(error_to_result(e)),
                 }
+            },
+        )
+        .build()
+}
+
+// -- agent.chat.send_stream -----------------------------------------
+
+fn tool_chat_send_stream(state: &ServerState) -> Tool {
+    ToolBuilder::new("agent.chat.send_stream")
+        .description(
+            "Streaming variant of agent.chat.send. Each event from the inner claude is forwarded as \
+             an MCP progress notification; the chat's session_id is captured automatically across \
+             turns. Honours MCP cancellation.",
+        )
+        .extractor_handler(
+            state.clone(),
+            |State(state): State<ServerState>,
+             ctx: Context,
+             Json(input): Json<ChatSendInput>| async move {
+                let cmd = match build_b_command(&state, input.prompt, input.overrides) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(CallToolResult::error(e)),
+                };
+                let mut session = match state.chats.with_session(&input.chat_id, |s| s.clone()) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(CallToolResult::error(format!(
+                            "chat_id `{}` not found",
+                            input.chat_id
+                        )));
+                    }
+                };
+
+                let counter = std::sync::atomic::AtomicU64::new(0);
+                let captured_result: std::sync::Mutex<Option<crate::types::QueryResult>> =
+                    std::sync::Mutex::new(None);
+
+                let outcome = {
+                    let _g = state.lock_default_cwd().await;
+                    session
+                        .stream_execute(cmd, |event: StreamEvent| {
+                            let n = counter
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            let payload =
+                                serde_json::to_string(&event.data).unwrap_or_default();
+                            ctx.report_progress_sync(n as f64, None, Some(&payload));
+                            if event.is_result()
+                                && let Ok(qr) = serde_json::from_value::<crate::types::QueryResult>(
+                                    event.data.clone(),
+                                )
+                            {
+                                *captured_result.lock().expect("captured_result poisoned") =
+                                    Some(qr);
+                            }
+                        })
+                        .await
+                };
+
+                // Write back the (mutated) session — its session_id and
+                // history were updated by stream_execute even if the
+                // outer call returns an error.
+                state.chats.with_session(&input.chat_id, |s| {
+                    *s = session;
+                });
+
+                if ctx.is_cancelled() {
+                    return Ok(CallToolResult::error(
+                        "agent.chat.send_stream cancelled by client",
+                    ));
+                }
+
+                if let Err(e) = outcome {
+                    return Ok(error_to_result(e));
+                }
+
+                let captured = captured_result
+                    .into_inner()
+                    .expect("captured_result poisoned");
+                let Some(result) = captured else {
+                    return Ok(CallToolResult::error(
+                        "stream completed but no result event was emitted",
+                    ));
+                };
+                CallToolResult::from_serialize(&serde_json::json!({
+                    "result": result.result,
+                    "session_id": result.session_id,
+                    "cost_usd": result.cost_usd,
+                    "num_turns": result.num_turns,
+                }))
             },
         )
         .build()

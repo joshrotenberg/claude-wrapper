@@ -77,6 +77,12 @@ pub fn build_router(config: ServerConfig) -> crate::error::Result<McpRouter> {
     Ok(router)
 }
 
+/// Default timeout applied to CLI invocations when the config does
+/// not set one. Five minutes covers a generous query turn while
+/// still bounding pathological hangs (e.g. `claude doctor` has been
+/// observed running 3+ minutes in normal use).
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
 fn build_claude(cfg: &ClaudeConfig) -> crate::error::Result<Claude> {
     let mut builder = Claude::builder();
     if let Some(ref bin) = cfg.binary {
@@ -85,9 +91,7 @@ fn build_claude(cfg: &ClaudeConfig) -> crate::error::Result<Claude> {
     if let Some(ref dir) = cfg.working_dir {
         builder = builder.working_dir(dir);
     }
-    if let Some(secs) = cfg.timeout_secs {
-        builder = builder.timeout_secs(secs);
-    }
+    builder = builder.timeout_secs(cfg.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     for (k, v) in &cfg.env {
         builder = builder.env(k, v);
     }

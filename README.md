@@ -412,12 +412,123 @@ let output = RawCommand::new("custom-subcommand")
 | `json` | yes | JSON output parsing (`execute_json`, `StreamEvent`, `Session`, `stream_query`). |
 | `tempfile` | yes | `TempMcpConfig` for one-shot MCP config files. |
 | `sync` | no | Blocking API: `*_sync` methods on `exec`, `retry`, each command builder, and `Claude`. Pulls in `wait-timeout`. |
+| `server` | no | MCP server layer over the wrapper: 1:1 passthrough plus a high-level "talk to the agent" interface. Ships the `claude-server` binary. See below. |
 
 Sync-only build with no tokio:
 
 ```toml
 claude-wrapper = { version = "0.6", default-features = false, features = ["json", "sync"] }
 ```
+
+## Running as an MCP server
+
+The `server` feature exposes `claude-wrapper` as an MCP server via [`tower-mcp`](https://crates.io/crates/tower-mcp). Two namespaces share one router:
+
+- `claude.*` -- low-level passthrough, 1:1 with the wrapper's command builders. Used for management, scripting, fine-grained control.
+- `agent.*` -- opinionated "talk to the agent" interface (`ask`, multi-turn `chat.*`, `budget`). Server-configured defaults apply; per-call overrides allowed.
+
+Both surfaces include streaming variants (`claude.query_stream`, `agent.ask_stream`, `agent.chat.send_stream`) that emit each `StreamEvent` from the underlying `claude --output-format stream-json` invocation as an MCP progress notification.
+
+### Install
+
+```bash
+cargo install claude-wrapper --features server
+# or, from a clone of this repo:
+cargo install --path . --features server
+```
+
+This puts a `claude-server` binary on your PATH.
+
+### Register with local Claude Code
+
+Drop a `.mcp.json` in your project root or merge into `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "claude-server": {
+      "command": "claude-server",
+      "args": []
+    }
+  }
+}
+```
+
+Or, with an explicit config:
+
+```json
+{
+  "mcpServers": {
+    "claude-server": {
+      "command": "claude-server",
+      "args": ["--config", "/path/to/claude-server.toml"]
+    }
+  }
+}
+```
+
+A `claude-server.toml` (every field optional, sensible defaults apply):
+
+```toml
+[claude]
+binary = "/usr/local/bin/claude"   # default: which("claude")
+timeout_secs = 600                 # default: 300
+working_dir = "/workspace"         # default: process cwd
+
+[claude.env]
+ANTHROPIC_API_KEY = "sk-..."       # only needed for `bare` mode
+
+[server]
+allow_mutations = true             # surface A's mutating tools (mcp.add etc) -- not yet wired in v0
+allow_raw = false                  # surface A's claude.raw escape hatch
+apply_budget_to_surface_a = true   # apply BudgetTracker to claude.* calls too
+
+[surface_b]
+default_model = "sonnet"
+default_allowed_tools = ["Read", "Bash(git log:*)"]
+bare = false                       # default: false. Set true for headless deploys
+                                   # where you have ANTHROPIC_API_KEY and want
+                                   # deterministic behaviour (no host CLAUDE.md,
+                                   # hooks, plugins, keychain reads).
+
+[budget]
+max_usd = 10.0
+warn_at_usd = 8.0
+```
+
+### Use it from a Claude session
+
+Once registered, the tools appear under `mcp__claude-server__*` in the host Claude. From `claude -p`:
+
+```bash
+claude -p "Use the mcp__claude-server__agent_ask tool with prompt='What is 7 times 9?'" \
+  --allowed-tools "mcp__claude-server__agent_ask"
+```
+
+Or interactively, just refer to the tools by name. The `agent.*` tools are what you usually want; the `claude.*` tools are escape hatches for fine-grained control.
+
+### Library use
+
+If you want to embed the server in your own daemon (custom transport, custom middleware, whatever), use the library entry point:
+
+```rust
+# #[cfg(feature = "server")] {
+use claude_wrapper::server::{ServerConfig, build_router};
+use tower_mcp::StdioTransport;
+
+# async fn example() -> Result<(), tower_mcp::BoxError> {
+let config = ServerConfig::default();
+let router = build_router(config)?;
+StdioTransport::new(router).run().await?;
+# Ok(()) }
+# }
+```
+
+`McpRouter` composes with any tower-mcp transport (stdio today; HTTP/WebSocket via tower-mcp's other transports if you wire them up).
+
+### Per-cwd serialization
+
+claude-wrapper's MCP server holds a per-cwd mutex around CLI invocations. Concurrent calls in the same working directory serialize; calls across different cwds run in parallel. This matches what claude itself wants -- there's per-project state under `~/.claude/projects/<cwd-hash>/` that doesn't tolerate concurrent writes well.
 
 ## Examples
 

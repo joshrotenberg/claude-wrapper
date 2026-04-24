@@ -14,15 +14,17 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tower_mcp::extract::{Json, State};
+use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
+use crate::OutputFormat;
 use crate::command::{
     ClaudeCommand, agents::AgentsCommand, auth::AuthStatusCommand,
     auto_mode::AutoModeConfigCommand, auto_mode::AutoModeCritiqueCommand,
     auto_mode::AutoModeDefaultsCommand, doctor::DoctorCommand, mcp::McpGetCommand,
     mcp::McpListCommand, query::QueryCommand, version::VersionCommand,
 };
+use crate::streaming::{StreamEvent, stream_query};
 
 use super::error::error_to_result;
 use super::state::ServerState;
@@ -35,6 +37,7 @@ pub(crate) fn read_only_tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_query(state),
         tool_query_json(state),
+        tool_query_stream(state),
         tool_version(state),
         tool_cli_version(state),
         tool_doctor(state),
@@ -133,6 +136,7 @@ fn tool_query(state: &ServerState) -> Tool {
                     Ok(c) => c,
                     Err(e) => return Ok(CallToolResult::error(e)),
                 };
+                let _g = state.lock_default_cwd().await;
                 match cmd.execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -152,8 +156,64 @@ fn tool_query_json(state: &ServerState) -> Tool {
                     Ok(c) => c,
                     Err(e) => return Ok(CallToolResult::error(e)),
                 };
+                let _g = state.lock_default_cwd().await;
                 match cmd.execute_json(&state.claude).await {
                     Ok(result) => Ok(CallToolResult::from_serialize(&result)?),
+                    Err(e) => Ok(error_to_result(e)),
+                }
+            },
+        )
+        .build()
+}
+
+fn tool_query_stream(state: &ServerState) -> Tool {
+    ToolBuilder::new("claude.query_stream")
+        .description(
+            "Run a query with stream-json output. Each StreamEvent from claude is forwarded as an MCP \
+             progress notification (the `message` field carries the serialized event JSON). Final \
+             return is the consolidated CommandOutput. Honours MCP cancellation: if the client cancels, \
+             the underlying child is dropped and the call returns early.",
+        )
+        .extractor_handler(
+            state.clone(),
+            |State(state): State<ServerState>,
+             ctx: Context,
+             Json(input): Json<QueryInput>| async move {
+                let mut cmd = match build_query(input) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(CallToolResult::error(e)),
+                };
+                cmd = cmd.output_format(OutputFormat::StreamJson);
+
+                let _g = state.lock_default_cwd().await;
+
+                // Per-event progress notifications. report_progress_sync
+                // is fire-and-forget through the notification channel;
+                // safe inside stream_query's FnMut closure.
+                let counter = std::sync::atomic::AtomicU64::new(0);
+                let cancellation = ctx.clone();
+                let result = stream_query(&state.claude, &cmd, |event: StreamEvent| {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let payload = serde_json::to_string(&event.data).unwrap_or_default();
+                    ctx.report_progress_sync(n as f64, None, Some(&payload));
+                    if cancellation.is_cancelled() {
+                        // We can't kill the in-flight child from inside
+                        // the sync callback; the wrapper's stream loop
+                        // will keep going until the child closes its
+                        // pipes. The handler will return early after the
+                        // .await unwinds.
+                    }
+                })
+                .await;
+
+                if ctx.is_cancelled() {
+                    return Ok(CallToolResult::error(
+                        "claude.query_stream cancelled by client",
+                    ));
+                }
+
+                match result {
+                    Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
                 }
             },
@@ -173,6 +233,7 @@ fn tool_version(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match VersionCommand::new().execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -190,6 +251,7 @@ fn tool_cli_version(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match Arc::clone(&state.claude).cli_version().await {
                     Ok(v) => Ok(CallToolResult::from_serialize(&serde_json::json!({
                         "major": v.major,
@@ -213,6 +275,7 @@ fn tool_doctor(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match DoctorCommand::new().execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -239,6 +302,7 @@ fn tool_agents(state: &ServerState) -> Tool {
                 if let Some(s) = input.setting_sources {
                     cmd = cmd.setting_sources(s);
                 }
+                let _g = state.lock_default_cwd().await;
                 match cmd.execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -257,6 +321,7 @@ fn tool_auth_status(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match AuthStatusCommand::new().execute_json(&state.claude).await {
                     Ok(status) => Ok(CallToolResult::from_serialize(&status)?),
                     Err(e) => Ok(error_to_result(e)),
@@ -275,6 +340,7 @@ fn tool_mcp_list(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match McpListCommand::new().execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -297,6 +363,7 @@ fn tool_mcp_get(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(input): Json<McpGetInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match McpGetCommand::new(input.name).execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -315,6 +382,7 @@ fn tool_auto_mode_config(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match AutoModeConfigCommand::new().execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -332,6 +400,7 @@ fn tool_auto_mode_defaults(state: &ServerState) -> Tool {
         .extractor_handler(
             state.clone(),
             |State(state): State<ServerState>, Json(_input): Json<EmptyInput>| async move {
+                let _g = state.lock_default_cwd().await;
                 match AutoModeDefaultsCommand::new().execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),
@@ -357,6 +426,7 @@ fn tool_auto_mode_critique(state: &ServerState) -> Tool {
                 if let Some(m) = input.model {
                     cmd = cmd.model(m);
                 }
+                let _g = state.lock_default_cwd().await;
                 match cmd.execute(&state.claude).await {
                     Ok(out) => Ok(CallToolResult::from_serialize(&serialize_output(&out))?),
                     Err(e) => Ok(error_to_result(e)),

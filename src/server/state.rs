@@ -7,6 +7,7 @@
 //! defaults.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::Claude;
@@ -99,6 +100,18 @@ pub struct ServerState {
     pub(crate) budget: Option<BudgetTracker>,
     pub(crate) chats: Arc<ChatRegistry>,
     pub(crate) config: Arc<ServerConfig>,
+    /// Per-cwd serialization for CLI invocations.
+    ///
+    /// Claude maintains per-project state under
+    /// `~/.claude/projects/<cwd-hash>/` (settings cache, MCP probes,
+    /// project-choice records). Concurrent CLI invocations against
+    /// the same cwd race on that state. We serialize per-cwd so
+    /// different cwds run in parallel but the same cwd does not.
+    ///
+    /// In v0 there is one cwd per server (set at startup), so this
+    /// effectively single-threads CLI calls. The structure is
+    /// per-cwd so per-call working_dir overrides land cleanly later.
+    cli_locks: Arc<RwLock<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ServerState {
@@ -118,6 +131,47 @@ impl ServerState {
             budget,
             chats: Arc::new(ChatRegistry::new()),
             config,
+            cli_locks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Acquire the per-cwd CLI mutex, holding it until the returned
+    /// guard is dropped. Call before invoking the wrapper's CLI
+    /// path; release naturally when the guard goes out of scope.
+    pub(crate) async fn lock_cwd(&self, cwd: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = cwd.to_path_buf();
+        // Clone the Arc out of the read guard's scope before awaiting
+        // so the guard does not span the await point. std's
+        // RwLockReadGuard is !Send, so holding it across .await would
+        // demote the surrounding future and tower-mcp rejects it.
+        let existing = self
+            .cli_locks
+            .read()
+            .expect("cli_locks poisoned")
+            .get(&key)
+            .cloned();
+        if let Some(m) = existing {
+            return m.lock_owned().await;
+        }
+        // First time for this cwd: take the write lock, insert, drop guard.
+        let m = {
+            let mut guard = self.cli_locks.write().expect("cli_locks poisoned");
+            guard
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        m.lock_owned().await
+    }
+
+    /// Convenience: lock for the configured Claude client's cwd, or
+    /// the process cwd if none is set.
+    pub(crate) async fn lock_default_cwd(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        let cwd = self
+            .claude
+            .working_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        self.lock_cwd(&cwd).await
     }
 }
