@@ -479,8 +479,8 @@ working_dir = "/workspace"         # default: process cwd
 ANTHROPIC_API_KEY = "sk-..."       # only needed for `bare` mode
 
 [server]
-allow_mutations = true             # surface A's mutating tools (mcp.add etc) -- not yet wired in v0
-allow_raw = false                  # surface A's claude.raw escape hatch
+allow_mutations = true             # cli surface's mutating tools (mcp.add etc) -- not yet wired in v0
+allow_raw = false                  # cli surface's claude.raw escape hatch
 apply_budget_to_surface_a = true   # apply BudgetTracker to claude.* calls too
 
 [surface_b]

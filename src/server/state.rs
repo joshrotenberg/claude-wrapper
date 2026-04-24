@@ -2,7 +2,7 @@
 //!
 //! [`ServerState`] is what handlers extract via tower-mcp's `State`
 //! extractor. It bundles the shared [`Claude`] client, the optional
-//! global [`BudgetTracker`], the chat registry for Surface B
+//! global [`BudgetTracker`], the chat registry for agent surface
 //! sessions, and the [`ServerConfig`] so handlers can apply server
 //! defaults.
 
@@ -16,7 +16,7 @@ use crate::session::Session;
 
 use super::config::ServerConfig;
 
-/// Opaque server-issued identifier for a Surface B chat. Returned by
+/// Opaque server-issued identifier for an agent surface chat. Returned by
 /// `agent.chat.open` and threaded back into `agent.chat.send` /
 /// `agent.chat.close`.
 pub type ChatId = String;
@@ -93,7 +93,7 @@ pub(crate) struct ChatSummary {
     pub total_turns: u32,
 }
 
-/// State shared across every Surface A and Surface B handler.
+/// State shared across every cli surface and agent surface handler.
 #[derive(Clone)]
 pub struct ServerState {
     pub(crate) claude: Arc<Claude>,

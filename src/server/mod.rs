@@ -30,17 +30,17 @@
 //! # }
 //! ```
 
+mod agent;
+mod cli;
 pub mod config;
 mod error;
 mod state;
-mod surface_a;
-mod surface_b;
 
 use std::sync::Arc;
 
 use tower_mcp::McpRouter;
 
-pub use self::config::{BudgetConfig, ClaudeConfig, ServerConfig, ServerPolicy, SurfaceBConfig};
+pub use self::config::{AgentConfig, BudgetConfig, ClaudeConfig, ServerConfig, ServerPolicy};
 pub use self::state::{ChatId, ServerState};
 
 use crate::Claude;
@@ -49,7 +49,7 @@ use crate::Claude;
 ///
 /// Constructs the underlying [`Claude`] client from
 /// [`ServerConfig::claude`], builds [`ServerState`], and registers
-/// every Surface A and Surface B tool the policy permits. The
+/// every cli surface and agent surface tool the policy permits. The
 /// returned router is ready to hand to a transport like
 /// [`tower_mcp::StdioTransport`].
 pub fn build_router(config: ServerConfig) -> crate::error::Result<McpRouter> {
@@ -67,10 +67,10 @@ pub fn build_router(config: ServerConfig) -> crate::error::Result<McpRouter> {
             None::<String>,
         );
 
-    for tool in surface_a::read_only_tools(&state) {
+    for tool in cli::read_only_tools(&state) {
         router = router.tool(tool);
     }
-    for tool in surface_b::agent_tools(&state) {
+    for tool in agent::agent_tools(&state) {
         router = router.tool(tool);
     }
 

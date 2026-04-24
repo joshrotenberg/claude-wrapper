@@ -1,6 +1,6 @@
-//! Surface B: high-level "talk to the agent" tools.
+//! agent surface: high-level "talk to the agent" tools.
 //!
-//! All Surface B tools apply server-configured defaults (model,
+//! All agent surface tools apply server-configured defaults (model,
 //! system prompt, allowed tools, `--bare`, budget) and let callers
 //! override individual fields per call. This is the door for callers
 //! who want "ask the agent" rather than "construct the right CLI
@@ -15,11 +15,11 @@ use crate::session::Session;
 use crate::streaming::{StreamEvent, stream_query};
 use crate::{OutputFormat, QueryCommand};
 
+use super::cli::parse_permission_mode;
 use super::error::error_to_result;
 use super::state::ServerState;
-use super::surface_a::parse_permission_mode;
 
-/// Build the Surface B tools.
+/// Build the agent surface tools.
 pub(crate) fn agent_tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_ask(state),
@@ -51,14 +51,14 @@ struct AgentOverrides {
     bare: Option<bool>,
 }
 
-/// Build a `QueryCommand` for Surface B: server defaults first, then
+/// Build a `QueryCommand` for agent surface: server defaults first, then
 /// per-call overrides on top. Always sets `--bare` if configured.
 fn build_b_command(
     state: &ServerState,
     prompt: String,
     ov: AgentOverrides,
 ) -> Result<QueryCommand, String> {
-    let cfg = &state.config.surface_b;
+    let cfg = &state.config.agent;
     let mut cmd = QueryCommand::new(prompt);
 
     let model = ov.model.or_else(|| cfg.default_model.clone());

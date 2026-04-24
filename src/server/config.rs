@@ -20,12 +20,12 @@ pub struct ServerConfig {
     /// Server-wide policy toggles.
     pub server: ServerPolicy,
 
-    /// Defaults applied to Surface B (`agent.*`) tools.
-    pub surface_b: SurfaceBConfig,
+    /// Defaults applied to agent surface (`agent.*`) tools.
+    pub agent: AgentConfig,
 
     /// Optional global budget tracker. Applied to every chat session
-    /// and (per [`ServerPolicy::apply_budget_to_surface_a`]) to
-    /// Surface A `query`/`query_json` calls.
+    /// and (per [`ServerPolicy::apply_budget_to_cli`]) to
+    /// cli surface `query`/`query_json` calls.
     pub budget: Option<BudgetConfig>,
 }
 
@@ -62,15 +62,15 @@ pub struct ClaudeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerPolicy {
-    /// If false, mutating Surface A tools (mcp.add/remove,
+    /// If false, mutating cli surface tools (mcp.add/remove,
     /// plugin.install/uninstall, marketplace.add/remove,
     /// install/update, etc.) are not registered.
     pub allow_mutations: bool,
     /// If false, `claude.raw` is not registered.
     pub allow_raw: bool,
-    /// If true, the global budget tracker also applies to Surface A
-    /// `query`/`query_json` calls (in addition to all Surface B).
-    pub apply_budget_to_surface_a: bool,
+    /// If true, the global budget tracker also applies to cli surface
+    /// `query`/`query_json` calls (in addition to all agent surface).
+    pub apply_budget_to_cli: bool,
 }
 
 impl Default for ServerPolicy {
@@ -78,14 +78,14 @@ impl Default for ServerPolicy {
         Self {
             allow_mutations: true,
             allow_raw: false,
-            apply_budget_to_surface_a: true,
+            apply_budget_to_cli: true,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SurfaceBConfig {
+pub struct AgentConfig {
     /// Default model passed to every `agent.*` call when the caller
     /// doesn't supply one.
     pub default_model: Option<String>,
@@ -107,7 +107,7 @@ pub struct SurfaceBConfig {
     pub idle_timeout_secs: u64,
 }
 
-impl Default for SurfaceBConfig {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             default_model: None,
@@ -144,8 +144,8 @@ mod tests {
         let cfg = ServerConfig::from_toml_str("").unwrap();
         assert!(cfg.server.allow_mutations);
         assert!(!cfg.server.allow_raw);
-        assert!(!cfg.surface_b.bare);
-        assert_eq!(cfg.surface_b.idle_timeout_secs, 1800);
+        assert!(!cfg.agent.bare);
+        assert_eq!(cfg.agent.idle_timeout_secs, 1800);
         assert!(cfg.claude.binary.is_none());
         assert!(cfg.budget.is_none());
     }
@@ -163,9 +163,9 @@ ANTHROPIC_API_KEY = "sk-..."
 [server]
 allow_mutations = false
 allow_raw = false
-apply_budget_to_surface_a = true
+apply_budget_to_cli = true
 
-[surface_b]
+[agent]
 default_model = "sonnet"
 bare = true
 idle_timeout_secs = 600
@@ -180,7 +180,7 @@ warn_at_usd = 8.0
             Some(std::path::Path::new("/usr/local/bin/claude"))
         );
         assert!(!cfg.server.allow_mutations);
-        assert_eq!(cfg.surface_b.default_model.as_deref(), Some("sonnet"));
+        assert_eq!(cfg.agent.default_model.as_deref(), Some("sonnet"));
         assert_eq!(cfg.budget.as_ref().and_then(|b| b.max_usd), Some(10.0));
     }
 }

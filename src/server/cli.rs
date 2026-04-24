@@ -1,4 +1,4 @@
-//! Surface A: low-level tools that mirror the wrapper 1:1.
+//! cli surface: low-level tools that mirror the wrapper 1:1.
 //!
 //! Each MCP tool corresponds to a `claude-wrapper` command builder.
 //! Naming convention is `claude.<area>.<verb>` where `area` mirrors
@@ -29,7 +29,7 @@ use crate::streaming::{StreamEvent, stream_query};
 use super::error::error_to_result;
 use super::state::ServerState;
 
-/// Build the read-only Surface A tools.
+/// Build the read-only cli surface tools.
 ///
 /// Returns the tool registrations as a Vec; the caller appends them
 /// to its `McpRouter`.
