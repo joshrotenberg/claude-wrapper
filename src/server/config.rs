@@ -27,6 +27,12 @@ pub struct ServerConfig {
     /// and (per [`ServerPolicy::apply_budget_to_cli`]) to
     /// cli surface `query`/`query_json` calls.
     pub budget: Option<BudgetConfig>,
+
+    /// Filesystem isolation for the inner claude. When enabled, the
+    /// server overrides `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`,
+    /// and the working dir on every CLI invocation so the inner claude
+    /// sees a sandbox tree instead of the host's real `~/.claude`.
+    pub sandbox: SandboxConfig,
 }
 
 impl ServerConfig {
@@ -133,6 +139,64 @@ impl Default for AgentConfig {
 pub struct BudgetConfig {
     pub max_usd: Option<f64>,
     pub warn_at_usd: Option<f64>,
+}
+
+/// Sandbox isolation modes.
+///
+/// - `Off`: no isolation. The inner claude inherits the server
+///   process's environment and reads/writes `~/.claude` as the host
+///   user. Fine for "I trust the server because I run it." Default.
+/// - `PerServer`: one sandbox per server instance, shared by every
+///   tool call. The inner claude sees an isolated `HOME` / config
+///   dir and runs in `<sandbox>/workspace`. Repeated server starts
+///   with the same `name` reuse the same sandbox so sessions persist.
+///
+/// Future: `PerChat` would give each `agent.chat.open` its own
+/// sandbox, fully isolating chats from each other.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    #[default]
+    Off,
+    PerServer,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Isolation mode. Default: `off`.
+    pub mode: SandboxMode,
+    /// Root directory holding sandbox subtrees. Default:
+    /// `$HOME/.cache/claude-server` (or `/tmp/claude-server` if
+    /// `$HOME` is unset).
+    pub base_dir: Option<PathBuf>,
+    /// Sandbox subdirectory name. Stable across server restarts so
+    /// sessions persist; `rm -rf <base_dir>/<name>` to reset.
+    /// Default: `default`.
+    pub name: String,
+    /// Copy host's `~/.claude/credentials.json` into the sandbox at
+    /// boot if present. Lets the sandboxed claude authenticate with
+    /// the host user's existing OAuth/keychain auth without forcing
+    /// `bare = true`. Snapshot-on-boot: if the host re-auths after
+    /// the server starts, the sandbox keeps the old credentials
+    /// until the next server restart. Default: true.
+    pub inherit_credentials: bool,
+    /// Copy host's `~/.claude/settings.json` into the sandbox at
+    /// boot. Most callers want a fresh `settings.json` so the
+    /// server's claude is deterministic; default false.
+    pub inherit_settings: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            mode: SandboxMode::Off,
+            base_dir: None,
+            name: "default".to_string(),
+            inherit_credentials: true,
+            inherit_settings: false,
+        }
+    }
 }
 
 #[cfg(test)]

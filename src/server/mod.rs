@@ -34,13 +34,17 @@ mod agent;
 mod cli;
 pub mod config;
 mod error;
+pub mod sandbox;
 mod state;
 
 use std::sync::Arc;
 
 use tower_mcp::McpRouter;
 
-pub use self::config::{AgentConfig, BudgetConfig, ClaudeConfig, ServerConfig, ServerPolicy};
+pub use self::config::{
+    AgentConfig, BudgetConfig, ClaudeConfig, SandboxConfig, SandboxMode, ServerConfig, ServerPolicy,
+};
+pub use self::sandbox::Sandbox;
 pub use self::state::{ChatId, ServerState};
 
 use crate::Claude;
@@ -52,7 +56,25 @@ use crate::Claude;
 /// every cli surface and agent surface tool the policy permits. The
 /// returned router is ready to hand to a transport like
 /// [`tower_mcp::StdioTransport`].
+///
+/// If [`ServerConfig::sandbox`] is enabled, the sandbox is created
+/// (or reused if already on disk) and its overrides are layered onto
+/// the resolved [`ClaudeConfig`] before the [`Claude`] client is
+/// built. Caller-supplied env / working_dir wins over sandbox
+/// defaults so explicit user overrides are never silently shadowed.
 pub fn build_router(config: ServerConfig) -> crate::error::Result<McpRouter> {
+    let mut config = config;
+
+    let sandbox = sandbox::maybe_create(&config.sandbox)?;
+    if let Some(ref s) = sandbox {
+        s.apply_to(&mut config.claude);
+        tracing::info!(
+            sandbox_home = %s.home().display(),
+            sandbox_workspace = %s.workspace().display(),
+            "sandbox active",
+        );
+    }
+
     let claude = build_claude(&config.claude)?;
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
 

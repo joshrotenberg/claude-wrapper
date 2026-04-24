@@ -6,7 +6,10 @@ CLAUDE.md
 NAME_IDEAS.md
 /tmp/
 
-# Local dev for claude-server (see docs/dev-mcp-server.md)
+# Local dev for claude-server
 .mcp.json
 .claude-server-dev.toml
 .claude-server-dev/
+
+# In-flight design notes; not for the published repo
+mcp-spec.md
