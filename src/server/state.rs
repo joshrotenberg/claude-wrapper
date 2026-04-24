@@ -166,6 +166,18 @@ impl ServerState {
 
     /// Convenience: lock for the configured Claude client's cwd, or
     /// the process cwd if none is set.
+    ///
+    /// **Invariant**: this returns the cwd that the inner claude
+    /// will actually execute in. When a sandbox is active, that's
+    /// `<sandbox>/workspace`; otherwise it's the user's configured
+    /// `working_dir`. This is correct by construction because
+    /// [`super::build_router`] calls the sandbox's
+    /// `apply_to(&mut claude_cfg)` *before* building the [`Claude`]
+    /// client, so by the time we read `self.claude.working_dir()`,
+    /// the sandbox's workspace path has already replaced any
+    /// pre-sandbox value. If that ordering ever changes, two
+    /// sandboxes with different workspaces but the same configured
+    /// pre-sandbox cwd would incorrectly share a lock -- so don't.
     pub(crate) async fn lock_default_cwd(&self) -> tokio::sync::OwnedMutexGuard<()> {
         let cwd = self
             .claude

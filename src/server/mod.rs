@@ -99,6 +99,46 @@ pub fn build_router(config: ServerConfig) -> crate::error::Result<McpRouter> {
     Ok(router)
 }
 
+/// Light view of a registered tool. Returned by [`registered_tools`]
+/// for introspection (e.g. the `claude-server tools` subcommand).
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// List the tools that would be registered for the given config,
+/// without assembling a full [`McpRouter`] or starting any transport.
+///
+/// Useful for `claude-server tools` and for diffing tool surfaces
+/// across configs (e.g. "what changes when I flip
+/// `allow_mutations = true`?").
+pub fn registered_tools(config: ServerConfig) -> crate::error::Result<Vec<ToolInfo>> {
+    let mut config = config;
+    let sandbox = sandbox::maybe_create(&config.sandbox)?;
+    if let Some(ref s) = sandbox {
+        s.apply_to(&mut config.claude);
+    }
+    let claude = build_claude(&config.claude)?;
+    let state = ServerState::new(Arc::new(claude), Arc::new(config));
+
+    let mut all = Vec::new();
+    for t in cli::read_only_tools(&state) {
+        all.push(ToolInfo {
+            name: t.name.clone(),
+            description: t.description.clone(),
+        });
+    }
+    for t in agent::agent_tools(&state) {
+        all.push(ToolInfo {
+            name: t.name.clone(),
+            description: t.description.clone(),
+        });
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(all)
+}
+
 /// Default timeout applied to CLI invocations when the config does
 /// not set one. Five minutes covers a generous query turn while
 /// still bounding pathological hangs (e.g. `claude doctor` has been

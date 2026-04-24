@@ -141,30 +141,70 @@ pub struct BudgetConfig {
     pub warn_at_usd: Option<f64>,
 }
 
-/// Sandbox isolation modes.
+/// Sandbox isolation mechanism.
+///
+/// Names describe *how* isolation is achieved, not *what scope*; today
+/// scope is implicitly per-server (one sandbox shared by every tool
+/// call). Per-chat / per-call scoping would be a separate config axis
+/// when added.
 ///
 /// - `Off`: no isolation. The inner claude inherits the server
 ///   process's environment and reads/writes `~/.claude` as the host
 ///   user. Fine for "I trust the server because I run it." Default.
-/// - `PerServer`: one sandbox per server instance, shared by every
-///   tool call. The inner claude sees an isolated `HOME` / config
-///   dir and runs in `<sandbox>/workspace`. Repeated server starts
-///   with the same `name` reuse the same sandbox so sessions persist.
+/// - `Env`: env-var + cwd redirection. The inner claude sees an
+///   isolated `HOME` / `XDG_CONFIG_HOME` / `CLAUDE_CONFIG_DIR` and
+///   runs in `<sandbox>/workspace`. No Docker, no privileges.
 ///
-/// Future: `PerChat` would give each `agent.chat.open` its own
-/// sandbox, fully isolating chats from each other.
+/// Future: `Bwrap` (Linux user namespaces), `Container` (Docker /
+/// Podman), `Vm` (Firecracker). Each is a stronger isolation
+/// mechanism layered on the same scope.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
     #[default]
     Off,
-    PerServer,
+    Env,
+}
+
+/// How the sandboxed claude obtains Anthropic auth.
+///
+/// The sandbox isolates by design -- redirecting `HOME` and
+/// `CLAUDE_CONFIG_DIR` cuts off the host's `~/.claude` and the
+/// macOS keychain. So an explicit auth strategy is required, not a
+/// nice-to-have.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStrategy {
+    /// No auth setup. Inner claude sees a fresh environment with no
+    /// credentials. CLI calls that don't need API access work
+    /// (`claude --version`, `claude doctor`); calls that hit
+    /// Anthropic fail with "Not logged in." Useful for testing,
+    /// version checks, and the "outer claude has auth, inner
+    /// claude shouldn't" composition pattern.
+    None,
+    /// Copy host's credential-bearing files (`~/.claude/credentials.json`
+    /// and `~/.claude.json`) into the sandbox at boot. Works on Linux.
+    /// macOS keychain users (Pro / Max plan) still hit "Not logged in"
+    /// because keychain auth doesn't follow `HOME` redirection -- this
+    /// is the sandbox doing its job, not a bug. Documented and
+    /// intentional. Default.
+    #[default]
+    Inherit,
+    /// Read `ANTHROPIC_API_KEY` from the server process's environment
+    /// (or from `[claude.env]` in the config) and inject it into the
+    /// sandbox. Works everywhere; requires the user has an API key.
+    /// If `ANTHROPIC_API_KEY` is not set anywhere reachable, server
+    /// startup fails with a clear error.
+    ApiKey,
+    // Future: `Oauth` — interactive first-run flow that produces
+    // sandbox-local credentials. The real answer for Pro / Max users
+    // on macOS who don't want to fall back to API keys.
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxConfig {
-    /// Isolation mode. Default: `off`.
+    /// Isolation mechanism. Default: `off`.
     pub mode: SandboxMode,
     /// Root directory holding sandbox subtrees. Default:
     /// `$HOME/.cache/claude-server` (or `/tmp/claude-server` if
@@ -174,15 +214,12 @@ pub struct SandboxConfig {
     /// sessions persist; `rm -rf <base_dir>/<name>` to reset.
     /// Default: `default`.
     pub name: String,
-    /// Copy host's `~/.claude/credentials.json` into the sandbox at
-    /// boot if present. Lets the sandboxed claude authenticate with
-    /// the host user's existing OAuth/keychain auth without forcing
-    /// `bare = true`. Snapshot-on-boot: if the host re-auths after
-    /// the server starts, the sandbox keeps the old credentials
-    /// until the next server restart. Default: true.
-    pub inherit_credentials: bool,
+    /// How the sandbox obtains auth. See [`AuthStrategy`]. Default:
+    /// `inherit`.
+    pub auth_strategy: AuthStrategy,
     /// Copy host's `~/.claude/settings.json` into the sandbox at
-    /// boot. Most callers want a fresh `settings.json` so the
+    /// boot. Separate from auth -- this is preferences/UI state, not
+    /// credentials. Most callers want a fresh `settings.json` so the
     /// server's claude is deterministic; default false.
     pub inherit_settings: bool,
 }
@@ -193,7 +230,7 @@ impl Default for SandboxConfig {
             mode: SandboxMode::Off,
             base_dir: None,
             name: "default".to_string(),
-            inherit_credentials: true,
+            auth_strategy: AuthStrategy::Inherit,
             inherit_settings: false,
         }
     }
