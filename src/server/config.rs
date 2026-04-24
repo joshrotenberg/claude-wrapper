@@ -115,7 +115,14 @@ impl Default for SurfaceBConfig {
             default_allowed_tools: Vec::new(),
             default_disallowed_tools: Vec::new(),
             default_system_prompt: None,
-            bare: true,
+            // Default off: `--bare` restricts auth to ANTHROPIC_API_KEY or
+            // apiKeyHelper and disables keychain/OAuth reads. That breaks
+            // the dominant "host has an authed claude" case (macOS keychain
+            // auth via Claude Pro/Max). Service operators wanting the
+            // deterministic-headless behaviour should set this to true
+            // explicitly in their config. Validated during real-world
+            // nested-claude testing -- see PR #555 discussion.
+            bare: false,
             idle_timeout_secs: 1800,
         }
     }
@@ -137,7 +144,7 @@ mod tests {
         let cfg = ServerConfig::from_toml_str("").unwrap();
         assert!(cfg.server.allow_mutations);
         assert!(!cfg.server.allow_raw);
-        assert!(cfg.surface_b.bare);
+        assert!(!cfg.surface_b.bare);
         assert_eq!(cfg.surface_b.idle_timeout_secs, 1800);
         assert!(cfg.claude.binary.is_none());
         assert!(cfg.budget.is_none());

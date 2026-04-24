@@ -572,14 +572,16 @@ impl QueryCommand {
     /// deserializes the response into a [`QueryResult`](crate::types::QueryResult).
     #[cfg(all(feature = "json", feature = "async"))]
     pub async fn execute_json(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
-        // Build args with JSON output format forced
-        let mut args = self.build_args();
-
-        // Override output format to json if not already set
-        if self.output_format.is_none() {
-            args.push("--output-format".to_string());
-            args.push("json".to_string());
+        // Force JSON output format before building args so the flag
+        // lands before the `--` separator. Appending --output-format
+        // after build_args is wrong: the separator makes claude treat
+        // everything after it as positional, so the flag is swallowed
+        // into the prompt and json mode is never engaged.
+        let mut forced = self.clone();
+        if forced.output_format.is_none() {
+            forced.output_format = Some(OutputFormat::Json);
         }
+        let args = forced.build_args();
 
         let output = exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?;
 
@@ -603,12 +605,13 @@ impl QueryCommand {
     /// Blocking mirror of [`QueryCommand::execute_json`].
     #[cfg(all(feature = "sync", feature = "json"))]
     pub fn execute_json_sync(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
-        let mut args = self.build_args();
-
-        if self.output_format.is_none() {
-            args.push("--output-format".to_string());
-            args.push("json".to_string());
+        // See `execute_json` for why we mutate a clone before
+        // building args rather than appending the flag after.
+        let mut forced = self.clone();
+        if forced.output_format.is_none() {
+            forced.output_format = Some(OutputFormat::Json);
         }
+        let args = forced.build_args();
 
         let output = exec::run_claude_with_retry_sync(claude, args, self.retry_policy.as_ref())?;
 
@@ -998,6 +1001,24 @@ mod tests {
         assert!(!args.contains(&"--include-hook-events".to_string()));
         assert!(!args.contains(&"--exclude-dynamic-system-prompt-sections".to_string()));
         assert!(!args.contains(&"--name".to_string()));
+    }
+
+    #[test]
+    fn output_format_flag_lands_before_prompt_separator() {
+        // Regression: execute_json used to append `--output-format json`
+        // after build_args(), which placed the flag AFTER the `--`
+        // separator. Real claude then treated the flag as positional
+        // prompt content and never switched to JSON mode. Fix was to
+        // set output_format on a cloned QueryCommand BEFORE build_args,
+        // so the flag lands with every other flag -- before the `--`.
+        let cmd = QueryCommand::new("fix the bug").output_format(OutputFormat::Json);
+        let args = cmd.args();
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        let flag_pos = args.iter().position(|a| a == "--output-format").unwrap();
+        assert!(
+            flag_pos < sep,
+            "--output-format must appear before the `--` separator; got args: {args:?}"
+        );
     }
 
     #[test]
