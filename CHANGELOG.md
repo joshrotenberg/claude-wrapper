@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.7.0...v0.8.0) - 2026-04-29
+
+### Added
+
+- add Xhigh variant to Effort enum ([#559](https://github.com/joshrotenberg/claude-wrapper/pull/559))
+
+### Other
+
+- bump tokio from 1.51.0 to 1.52.1 in the tokio-ecosystem group ([#558](https://github.com/joshrotenberg/claude-wrapper/pull/558))
+- update changelog ([#556](https://github.com/joshrotenberg/claude-wrapper/pull/556))
+
 ## [0.7.0] - 2026-04-24
 
 ### Features
