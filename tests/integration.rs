@@ -138,6 +138,50 @@ async fn test_duplex_two_turns_share_session() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_subscribe_sees_assistant_before_result() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    // Subscribe BEFORE sending so the broadcast buffer captures every
+    // event for this turn.
+    let mut rx = session.subscribe();
+
+    let _turn = session
+        .send("Reply with just the word 'hi'.")
+        .await
+        .expect("send turn");
+
+    // Drain whatever the broadcast buffered while the turn was in
+    // flight. Capacity is 256 by default; one turn never approaches
+    // that, so try_recv until empty is fine.
+    let mut received = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        received.push(event);
+    }
+
+    assert!(!received.is_empty(), "expected at least one inbound event");
+    assert!(
+        received
+            .iter()
+            .any(|e| matches!(e, InboundEvent::Assistant(_))),
+        "expected at least one Assistant event in {received:#?}"
+    );
+    assert!(
+        received
+            .iter()
+            .any(|e| matches!(e, InboundEvent::SystemInit { .. })),
+        "expected a SystemInit event in {received:#?}"
+    );
+
+    session.close().await.expect("close session");
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;

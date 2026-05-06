@@ -48,13 +48,55 @@
 //! # }
 //! ```
 //!
+//! # Subscribers
+//!
+//! For event-driven UIs that want to react to assistant tokens,
+//! tool-use blocks, or system events as they arrive, call
+//! [`DuplexSession::subscribe`] before issuing a [`DuplexSession::send`].
+//! Each receiver gets its own buffered view of the event stream;
+//! slow consumers see [`tokio::sync::broadcast::error::RecvError::Lagged`]
+//! rather than blocking the session task.
+//!
+//! ```no_run
+//! use claude_wrapper::Claude;
+//! use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let session = DuplexSession::spawn(&claude, DuplexOptions::default()).await?;
+//!
+//! let mut rx = session.subscribe();
+//! let _turn = session.send("hello").await?;
+//!
+//! while let Ok(event) = rx.try_recv() {
+//!     match event {
+//!         InboundEvent::SystemInit { session_id } => {
+//!             println!("session id: {session_id}");
+//!         }
+//!         InboundEvent::Assistant(_) => {
+//!             // partial or complete assistant message
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//!
+//! session.close().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For interleaved (concurrent) event handling while a turn is in
+//! flight, drive `rx.recv()` and the `send()` future together via
+//! `tokio::select!`. Pin the send future and use a block scope so
+//! its borrow of the session ends before [`DuplexSession::close`].
+//!
 //! # Phased rollout
 //!
 //! This module is rolling out in four PRs tracked in
 //! <https://github.com/joshrotenberg/claude-wrapper/issues/561>. The
-//! current surface is PR 1: `spawn`, `send`, `close`. Subscribers,
-//! mid-turn permission decisions, and `interrupt` land in
-//! subsequent PRs.
+//! current surface is PR 1 + 2: `spawn`, `send`, `close`, `subscribe`.
+//! Mid-turn permission decisions and `interrupt` land in subsequent
+//! PRs.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -62,12 +104,18 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::Claude;
 use crate::error::{Error, Result};
+
+/// Default capacity of the per-session [`broadcast::Sender`] backing
+/// [`DuplexSession::subscribe`].
+///
+/// Override per-session via [`DuplexOptions::subscriber_capacity`].
+pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 256;
 
 /// Configuration for [`DuplexSession::spawn`].
 ///
@@ -81,6 +129,7 @@ pub struct DuplexOptions {
     system_prompt: Option<String>,
     append_system_prompt: Option<String>,
     additional_args: Vec<String>,
+    subscriber_capacity: Option<usize>,
 }
 
 impl DuplexOptions {
@@ -112,6 +161,19 @@ impl DuplexOptions {
     #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.additional_args.push(arg.into());
+        self
+    }
+
+    /// Set the per-session [`broadcast::Sender`] capacity backing
+    /// [`DuplexSession::subscribe`].
+    ///
+    /// Defaults to [`DEFAULT_SUBSCRIBER_CAPACITY`] (256). Larger
+    /// values give slow subscribers more room before they
+    /// [`Lagged`](tokio::sync::broadcast::error::RecvError::Lagged);
+    /// smaller values reclaim memory if you do not subscribe.
+    #[must_use]
+    pub fn subscriber_capacity(mut self, capacity: usize) -> Self {
+        self.subscriber_capacity = Some(capacity);
         self
     }
 
@@ -187,6 +249,61 @@ impl TurnResult {
     }
 }
 
+/// A classified inbound event broadcast to [`DuplexSession::subscribe`]
+/// receivers.
+///
+/// Every non-`result` message coming back from the CLI is broadcast as
+/// one of these variants. The closing `{"type": "result"}` message is
+/// not broadcast; it resolves the in-flight [`DuplexSession::send`]
+/// future and lands in [`TurnResult::result`].
+///
+/// Subscribers see the same set of events that accumulate in
+/// [`TurnResult::events`], in the same order, just classified. Adding
+/// a typed accessor for a new event type later (e.g. promoting a
+/// `system` subtype into its own variant) is non-breaking against the
+/// `Other` fallback.
+#[derive(Debug, Clone)]
+pub enum InboundEvent {
+    /// First `{"type": "system", "subtype": "init"}` event for the
+    /// session. Carries the CLI-assigned `session_id`.
+    SystemInit {
+        /// The CLI-assigned session id, useful for logging or
+        /// future resume support.
+        session_id: String,
+    },
+    /// `{"type": "assistant", ...}` -- either a complete assistant
+    /// message or, in stream-json mode, a partial chunk.
+    Assistant(Value),
+    /// `{"type": "stream_event", ...}` -- low-level streaming event
+    /// emitted while a turn is in progress.
+    StreamEvent(Value),
+    /// `{"type": "user", ...}` -- typically a tool result echo from
+    /// the CLI side.
+    User(Value),
+    /// Any other event type, including non-`init` `system` events
+    /// and any message types not yet recognised by this enum.
+    Other(Value),
+}
+
+fn classify(msg: &Value) -> InboundEvent {
+    match msg.get("type").and_then(Value::as_str) {
+        Some("system") => {
+            if msg.get("subtype").and_then(Value::as_str) == Some("init")
+                && let Some(id) = msg.get("session_id").and_then(Value::as_str)
+            {
+                return InboundEvent::SystemInit {
+                    session_id: id.to_string(),
+                };
+            }
+            InboundEvent::Other(msg.clone())
+        }
+        Some("assistant") => InboundEvent::Assistant(msg.clone()),
+        Some("stream_event") => InboundEvent::StreamEvent(msg.clone()),
+        Some("user") => InboundEvent::User(msg.clone()),
+        _ => InboundEvent::Other(msg.clone()),
+    }
+}
+
 /// A long-lived `claude` subprocess in stream-json duplex mode.
 ///
 /// Owns a background task that holds the child open, writes user
@@ -198,6 +315,7 @@ impl TurnResult {
 #[derive(Debug)]
 pub struct DuplexSession {
     outbound_tx: mpsc::UnboundedSender<OutboundMsg>,
+    events_tx: broadcast::Sender<InboundEvent>,
     join: JoinHandle<Result<()>>,
 }
 
@@ -218,6 +336,10 @@ impl DuplexSession {
     /// ownership of the child; dropping the returned handle (or
     /// calling [`Self::close`]) shuts the task down.
     pub async fn spawn(claude: &Claude, opts: DuplexOptions) -> Result<Self> {
+        let capacity = opts
+            .subscriber_capacity
+            .unwrap_or(DEFAULT_SUBSCRIBER_CAPACITY);
+
         let mut command_args = Vec::new();
         command_args.extend(claude.global_args.clone());
         command_args.extend(opts.into_args());
@@ -252,10 +374,21 @@ impl DuplexSession {
         let stdout = child.stdout.take().expect("stdout was piped");
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (events_tx, _initial_rx) = broadcast::channel(capacity);
 
-        let join = tokio::spawn(run_session(child, stdin, stdout, outbound_rx));
+        let join = tokio::spawn(run_session(
+            child,
+            stdin,
+            stdout,
+            outbound_rx,
+            events_tx.clone(),
+        ));
 
-        Ok(Self { outbound_tx, join })
+        Ok(Self {
+            outbound_tx,
+            events_tx,
+            join,
+        })
     }
 
     /// Send one user message and await the closing result event.
@@ -274,6 +407,45 @@ impl DuplexSession {
         reply_rx.await.map_err(|_| Error::DuplexClosed)?
     }
 
+    /// Subscribe to the session's classified inbound event stream.
+    ///
+    /// Returns a [`broadcast::Receiver<InboundEvent>`] that receives
+    /// every non-`result` event as it arrives. Each subscriber gets
+    /// its own buffered view; subscribers added later miss earlier
+    /// events. Slow subscribers see
+    /// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
+    /// rather than blocking the session task.
+    ///
+    /// Subscribers see the same events that accumulate in
+    /// [`TurnResult::events`], in the same order.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::Claude;
+    /// use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    /// let session = DuplexSession::spawn(&claude, DuplexOptions::default()).await?;
+    /// let mut rx = session.subscribe();
+    ///
+    /// // Subscribe before send so we receive every event.
+    /// let _turn = session.send("hello").await?;
+    ///
+    /// while let Ok(event) = rx.try_recv() {
+    ///     if let InboundEvent::SystemInit { session_id } = event {
+    ///         println!("session id: {session_id}");
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<InboundEvent> {
+        self.events_tx.subscribe()
+    }
+
     /// Close the session and wait for the underlying task to exit.
     ///
     /// Drops the outbound channel sender, which the session task
@@ -281,6 +453,7 @@ impl DuplexSession {
     /// child.
     pub async fn close(self) -> Result<()> {
         drop(self.outbound_tx);
+        drop(self.events_tx);
         match self.join.await {
             Ok(result) => result,
             Err(e) if e.is_cancelled() => Ok(()),
@@ -303,6 +476,7 @@ async fn run_session(
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
+    events_tx: broadcast::Sender<InboundEvent>,
 ) -> Result<()> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
@@ -318,7 +492,7 @@ async fn run_session(
                         continue;
                     }
                     match serde_json::from_str::<Value>(&l) {
-                        Ok(v) => handle_inbound(v, &mut pending),
+                        Ok(v) => handle_inbound(v, &mut pending, &events_tx),
                         Err(e) => {
                             debug!(line = %l, error = %e, "failed to parse duplex event, skipping");
                         }
@@ -377,6 +551,7 @@ async fn run_session(
 fn handle_inbound(
     msg: Value,
     pending: &mut Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)>,
+    events_tx: &broadcast::Sender<InboundEvent>,
 ) {
     match msg.get("type").and_then(Value::as_str) {
         Some("result") => {
@@ -390,6 +565,10 @@ fn handle_inbound(
             }
         }
         _ => {
+            // Broadcast a classified copy. Send error means no
+            // subscribers, which is fine -- subscribers are optional.
+            let _ = events_tx.send(classify(&msg));
+
             if let Some((_, events)) = pending.as_mut() {
                 events.push(msg);
             } else {
@@ -522,9 +701,14 @@ mod tests {
 
     #[test]
     fn handle_inbound_appends_non_result_to_pending_events() {
-        let (tx, _rx) = oneshot::channel::<Result<TurnResult>>();
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        handle_inbound(json!({ "type": "assistant", "message": {} }), &mut pending);
+        handle_inbound(
+            json!({ "type": "assistant", "message": {} }),
+            &mut pending,
+            &events_tx,
+        );
         let (_, events) = pending.as_ref().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -536,8 +720,13 @@ mod tests {
     #[test]
     fn handle_inbound_resolves_pending_on_result() {
         let (tx, rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, vec![json!({ "type": "assistant" })]));
-        handle_inbound(json!({ "type": "result", "result": "ok" }), &mut pending);
+        handle_inbound(
+            json!({ "type": "result", "result": "ok" }),
+            &mut pending,
+            &events_tx,
+        );
         assert!(pending.is_none());
         let received = rx.blocking_recv().unwrap().unwrap();
         assert_eq!(received.result_text(), Some("ok"));
@@ -546,9 +735,104 @@ mod tests {
 
     #[test]
     fn handle_inbound_drops_orphans_without_pending_turn() {
+        let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
-        handle_inbound(json!({ "type": "assistant" }), &mut pending);
-        handle_inbound(json!({ "type": "result", "result": "ok" }), &mut pending);
+        handle_inbound(json!({ "type": "assistant" }), &mut pending, &events_tx);
+        handle_inbound(
+            json!({ "type": "result", "result": "ok" }),
+            &mut pending,
+            &events_tx,
+        );
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn handle_inbound_broadcasts_classified_event() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        handle_inbound(
+            json!({ "type": "assistant", "message": { "role": "assistant" } }),
+            &mut pending,
+            &events_tx,
+        );
+        let event = events_rx.try_recv().expect("classified event broadcast");
+        assert!(matches!(event, InboundEvent::Assistant(_)));
+    }
+
+    #[test]
+    fn handle_inbound_does_not_broadcast_result() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        handle_inbound(
+            json!({ "type": "result", "result": "ok" }),
+            &mut pending,
+            &events_tx,
+        );
+        // Result is not broadcast -- it lands in TurnResult.result.
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn classify_system_init_pulls_session_id() {
+        let v = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-abc",
+        });
+        match classify(&v) {
+            InboundEvent::SystemInit { session_id } => assert_eq!(session_id, "sess-abc"),
+            other => panic!("expected SystemInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_system_without_init_subtype_is_other() {
+        let v = json!({ "type": "system", "subtype": "compaction" });
+        assert!(matches!(classify(&v), InboundEvent::Other(_)));
+    }
+
+    #[test]
+    fn classify_system_init_without_session_id_is_other() {
+        let v = json!({ "type": "system", "subtype": "init" });
+        assert!(matches!(classify(&v), InboundEvent::Other(_)));
+    }
+
+    #[test]
+    fn classify_assistant_stream_event_user() {
+        assert!(matches!(
+            classify(&json!({ "type": "assistant" })),
+            InboundEvent::Assistant(_)
+        ));
+        assert!(matches!(
+            classify(&json!({ "type": "stream_event" })),
+            InboundEvent::StreamEvent(_)
+        ));
+        assert!(matches!(
+            classify(&json!({ "type": "user" })),
+            InboundEvent::User(_)
+        ));
+    }
+
+    #[test]
+    fn classify_unknown_type_is_other() {
+        assert!(matches!(
+            classify(&json!({ "type": "control_request" })),
+            InboundEvent::Other(_)
+        ));
+        assert!(matches!(
+            classify(&json!({ "type": "future_thing" })),
+            InboundEvent::Other(_)
+        ));
+        assert!(matches!(classify(&json!({})), InboundEvent::Other(_)));
+    }
+
+    #[test]
+    fn into_args_does_not_emit_subscriber_capacity_flag() {
+        // subscriber_capacity is runtime config, not a CLI arg.
+        let args = DuplexOptions::default().subscriber_capacity(64).into_args();
+        assert!(!args.iter().any(|a| a.contains("subscriber")));
+        assert!(!args.iter().any(|a| a.contains("capacity")));
     }
 }
