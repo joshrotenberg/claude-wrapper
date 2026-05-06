@@ -59,6 +59,21 @@ pub enum Error {
     /// dispatched, so the CLI is not invoked.
     #[error("budget exceeded: ${total_usd:.4} spent, ${max_usd:.4} max")]
     BudgetExceeded { total_usd: f64, max_usd: f64 },
+
+    /// A [`DuplexSession`](crate::duplex::DuplexSession) operation was
+    /// attempted after the session task exited (child died, EOF on
+    /// stdout, or the session was closed). Pending replies are
+    /// resolved with this error.
+    #[cfg(feature = "async")]
+    #[error("duplex session is closed")]
+    DuplexClosed,
+
+    /// [`DuplexSession::send`](crate::duplex::DuplexSession::send) was
+    /// called while another turn is already in flight. Wait for the
+    /// outstanding turn to resolve before issuing another.
+    #[cfg(feature = "async")]
+    #[error("duplex session has a turn in flight")]
+    DuplexTurnInFlight,
 }
 
 impl From<std::io::Error> for Error {

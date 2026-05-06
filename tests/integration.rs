@@ -81,6 +81,63 @@ async fn test_mcp_list() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_send_and_close() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    let turn = session
+        .send("What is 2+2? Reply with just the number.")
+        .await
+        .expect("send turn");
+
+    assert!(
+        turn.session_id().is_some(),
+        "result should carry a session_id"
+    );
+    let text = turn.result_text().expect("result text present");
+    assert!(text.contains('4'), "expected '4' in {text:?}");
+
+    session.close().await.expect("close session");
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_two_turns_share_session() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    let first = session
+        .send("Remember the number 7.")
+        .await
+        .expect("first turn");
+    let second = session
+        .send("What number did I ask you to remember? Reply with just the number.")
+        .await
+        .expect("second turn");
+
+    let first_id = first.session_id().expect("first session_id");
+    let second_id = second.session_id().expect("second session_id");
+    assert_eq!(
+        first_id, second_id,
+        "session id should persist across turns"
+    );
+
+    let text = second.result_text().unwrap_or("");
+    assert!(text.contains('7'), "expected '7' in {text:?}");
+
+    session.close().await.expect("close session");
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;
