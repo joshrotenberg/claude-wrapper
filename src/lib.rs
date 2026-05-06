@@ -248,6 +248,8 @@
 pub mod budget;
 pub mod command;
 pub mod dangerous;
+#[cfg(all(feature = "json", feature = "async"))]
+pub mod duplex;
 pub mod error;
 pub mod exec;
 pub mod mcp_config;
@@ -292,6 +294,8 @@ pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
 pub use command::update::UpdateCommand;
 pub use command::version::VersionCommand;
+#[cfg(all(feature = "json", feature = "async"))]
+pub use duplex::{DuplexOptions, DuplexSession, TurnResult};
 pub use error::{Error, Result};
 pub use exec::CommandOutput;
 #[cfg(feature = "tempfile")]
