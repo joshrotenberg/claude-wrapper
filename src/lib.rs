@@ -295,7 +295,7 @@ pub use command::raw::RawCommand;
 pub use command::update::UpdateCommand;
 pub use command::version::VersionCommand;
 #[cfg(all(feature = "json", feature = "async"))]
-pub use duplex::{DuplexOptions, DuplexSession, TurnResult};
+pub use duplex::{DuplexOptions, DuplexSession, InboundEvent, TurnResult};
 pub use error::{Error, Result};
 pub use exec::CommandOutput;
 #[cfg(feature = "tempfile")]
