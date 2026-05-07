@@ -142,6 +142,11 @@
 //! See the [duplex module docs](duplex) for the full API including
 //! `subscribe`, `interrupt`, and `respond_to_permission`.
 //!
+//! For host-side bookkeeping (history, cumulative cost, optional
+//! [`BudgetTracker`] hard stop) on top of a [`DuplexSession`], wrap
+//! it in a [`Conversation`]. See the
+//! [conversation module docs](conversation).
+//!
 //! ## `Session` (for short-lived processes)
 //!
 //! ```no_run
@@ -285,6 +290,8 @@
 
 pub mod budget;
 pub mod command;
+#[cfg(all(feature = "json", feature = "async"))]
+pub mod conversation;
 pub mod dangerous;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod duplex;
@@ -332,6 +339,8 @@ pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
 pub use command::update::UpdateCommand;
 pub use command::version::VersionCommand;
+#[cfg(all(feature = "json", feature = "async"))]
+pub use conversation::Conversation;
 #[cfg(all(feature = "json", feature = "async"))]
 pub use duplex::{
     DuplexOptions, DuplexSession, InboundEvent, PermissionDecision, PermissionHandler,

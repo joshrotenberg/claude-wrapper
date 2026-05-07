@@ -471,6 +471,48 @@ async fn test_duplex_send_while_turn_in_flight_returns_error() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_conversation_three_turns_track_history_and_cost() {
+    use claude_wrapper::Conversation;
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    let mut conv = Conversation::new(session);
+
+    let prompts = [
+        "Reply with just the number 1.",
+        "Reply with just the number 2.",
+        "Reply with just the number 3.",
+    ];
+
+    let mut session_ids = Vec::new();
+    for p in prompts {
+        let turn = conv.send(p).await.expect("send turn");
+        session_ids.push(turn.session_id().expect("session id").to_string());
+    }
+
+    assert_eq!(conv.history().len(), 3, "history should record three turns");
+    assert_eq!(conv.total_turns(), 3, "total_turns should match send count");
+    assert!(
+        conv.total_cost_usd() > 0.0,
+        "total_cost_usd should accumulate non-zero across three live turns, got {}",
+        conv.total_cost_usd()
+    );
+
+    // All three turns share the same session id (single duplex
+    // child), and Conversation::session_id reports the most recent.
+    assert_eq!(session_ids[0], session_ids[1]);
+    assert_eq!(session_ids[1], session_ids[2]);
+    assert_eq!(conv.session_id(), Some(session_ids[2].as_str()));
+
+    conv.close().await.expect("close conversation");
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;
