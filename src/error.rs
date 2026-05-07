@@ -74,6 +74,17 @@ pub enum Error {
     #[cfg(feature = "async")]
     #[error("duplex session has a turn in flight")]
     DuplexTurnInFlight,
+
+    /// A control request issued from
+    /// [`DuplexSession::interrupt`](crate::duplex::DuplexSession::interrupt)
+    /// (or any other outbound `control_request`) was answered by the
+    /// CLI with a `subtype: "error"` payload.
+    #[cfg(feature = "async")]
+    #[error("duplex control request failed: {message}")]
+    DuplexControlFailed {
+        /// The error message extracted from the CLI's control_response.
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for Error {

@@ -237,6 +237,55 @@ async fn test_duplex_permission_handler_denies_bash() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_interrupt_closes_in_flight_turn() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+    use std::time::Duration;
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    // Drive a slow-ish turn alongside an interrupt issued shortly
+    // after. Cap the join with an outer timeout so a misbehaving
+    // interrupt never hangs the test runner.
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        let send_fut = session.send(
+            "Write a long, detailed essay about the history of \
+             programming languages, covering at least 20 distinct \
+             languages chronologically.",
+        );
+        let interrupt_fut = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            session.interrupt().await
+        };
+        tokio::join!(send_fut, interrupt_fut)
+    })
+    .await
+    .expect("turn + interrupt should resolve within 60s");
+
+    let (turn, interrupt_result) = outcome;
+    let turn = turn.expect("send turn resolved");
+    interrupt_result.expect("interrupt acknowledged");
+
+    // The interrupted turn closes with some stop_reason. We don't
+    // pin it to a specific string -- the CLI may use "interrupt",
+    // "pause_turn", or similar. Just assert the turn ended with a
+    // reason field present.
+    assert!(
+        turn.result
+            .get("stop_reason")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "expected stop_reason on interrupted turn: {:?}",
+        turn.result
+    );
+
+    session.close().await.expect("close session");
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;
