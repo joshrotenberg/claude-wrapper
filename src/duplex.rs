@@ -8,19 +8,20 @@
 //!
 //! # When to use
 //!
-//! Most consumers of this crate should keep using [`QueryCommand`] and
-//! [`Session`] -- one subprocess per turn, continuity via `--resume`.
-//! That is the right shape for short-lived processes (CLIs, build
-//! scripts, batch jobs, lambdas) which have no long-running runtime
-//! to host a session.
+//! [`DuplexSession`] is the recommended primitive for long-running
+//! hosts that drive multi-turn conversations: agent servers, IDE
+//! backends, daemons, chat UIs. Holding the child open across turns
+//! amortizes init cost and unlocks capabilities that are awkward or
+//! impossible from a transient subprocess: mid-turn permission
+//! decisions ([`PermissionHandler`]), clean
+//! [interrupts](DuplexSession::interrupt), and a typed
+//! [event subscriber stream](DuplexSession::subscribe) that fans out
+//! events to multiple consumers.
 //!
-//! [`DuplexSession`] is for the inverse case: an agent server, IDE
-//! backend, daemon, or chat UI where holding a `claude` subprocess
-//! open across turns amortizes init cost and unlocks capabilities
-//! that are awkward or impossible from a transient subprocess
-//! (mid-turn permission decisions, hook flow, clean interrupts).
-//! Those capabilities ship in subsequent PRs; this PR is the
-//! minimum happy path.
+//! For short-lived processes (CLIs, build scripts, batch jobs,
+//! lambdas) where each turn can stand on its own, prefer
+//! [`QueryCommand`] for one-off calls or [`Session`] for transient
+//! multi-turn with cumulative cost / history tracking.
 //!
 //! [`QueryCommand`]: crate::QueryCommand
 //! [`Session`]: crate::session::Session

@@ -1,8 +1,22 @@
-//! Multi-turn session management.
+//! Multi-turn session management for short-lived processes.
 //!
 //! A [`Session`] threads Claude's `session_id` across turns automatically,
 //! so callers never need to scrape it out of a result event or pass
 //! `--resume` by hand.
+//!
+//! # When to use
+//!
+//! [`Session`] is the right fit when each turn can stand on its own
+//! and the host process is short-lived: CLIs, build scripts, batch
+//! jobs, lambdas. Each turn spawns a fresh `claude` subprocess and
+//! resumes the conversation via `--resume <session_id>`.
+//!
+//! For long-running hosts (IDE backends, daemons, agent servers,
+//! chat UIs) where holding a `claude` subprocess open across many
+//! turns is cheap, prefer [`DuplexSession`](crate::duplex::DuplexSession).
+//! It supports mid-turn interrupts, mid-turn permission decisions, and
+//! a broadcast event stream that [`Session`] cannot offer because of
+//! the transient subprocess model.
 //!
 //! # Ownership
 //!

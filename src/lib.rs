@@ -101,12 +101,48 @@
 //! # }
 //! ```
 //!
-//! # Session management
+//! # Multi-turn conversations
 //!
-//! For multi-turn conversations use [`session::Session`]. It threads the
-//! CLI `session_id` across turns, tracks cumulative cost + history, and
-//! supports streaming. See the [session module docs](session) for the
-//! full API.
+//! Two shapes for multi-turn work, each suited to a different
+//! process model. [`DuplexSession`] is the recommended choice for
+//! long-running hosts; [`Session`] is the right fit for short-lived
+//! processes.
+//!
+//! | | [`DuplexSession`] | [`Session`] |
+//! |---|---|---|
+//! | Process model | one child held open across turns | new subprocess per turn, `--resume` continuity |
+//! | Mid-turn interrupt | yes ([`DuplexSession::interrupt`](duplex::DuplexSession::interrupt)) | no (only `child.kill()` via SIGKILL) |
+//! | Mid-turn permission prompts | yes ([`PermissionHandler`]) | no |
+//! | Broadcast event subscribers | yes ([`DuplexSession::subscribe`](duplex::DuplexSession::subscribe)) | no (per-turn `stream_query`) |
+//! | Built-in cost / history tracking | no ([`TurnResult`] is per-turn) | yes ([`Session::total_cost_usd`], [`Session::history`], [`BudgetTracker`]) |
+//! | Right for | long-running hosts (IDE backends, daemons, agent servers, chat UIs) | short-lived processes (CLIs, build scripts, batch jobs, lambdas) |
+//!
+//! ## `DuplexSession` (recommended for long-running hosts)
+//!
+//! ```no_run
+//! # #[cfg(all(feature = "async", feature = "json"))] {
+//! use claude_wrapper::Claude;
+//! use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let session = DuplexSession::spawn(
+//!     &claude,
+//!     DuplexOptions::default().model("haiku"),
+//! ).await?;
+//!
+//! let turn = session.send("what's 2 + 2?").await?;
+//! println!("answer: {}", turn.result_text().unwrap_or(""));
+//!
+//! session.close().await?;
+//! # Ok(()) }
+//! # }
+//! ```
+//!
+//! See the [duplex module docs](duplex) for the full API including
+//! `subscribe`, `interrupt`, and `respond_to_permission`.
+//!
+//! ## `Session` (for short-lived processes)
 //!
 //! ```no_run
 //! # #[cfg(all(feature = "async", feature = "json"))] {
@@ -123,6 +159,8 @@
 //! # Ok(()) }
 //! # }
 //! ```
+//!
+//! See the [session module docs](session) for the full API.
 //!
 //! # Budget tracking
 //!
