@@ -126,14 +126,46 @@
 //! from the handler, capture the [`PermissionRequest::request_id`],
 //! and answer later via [`DuplexSession::respond_to_permission`].
 //!
+//! # Mid-turn interrupt
+//!
+//! [`DuplexSession::interrupt`] sends a clean
+//! `control_request {subtype: "interrupt"}` to the CLI. The CLI
+//! stops generating, closes the in-flight turn (`send().await`
+//! resolves with the truncated [`TurnResult`]), and answers our
+//! interrupt with a `control_response`. Use this instead of dropping
+//! the session or killing the child when you want to cancel one
+//! turn but keep the conversation going.
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use claude_wrapper::Claude;
+//! use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let claude = Claude::builder().build()?;
+//! let session = DuplexSession::spawn(&claude, DuplexOptions::default()).await?;
+//!
+//! let send_fut = session.send("write a long essay about rust");
+//! let interrupt_fut = async {
+//!     tokio::time::sleep(Duration::from_millis(500)).await;
+//!     session.interrupt().await
+//! };
+//!
+//! let (turn, interrupt_result) = tokio::join!(send_fut, interrupt_fut);
+//! let _truncated = turn?;
+//! interrupt_result?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Phased rollout
 //!
-//! This module is rolling out in four PRs tracked in
-//! <https://github.com/joshrotenberg/claude-wrapper/issues/561>. The
-//! current surface is PR 1 + 2 + 3: `spawn`, `send`, `close`,
-//! `subscribe`, mid-turn permission handling. `interrupt` lands in
-//! PR 4.
+//! This module rolled out in four PRs tracked in
+//! <https://github.com/joshrotenberg/claude-wrapper/issues/561>:
+//! `spawn`/`send`/`close` (PR 1), `subscribe` (PR 2), mid-turn
+//! permission handling (PR 3), and `interrupt` (PR 4, this one).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -495,6 +527,9 @@ enum OutboundMsg {
         request_id: String,
         decision: PermissionDecision,
     },
+    Interrupt {
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 impl DuplexSession {
@@ -680,6 +715,54 @@ impl DuplexSession {
         Ok(())
     }
 
+    /// Send a clean interrupt to the CLI and wait for its
+    /// acknowledgment.
+    ///
+    /// Writes a `control_request {subtype: "interrupt"}` and resolves
+    /// when the matching `control_response` comes back. The
+    /// in-flight turn (if any) closes shortly after with a truncated
+    /// [`TurnResult`] -- the [`DuplexSession::send`] future for it
+    /// resolves independently. Either ordering is possible; await
+    /// both via `tokio::join!` if you care about both outcomes.
+    ///
+    /// Returns:
+    /// - `Ok(())` when the CLI acknowledges with `subtype: "success"`.
+    /// - [`Error::DuplexControlFailed`] when the CLI answers with an
+    ///   error payload.
+    /// - [`Error::DuplexClosed`] if the session task exited before
+    ///   the response arrived.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use claude_wrapper::Claude;
+    /// use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    /// let session = DuplexSession::spawn(&claude, DuplexOptions::default()).await?;
+    ///
+    /// let send_fut = session.send("a question that triggers tool use");
+    /// let interrupt_fut = async {
+    ///     tokio::time::sleep(Duration::from_millis(250)).await;
+    ///     session.interrupt().await
+    /// };
+    ///
+    /// let (turn, interrupt) = tokio::join!(send_fut, interrupt_fut);
+    /// let _truncated = turn?;
+    /// interrupt?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn interrupt(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.outbound_tx
+            .send(OutboundMsg::Interrupt { reply: reply_tx })
+            .map_err(|_| Error::DuplexClosed)?;
+        reply_rx.await.map_err(|_| Error::DuplexClosed)?
+    }
+
     /// Close the session and wait for the underlying task to exit.
     ///
     /// Drops the outbound channel sender, which the session task
@@ -715,6 +798,8 @@ async fn run_session(
 ) -> Result<()> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
+    let mut pending_control: HashMap<String, oneshot::Sender<Result<()>>> = HashMap::new();
+    let mut next_control_id: u64 = 0;
     let mut stream_err: Option<Error> = None;
 
     loop {
@@ -762,6 +847,16 @@ async fn run_session(
                                 warn!(error = %e, "failed to write permission response");
                             }
                         }
+                        InboundAction::ControlResponse { request_id, outcome } => {
+                            if let Some(reply) = pending_control.remove(&request_id) {
+                                let _ = reply.send(outcome);
+                            } else {
+                                debug!(
+                                    request_id = %request_id,
+                                    "received control_response with no pending request"
+                                );
+                            }
+                        }
                     }
                 }
                 Ok(None) => break,
@@ -794,6 +889,17 @@ async fn run_session(
                         warn!(error = %e, "failed to write deferred permission response");
                     }
                 }
+                Some(OutboundMsg::Interrupt { reply }) => {
+                    next_control_id += 1;
+                    let request_id = format!("interrupt-{next_control_id}");
+                    if let Err(e) =
+                        write_control_request(&mut stdin, &request_id, "interrupt").await
+                    {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                    pending_control.insert(request_id, reply);
+                }
                 None => break,
             },
         }
@@ -814,6 +920,9 @@ async fn run_session(
     if let Some((reply, _)) = pending.take() {
         let _ = reply.send(Err(Error::DuplexClosed));
     }
+    for (_, reply) in pending_control.drain() {
+        let _ = reply.send(Err(Error::DuplexClosed));
+    }
 
     match stream_err {
         Some(e) => Err(e),
@@ -831,6 +940,14 @@ enum InboundAction {
     /// needs the [`PermissionHandler`] invoked. The run loop awaits
     /// the handler and writes the response.
     Permission(PermissionRequest),
+    /// A `control_response` matching one of our outbound
+    /// `control_request`s arrived. The run loop matches `request_id`
+    /// against its `pending_control` table and resolves the
+    /// corresponding oneshot.
+    ControlResponse {
+        request_id: String,
+        outcome: Result<()>,
+    },
 }
 
 fn handle_inbound(
@@ -875,6 +992,23 @@ fn handle_inbound(
             }
             InboundAction::None
         }
+        Some("control_response") => {
+            if let Some((request_id, outcome)) = parse_control_response(&msg) {
+                return InboundAction::ControlResponse {
+                    request_id,
+                    outcome,
+                };
+            }
+            debug!(
+                ?msg,
+                "received malformed control_response; treating as Other"
+            );
+            let _ = events_tx.send(InboundEvent::Other(msg.clone()));
+            if let Some((_, events)) = pending.as_mut() {
+                events.push(msg);
+            }
+            InboundAction::None
+        }
         _ => {
             // Broadcast a classified copy. Send error means no
             // subscribers, which is fine -- subscribers are optional.
@@ -903,6 +1037,29 @@ fn parse_permission_request(msg: &Value) -> Option<PermissionRequest> {
     })
 }
 
+/// Pull `(request_id, outcome)` out of a `control_response` envelope.
+///
+/// Returns `None` if `request_id` is missing or the subtype is
+/// unrecognised. `Some((id, Ok(())))` for `subtype: "success"`,
+/// `Some((id, Err(DuplexControlFailed)))` for `subtype: "error"`.
+fn parse_control_response(msg: &Value) -> Option<(String, Result<()>)> {
+    let response = msg.get("response")?;
+    let request_id = response.get("request_id").and_then(Value::as_str)?;
+    let outcome = match response.get("subtype").and_then(Value::as_str) {
+        Some("success") => Ok(()),
+        Some("error") => {
+            let message = response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown control_response error")
+                .to_string();
+            Err(Error::DuplexControlFailed { message })
+        }
+        _ => return None,
+    };
+    Some((request_id.to_string(), outcome))
+}
+
 async fn write_user(stdin: &mut ChildStdin, prompt: &str) -> Result<()> {
     let user_msg = serde_json::json!({
         "type": "user",
@@ -913,6 +1070,19 @@ async fn write_user(stdin: &mut ChildStdin, prompt: &str) -> Result<()> {
         "parent_tool_use_id": null,
     });
     write_line(stdin, &user_msg, "user message").await
+}
+
+async fn write_control_request(
+    stdin: &mut ChildStdin,
+    request_id: &str,
+    subtype: &str,
+) -> Result<()> {
+    let envelope = serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": subtype },
+    });
+    write_line(stdin, &envelope, "control_request").await
 }
 
 async fn write_permission_response(
@@ -1299,7 +1469,9 @@ mod tests {
                 assert_eq!(req.request_id, "req-1");
                 assert_eq!(req.tool_name, "Bash");
             }
-            InboundAction::None => panic!("expected Permission action"),
+            InboundAction::None | InboundAction::ControlResponse { .. } => {
+                panic!("expected Permission action");
+            }
         }
         // Event should also be accumulated in the pending turn.
         let (_, events) = pending.as_ref().unwrap();
@@ -1348,6 +1520,108 @@ mod tests {
             PermissionDecision::Deny { message } => assert_eq!(message, "no bash"),
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_control_response_extracts_success() {
+        let msg = json!({
+            "type": "control_response",
+            "response": {
+                "request_id": "interrupt-1",
+                "subtype": "success",
+                "response": {}
+            }
+        });
+        let (id, outcome) = parse_control_response(&msg).expect("parsed");
+        assert_eq!(id, "interrupt-1");
+        assert!(outcome.is_ok());
+    }
+
+    #[test]
+    fn parse_control_response_extracts_error_with_message() {
+        let msg = json!({
+            "type": "control_response",
+            "response": {
+                "request_id": "interrupt-2",
+                "subtype": "error",
+                "error": "no turn in flight"
+            }
+        });
+        let (id, outcome) = parse_control_response(&msg).expect("parsed");
+        assert_eq!(id, "interrupt-2");
+        match outcome {
+            Err(Error::DuplexControlFailed { message }) => {
+                assert_eq!(message, "no turn in flight");
+            }
+            other => panic!("expected DuplexControlFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_control_response_returns_none_on_missing_request_id() {
+        let msg = json!({
+            "type": "control_response",
+            "response": { "subtype": "success" }
+        });
+        assert!(parse_control_response(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_control_response_returns_none_on_unknown_subtype() {
+        let msg = json!({
+            "type": "control_response",
+            "response": { "request_id": "x", "subtype": "future_subtype" }
+        });
+        assert!(parse_control_response(&msg).is_none());
+    }
+
+    #[test]
+    fn handle_inbound_returns_control_response_action() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        let action = handle_inbound(
+            json!({
+                "type": "control_response",
+                "response": {
+                    "request_id": "interrupt-1",
+                    "subtype": "success",
+                    "response": {}
+                }
+            }),
+            &mut pending,
+            &events_tx,
+        );
+        match action {
+            InboundAction::ControlResponse {
+                request_id,
+                outcome,
+            } => {
+                assert_eq!(request_id, "interrupt-1");
+                assert!(outcome.is_ok());
+            }
+            InboundAction::None | InboundAction::Permission(_) => {
+                panic!("expected ControlResponse action");
+            }
+        }
+    }
+
+    #[test]
+    fn handle_inbound_treats_malformed_control_response_as_other() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        let action = handle_inbound(
+            json!({
+                "type": "control_response",
+                "response": { "subtype": "success" }
+            }),
+            &mut pending,
+            &events_tx,
+        );
+        assert!(matches!(action, InboundAction::None));
+        let event = events_rx.try_recv().expect("broadcast");
+        assert!(matches!(event, InboundEvent::Other(_)));
     }
 
     #[tokio::test]
