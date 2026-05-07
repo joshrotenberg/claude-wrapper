@@ -176,7 +176,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -503,6 +503,32 @@ fn classify(msg: &Value) -> InboundEvent {
     }
 }
 
+/// Liveness state of a [`DuplexSession`]'s background task.
+///
+/// Surfaced through [`DuplexSession::is_alive`],
+/// [`DuplexSession::exit_status`], and
+/// [`DuplexSession::wait_for_exit`] for service-shaped hosts that
+/// want non-consuming visibility into whether a session is still
+/// usable. The closing [`DuplexSession::close`] still returns the
+/// full [`Result`] for the one caller that consumes the session.
+///
+/// `Failed` carries a `String` rather than the full
+/// [`Error`](crate::Error) because the underlying watch channel
+/// requires `Clone` and `Error` is not `Clone` (its `Io` variant
+/// wraps a non-`Clone` `std::io::Error`). The full error remains
+/// available via [`DuplexSession::close`].
+#[derive(Debug, Clone)]
+pub enum SessionExitStatus {
+    /// The session task is still running.
+    Running,
+    /// The session task completed normally (close, stdout EOF without
+    /// error).
+    Completed,
+    /// The session task ended with an error. Carries the error's
+    /// `Display` rendering.
+    Failed(String),
+}
+
 /// A long-lived `claude` subprocess in stream-json duplex mode.
 ///
 /// Owns a background task that holds the child open, writes user
@@ -515,6 +541,7 @@ fn classify(msg: &Value) -> InboundEvent {
 pub struct DuplexSession {
     outbound_tx: mpsc::UnboundedSender<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
+    exit_rx: watch::Receiver<SessionExitStatus>,
     join: JoinHandle<Result<()>>,
 }
 
@@ -582,6 +609,7 @@ impl DuplexSession {
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (events_tx, _initial_rx) = broadcast::channel(capacity);
+        let (exit_tx, exit_rx) = watch::channel(SessionExitStatus::Running);
 
         let join = tokio::spawn(run_session(
             child,
@@ -590,11 +618,13 @@ impl DuplexSession {
             outbound_rx,
             events_tx.clone(),
             permission_handler,
+            exit_tx,
         ));
 
         Ok(Self {
             outbound_tx,
             events_tx,
+            exit_rx,
             join,
         })
     }
@@ -652,6 +682,60 @@ impl DuplexSession {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<InboundEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// Cheap, non-blocking liveness check.
+    ///
+    /// Returns `true` while the session task is running, `false` once
+    /// it has exited (whether normally or with an error). Multiple
+    /// concurrent callers are allowed, and the call does not consume
+    /// the session: [`Self::close`] still works after polling.
+    ///
+    /// Reads the latest value from a `tokio::sync::watch` channel
+    /// updated from inside the session task, so it never blocks and
+    /// reflects state set just before the task returns.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        matches!(*self.exit_rx.borrow(), SessionExitStatus::Running)
+    }
+
+    /// Snapshot the session task's [`SessionExitStatus`].
+    ///
+    /// Returns [`SessionExitStatus::Running`] while the task is still
+    /// alive, [`SessionExitStatus::Completed`] after a clean exit, or
+    /// [`SessionExitStatus::Failed`] with the underlying error
+    /// rendered to a string.
+    ///
+    /// Like [`Self::is_alive`], this is a cheap non-blocking read.
+    #[must_use]
+    pub fn exit_status(&self) -> SessionExitStatus {
+        self.exit_rx.borrow().clone()
+    }
+
+    /// Block until the session task transitions out of
+    /// [`SessionExitStatus::Running`] and return the terminal status.
+    ///
+    /// Returns immediately if the task has already exited. Multiple
+    /// concurrent callers are supported (each gets its own receiver
+    /// clone), and the call does not consume the session.
+    ///
+    /// If the underlying watch sender is dropped without ever
+    /// publishing a terminal state -- which should not happen in
+    /// practice, but is treated defensively -- this returns the last
+    /// observed value.
+    pub async fn wait_for_exit(&self) -> SessionExitStatus {
+        let mut rx = self.exit_rx.clone();
+        loop {
+            {
+                let value = rx.borrow_and_update();
+                if !matches!(*value, SessionExitStatus::Running) {
+                    return value.clone();
+                }
+            }
+            if rx.changed().await.is_err() {
+                return rx.borrow().clone();
+            }
+        }
     }
 
     /// Answer a deferred permission request from a different task.
@@ -796,6 +880,7 @@ async fn run_session(
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
     permission_handler: Option<PermissionHandler>,
+    exit_tx: watch::Sender<SessionExitStatus>,
 ) -> Result<()> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
@@ -925,10 +1010,16 @@ async fn run_session(
         let _ = reply.send(Err(Error::DuplexClosed));
     }
 
-    match stream_err {
+    let result = match stream_err {
         Some(e) => Err(e),
         None => Ok(()),
-    }
+    };
+    let final_state = match &result {
+        Ok(()) => SessionExitStatus::Completed,
+        Err(e) => SessionExitStatus::Failed(e.to_string()),
+    };
+    let _ = exit_tx.send(final_state);
+    result
 }
 
 /// Action returned from [`handle_inbound`] for the run loop to act
@@ -1642,5 +1733,153 @@ mod tests {
         // Both handles invoke the same underlying closure.
         let _ = handler.invoke(req.clone()).await;
         let _ = cloned.invoke(req).await;
+    }
+
+    /// Build a `DuplexSession` whose channels are wired up but whose
+    /// background task is a no-op. Tests can drive the watch state
+    /// machine via the returned `exit_tx` and observe the public
+    /// accessors. The fake task idles on a oneshot so it stays alive
+    /// for the life of the test (no JoinHandle::abort handshake
+    /// needed).
+    fn fake_session(
+        initial: SessionExitStatus,
+    ) -> (
+        DuplexSession,
+        watch::Sender<SessionExitStatus>,
+        oneshot::Sender<()>,
+    ) {
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<OutboundMsg>();
+        let (events_tx, _events_rx) = broadcast::channel::<InboundEvent>(16);
+        let (exit_tx, exit_rx) = watch::channel(initial);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+
+        let join = tokio::spawn(async move {
+            let _outbound_rx = outbound_rx;
+            let _ = stop_rx.await;
+            Ok::<(), Error>(())
+        });
+
+        let session = DuplexSession {
+            outbound_tx,
+            events_tx,
+            exit_rx,
+            join,
+        };
+        (session, exit_tx, stop_tx)
+    }
+
+    #[tokio::test]
+    async fn is_alive_true_while_running() {
+        let (session, _exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        assert!(session.is_alive());
+    }
+
+    #[tokio::test]
+    async fn is_alive_false_after_completed() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        exit_tx.send(SessionExitStatus::Completed).unwrap();
+        assert!(!session.is_alive());
+    }
+
+    #[tokio::test]
+    async fn is_alive_false_after_failed() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        exit_tx
+            .send(SessionExitStatus::Failed("boom".into()))
+            .unwrap();
+        assert!(!session.is_alive());
+    }
+
+    #[tokio::test]
+    async fn exit_status_reports_running_initially() {
+        let (session, _exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        assert!(matches!(session.exit_status(), SessionExitStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn exit_status_reflects_completed() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        exit_tx.send(SessionExitStatus::Completed).unwrap();
+        assert!(matches!(
+            session.exit_status(),
+            SessionExitStatus::Completed
+        ));
+    }
+
+    #[tokio::test]
+    async fn exit_status_reflects_failed_with_message() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        exit_tx
+            .send(SessionExitStatus::Failed("oh no".into()))
+            .unwrap();
+        match session.exit_status() {
+            SessionExitStatus::Failed(msg) => assert_eq!(msg, "oh no"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_returns_immediately_when_already_terminal() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        exit_tx.send(SessionExitStatus::Completed).unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(1), session.wait_for_exit())
+            .await
+            .expect("wait_for_exit should not block when already terminal");
+        assert!(matches!(status, SessionExitStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_blocks_until_state_transitions() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+
+        let waiter = async { session.wait_for_exit().await };
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            exit_tx.send(SessionExitStatus::Completed).unwrap();
+        };
+        let (status, ()) = tokio::join!(waiter, driver);
+        assert!(matches!(status, SessionExitStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_supports_multiple_observers() {
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+
+        let waiter1 = async { session.wait_for_exit().await };
+        let waiter2 = async { session.wait_for_exit().await };
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            exit_tx
+                .send(SessionExitStatus::Failed("crash".into()))
+                .unwrap();
+        };
+        let (s1, s2, ()) = tokio::join!(waiter1, waiter2, driver);
+        match s1 {
+            SessionExitStatus::Failed(msg) => assert_eq!(msg, "crash"),
+            other => panic!("waiter1 expected Failed, got {other:?}"),
+        }
+        match s2 {
+            SessionExitStatus::Failed(msg) => assert_eq!(msg, "crash"),
+            other => panic!("waiter2 expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_returns_last_value_when_sender_dropped() {
+        // Defensive: if exit_tx is dropped without ever publishing a
+        // terminal value, wait_for_exit should fall back to the last
+        // observed state rather than hang.
+        let (session, exit_tx, _stop) = fake_session(SessionExitStatus::Running);
+        let waiter = async { session.wait_for_exit().await };
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(exit_tx);
+        };
+        let (status, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(waiter, driver)
+        })
+        .await
+        .expect("wait_for_exit must not hang when sender is dropped");
+        assert!(matches!(status, SessionExitStatus::Running));
     }
 }
