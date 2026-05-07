@@ -19,7 +19,8 @@ Features:
 
 - Full coverage of `claude -p` via `QueryCommand`
 - Async (tokio) and blocking (`std::thread` + `wait-timeout`) APIs behind feature flags
-- Multi-turn `Session` with auto-resume, streaming, cumulative cost, and optional `BudgetTracker` hard-stops
+- Long-lived `DuplexSession` for hosts (IDE backends, daemons, agent servers, chat UIs): one `claude` subprocess held open across turns, mid-turn interrupts, mid-turn permission decisions, broadcast event subscribers
+- Transient `Session` for short-lived processes (CLIs, build scripts, batch jobs): subprocess-per-turn with `--resume` continuity, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming
 - NDJSON streaming events (`stream_query` / `stream_query_sync`)
 - Typed tool-permission patterns (`ToolPattern`)
 - MCP server management: list, get, add, add-json, remove, add-from-desktop, serve, reset-project-choices
@@ -199,11 +200,65 @@ let cmd = QueryCommand::new("review").allowed_tools(["Read", "Bash(git log:*)"])
 `ToolPattern::parse(s)` validates shape (balanced parens, no comma,
 non-empty name) and returns a typed `PatternError` on malformed input.
 
-## Session management
+## Multi-turn conversations
 
-For multi-turn conversations, wrap the client in an `Arc` and use
-`Session`. It threads `session_id` across turns, tracks cumulative cost
-+ history, and supports streaming.
+Two shapes for multi-turn work, each suited to a different process
+model. Pick `DuplexSession` if you can keep a `claude` subprocess
+open for the lifetime of the conversation (IDE backends, daemons,
+agent servers, chat UIs). Pick `Session` if your process is
+short-lived and conversation continuity is the main thing you need
+(CLIs, build scripts, batch jobs, lambdas).
+
+| | `DuplexSession` | `Session` |
+|---|---|---|
+| Process model | one child held open across turns | new subprocess per turn, `--resume` continuity |
+| Mid-turn interrupt | yes (`interrupt()`) | no (only `child.kill()` via SIGKILL) |
+| Mid-turn permission prompts | yes (`PermissionHandler`) | no |
+| Broadcast event subscribers | yes (`subscribe()`) | no (per-turn streaming via `stream_query`) |
+| Built-in cost / history tracking | no (TurnResult is per-turn) | yes (`total_cost_usd`, `history`, `BudgetTracker`) |
+| Right for | long-running hosts | short-lived processes |
+
+### `DuplexSession` (recommended for long-running hosts)
+
+Holds one `claude` subprocess open in stream-json duplex mode for
+the duration of a conversation. User messages go in over stdin,
+NDJSON events come back over stdout. Subscribe to the event stream
+for token-by-token UI updates, answer permission prompts via an
+async callback, and cancel a turn cleanly with `interrupt()`.
+
+```rust
+use claude_wrapper::Claude;
+use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+
+let claude = Claude::builder().build()?;
+let session = DuplexSession::spawn(
+    &claude,
+    DuplexOptions::default().model("haiku"),
+).await?;
+
+let mut events = session.subscribe();
+let turn = session.send("what's 2 + 2?").await?;
+
+while let Ok(event) = events.try_recv() {
+    if let InboundEvent::Assistant(_) = event {
+        // partial or complete assistant message
+    }
+}
+
+println!("answer: {}", turn.result_text().unwrap_or(""));
+session.close().await?;
+```
+
+See the [`duplex` module docs](https://docs.rs/claude-wrapper/latest/claude_wrapper/duplex/index.html)
+for `interrupt()`, `respond_to_permission()`, and the full surface.
+
+### `Session` (for short-lived processes)
+
+Spawns a transient subprocess per turn and threads `session_id`
+across them via `--resume`. Tracks history, cumulative cost, and
+integrates with `BudgetTracker` for hard-stop ceilings. The right
+fit when each turn can stand on its own and the host process
+isn't long-lived.
 
 ```rust
 use std::sync::Arc;
@@ -229,11 +284,11 @@ let mut resumed = Session::resume(claude, "sess-abc123");
 let next = resumed.send("pick up where we left off").await?;
 ```
 
-`Session` is `Send + Sync`, holds `Arc<Claude>`, and can move between
-tasks or sit in long-lived actor state. Streaming turns use
-`Session::stream` / `Session::stream_execute` and capture the session
-id from the first event that carries one -- persisted even if the
-stream errors partway through.
+`Session` is `Send + Sync`, holds `Arc<Claude>`, and can move
+between tasks or sit in long-lived actor state. Streaming turns
+use `Session::stream` / `Session::stream_execute` and capture the
+session id from the first event that carries one -- persisted even
+if the stream errors partway through.
 
 `Session` is currently async-only. Sync callers compose equivalent
 state using `execute_sync` / `execute_json_sync` and `BudgetTracker`.

@@ -4,7 +4,7 @@ Guidance for AI assistants working on this repo.
 
 ## What this is
 
-`claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: multi-turn `Session` with streaming, cumulative cost + optional `BudgetTracker` hard-stops, typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation.
+`claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: long-lived `DuplexSession` for hosts (one child held open across turns; mid-turn interrupts, permission handlers, broadcast subscribers), transient `Session` for short-lived processes (subprocess-per-turn with `--resume`, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming), typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation.
 
 This is the only crate in the repo.
 
@@ -79,7 +79,8 @@ Key modules:
 - `src/command/plugin.rs`, `marketplace.rs`, `auth.rs`, `doctor.rs`, `agents.rs`, `version.rs`, `raw.rs` -- other subcommands
 - `src/exec.rs` -- process spawning (tokio for async, `std::process` + `wait-timeout` for sync), concurrent pipe drain, timeout cleanup
 - `src/streaming.rs` -- `stream_query` / `stream_query_sync` for NDJSON streaming
-- `src/session.rs` -- `Session` for multi-turn conversations (async-only; holds `Arc<Claude>`, auto-threads session_id, tracks history/cost, supports streaming, optional `BudgetTracker` attachment)
+- `src/session.rs` -- `Session` for multi-turn conversations from short-lived processes (async-only; subprocess per turn; holds `Arc<Claude>`, auto-threads session_id, tracks history/cost, supports streaming, optional `BudgetTracker` attachment)
+- `src/duplex.rs` -- `DuplexSession` for long-running hosts (async + json; one `claude` subprocess held open in stream-json mode across many turns; supports `subscribe`, `interrupt`, and an async `PermissionHandler` for mid-turn permission decisions)
 - `src/budget.rs` -- `BudgetTracker` with fire-once warn/exceeded callbacks and `Error::BudgetExceeded` hard-stop
 - `src/tool_pattern.rs` -- `ToolPattern` for typed `--allowed-tools` / `--disallowed-tools` patterns (`tool`, `tool_with_args`, `all`, `mcp` constructors; `parse()` validation; loose `From<&str>` for back-compat)
 - `src/mcp_config.rs` -- `McpConfigBuilder` for generating `.mcp.json` files
@@ -108,9 +109,47 @@ The `Session` module and every `async fn execute` / `async fn execute_json` are 
 - Prefer editing existing files over creating new ones
 - When adding code behind a feature gate, verify every build configuration compiles (see Build and test)
 
-## Session API notes
+## Multi-turn API notes
 
-`Session` is the preferred multi-turn interface. Key points:
+The crate ships two multi-turn primitives. Recommend `DuplexSession`
+for long-running hosts (the featureful default for agentic / UI
+work), and `Session` for short-lived processes that just need
+conversation continuity over a series of one-off subprocess calls.
+
+### `DuplexSession` (recommended for long-running hosts)
+
+Holds one `claude` subprocess open in stream-json duplex mode for
+the lifetime of the conversation. Async-only, gated on `feature =
+"async"` + `feature = "json"`. Key points:
+
+- `DuplexSession::spawn(claude, opts)` -- starts the child and the
+  background task that owns it.
+- `send(prompt) -> TurnResult` -- one turn at a time; `send` while
+  another turn is pending returns `Error::DuplexTurnInFlight`.
+- `subscribe() -> broadcast::Receiver<InboundEvent>` -- typed event
+  stream (`SystemInit`, `Assistant`, `StreamEvent`, `User`,
+  `Other`). Multiple receivers are supported. Slow consumers see
+  `RecvError::Lagged` rather than blocking.
+- `interrupt() -> Result<()>` -- writes a clean
+  `control_request {subtype: "interrupt"}`. The in-flight turn
+  closes shortly after with a truncated `TurnResult`.
+- `respond_to_permission(request_id, decision)` -- answers a
+  permission prompt that was deferred from the handler.
+- `close(self)` -- drops the outbound channel, closes stdin, and
+  reaps the child. Drop without close also tears down (via
+  `kill_on_drop` on the `Command`).
+- Not `Clone`. Wrap in `Arc<DuplexSession>` if you need to call
+  `&self` methods (`send`, `subscribe`, `interrupt`,
+  `respond_to_permission`) from multiple tasks. `close(self)`
+  requires exclusive ownership.
+- TurnResult does not track cumulative cost or history across
+  turns -- the events vec is per-turn. Hosts that want that can
+  accumulate themselves; we may add a typed wrapper later.
+
+### `Session` (for short-lived processes)
+
+Holds host-side state across a series of transient `claude -p`
+subprocess calls. Key points:
 
 - Holds `Arc<Claude>` -- `Send + Sync`, can move between tasks, store in long-lived actor state
 - `Session::new(arc)` starts fresh; `Session::resume(arc, id)` reattaches to an existing id
