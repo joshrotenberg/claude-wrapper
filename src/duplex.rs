@@ -513,10 +513,10 @@ fn classify(msg: &Value) -> InboundEvent {
 /// full [`Result`] for the one caller that consumes the session.
 ///
 /// `Failed` carries a `String` rather than the full
-/// [`Error`](crate::Error) because the underlying watch channel
-/// requires `Clone` and `Error` is not `Clone` (its `Io` variant
-/// wraps a non-`Clone` `std::io::Error`). The full error remains
-/// available via [`DuplexSession::close`].
+/// [`Error`] because the underlying watch channel requires `Clone`
+/// and `Error` is not `Clone` (its `Io` variant wraps a non-`Clone`
+/// `std::io::Error`). The full error remains available via
+/// [`DuplexSession::close`].
 #[derive(Debug, Clone)]
 pub enum SessionExitStatus {
     /// The session task is still running.
