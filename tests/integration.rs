@@ -513,6 +513,39 @@ async fn test_conversation_three_turns_track_history_and_cost() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_health_primitives_lifecycle() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession, SessionExitStatus};
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(&claude, DuplexOptions::default().model("haiku"))
+        .await
+        .expect("spawn duplex session");
+
+    assert!(session.is_alive(), "session should be alive after spawn");
+    assert!(
+        matches!(session.exit_status(), SessionExitStatus::Running),
+        "exit_status should be Running after spawn"
+    );
+
+    let _turn = session
+        .send("Reply with just the word 'hi'.")
+        .await
+        .expect("send turn");
+
+    assert!(
+        session.is_alive(),
+        "session should still be alive after a successful turn"
+    );
+
+    session.close().await.expect("close session");
+    // close(self) consumes the session, so we cannot observe
+    // is_alive()/wait_for_exit() through the same handle afterwards.
+    // The post-exit watch transition is exercised by unit tests in
+    // src/duplex.rs::tests against the same state machine.
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;
