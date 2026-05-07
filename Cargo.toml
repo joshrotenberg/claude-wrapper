@@ -49,6 +49,14 @@ name = "agent_worker"
 required-features = ["async", "json"]
 
 [[example]]
+name = "duplex_chat"
+required-features = ["async", "json"]
+
+[[example]]
+name = "duplex_interrupt"
+required-features = ["async", "json"]
+
+[[example]]
 name = "health_check"
 required-features = ["async"]
 
