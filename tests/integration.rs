@@ -182,6 +182,61 @@ async fn test_duplex_subscribe_sees_assistant_before_result() {
 }
 
 #[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_duplex_permission_handler_denies_bash() {
+    use claude_wrapper::duplex::{
+        DuplexOptions, DuplexSession, PermissionDecision, PermissionHandler,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let bash_seen = Arc::new(AtomicBool::new(false));
+    let bash_seen_handler = Arc::clone(&bash_seen);
+
+    let handler = PermissionHandler::new(move |req| {
+        let bash_seen = Arc::clone(&bash_seen_handler);
+        async move {
+            if req.tool_name == "Bash" {
+                bash_seen.store(true, Ordering::SeqCst);
+                PermissionDecision::Deny {
+                    message: "bash is denied for this test".into(),
+                }
+            } else {
+                PermissionDecision::Allow {
+                    updated_input: None,
+                }
+            }
+        }
+    });
+
+    let claude = claude_client();
+    let session = DuplexSession::spawn(
+        &claude,
+        DuplexOptions::default()
+            .model("haiku")
+            .on_permission(handler),
+    )
+    .await
+    .expect("spawn duplex session");
+
+    // Steer claude toward a Bash invocation so the permission handler
+    // is exercised. The closing `result` may report success or report
+    // that the tool was denied -- either is fine; we only assert the
+    // handler saw the request.
+    let _turn = session
+        .send("Use the Bash tool to run `echo hello`.")
+        .await
+        .expect("send turn");
+
+    assert!(
+        bash_seen.load(Ordering::SeqCst),
+        "expected the permission handler to be invoked for Bash"
+    );
+
+    session.close().await.expect("close session");
+}
+
+#[tokio::test]
 #[ignore = "requires claude binary"]
 async fn test_mcp_config_builder() {
     use claude_wrapper::McpConfigBuilder;

@@ -90,15 +90,54 @@
 //! `tokio::select!`. Pin the send future and use a block scope so
 //! its borrow of the session ends before [`DuplexSession::close`].
 //!
+//! # Mid-turn permission decisions
+//!
+//! Configure a [`PermissionHandler`] at spawn time to answer the
+//! CLI's permission prompts in-flight. The session writes
+//! `--permission-prompt-tool stdio` automatically when a handler is
+//! set, so the CLI emits `control_request` messages for tool use
+//! over the duplex channel rather than blocking on a TUI prompt.
+//!
+//! ```no_run
+//! use claude_wrapper::Claude;
+//! use claude_wrapper::duplex::{
+//!     DuplexOptions, DuplexSession, PermissionDecision, PermissionHandler,
+//! };
+//!
+//! # async fn example() -> claude_wrapper::Result<()> {
+//! let handler = PermissionHandler::new(|req| async move {
+//!     if req.tool_name == "Bash" {
+//!         PermissionDecision::Deny { message: "bash is denied".into() }
+//!     } else {
+//!         PermissionDecision::Allow { updated_input: None }
+//!     }
+//! });
+//!
+//! let claude = Claude::builder().build()?;
+//! let session = DuplexSession::spawn(
+//!     &claude,
+//!     DuplexOptions::default().on_permission(handler),
+//! ).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For human-in-the-loop UIs, return [`PermissionDecision::Defer`]
+//! from the handler, capture the [`PermissionRequest::request_id`],
+//! and answer later via [`DuplexSession::respond_to_permission`].
+//!
 //! # Phased rollout
 //!
 //! This module is rolling out in four PRs tracked in
 //! <https://github.com/joshrotenberg/claude-wrapper/issues/561>. The
-//! current surface is PR 1 + 2: `spawn`, `send`, `close`, `subscribe`.
-//! Mid-turn permission decisions and `interrupt` land in subsequent
-//! PRs.
+//! current surface is PR 1 + 2 + 3: `spawn`, `send`, `close`,
+//! `subscribe`, mid-turn permission handling. `interrupt` lands in
+//! PR 4.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -117,6 +156,111 @@ use crate::error::{Error, Result};
 /// Override per-session via [`DuplexOptions::subscriber_capacity`].
 pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 256;
 
+/// A mid-turn permission prompt from the CLI for a single tool
+/// invocation.
+///
+/// Forwarded to the [`PermissionHandler`] registered via
+/// [`DuplexOptions::on_permission`]. Capture
+/// [`Self::request_id`] inside your handler if you intend to return
+/// [`PermissionDecision::Defer`] and answer later via
+/// [`DuplexSession::respond_to_permission`].
+#[derive(Debug, Clone)]
+pub struct PermissionRequest {
+    /// CLI-assigned correlation id. Pass this to
+    /// [`DuplexSession::respond_to_permission`] when deferring.
+    pub request_id: String,
+    /// The tool the model wants to use (e.g. `"Bash"`, `"Edit"`).
+    pub tool_name: String,
+    /// The tool's `input` payload as the model produced it.
+    pub input: Value,
+    /// The full `request` object as sent by the CLI, for fields not
+    /// promoted to typed accessors.
+    pub raw: Value,
+}
+
+/// The decision returned from a [`PermissionHandler`] (or passed to
+/// [`DuplexSession::respond_to_permission`] for deferred decisions).
+///
+/// `Allow` and `Deny` both write a control response to the CLI
+/// immediately. `Defer` causes the run loop to skip writing a
+/// response; the caller is then expected to invoke
+/// [`DuplexSession::respond_to_permission`] later. Passing `Defer`
+/// to `respond_to_permission` is a no-op.
+#[derive(Debug, Clone)]
+pub enum PermissionDecision {
+    /// Allow the tool to run, optionally with rewritten input.
+    Allow {
+        /// Replace the model's input with this object before running
+        /// the tool. `None` keeps the original input.
+        updated_input: Option<Value>,
+    },
+    /// Deny the tool. The `message` is surfaced to the model.
+    Deny {
+        /// Human-readable explanation given back to the model.
+        message: String,
+    },
+    /// Decision pending; the caller will supply it later via
+    /// [`DuplexSession::respond_to_permission`].
+    Defer,
+}
+
+type PermissionFuture = Pin<Box<dyn Future<Output = PermissionDecision> + Send + 'static>>;
+type PermissionFn = dyn Fn(PermissionRequest) -> PermissionFuture + Send + Sync + 'static;
+
+/// A user-supplied async callback invoked when the CLI requests
+/// permission to use a tool.
+///
+/// Construct with [`Self::new`], passing an `async fn` or
+/// async-block closure. Cheap to clone (`Arc` under the hood).
+///
+/// The handler runs inline on the duplex session's task. The CLI is
+/// blocked on the response while the handler runs, so awaiting an
+/// async policy check (DB lookup, remote call) is fine. If the
+/// decision needs human input on a different timescale, return
+/// [`PermissionDecision::Defer`] and answer via
+/// [`DuplexSession::respond_to_permission`] when ready.
+#[derive(Clone)]
+pub struct PermissionHandler {
+    inner: Arc<PermissionFn>,
+}
+
+impl PermissionHandler {
+    /// Wrap an async closure as a permission handler.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use claude_wrapper::duplex::{PermissionDecision, PermissionHandler};
+    ///
+    /// let _handler = PermissionHandler::new(|req| async move {
+    ///     if req.tool_name == "Bash" {
+    ///         PermissionDecision::Deny { message: "no bash".into() }
+    ///     } else {
+    ///         PermissionDecision::Allow { updated_input: None }
+    ///     }
+    /// });
+    /// ```
+    pub fn new<F, Fut>(f: F) -> Self
+    where
+        F: Fn(PermissionRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PermissionDecision> + Send + 'static,
+    {
+        Self {
+            inner: Arc::new(move |req| Box::pin(f(req))),
+        }
+    }
+
+    fn invoke(&self, req: PermissionRequest) -> PermissionFuture {
+        (self.inner)(req)
+    }
+}
+
+impl std::fmt::Debug for PermissionHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionHandler").finish_non_exhaustive()
+    }
+}
+
 /// Configuration for [`DuplexSession::spawn`].
 ///
 /// Builder methods cover the most common spawn-time options. The
@@ -130,6 +274,7 @@ pub struct DuplexOptions {
     append_system_prompt: Option<String>,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
+    on_permission: Option<PermissionHandler>,
 }
 
 impl DuplexOptions {
@@ -177,6 +322,23 @@ impl DuplexOptions {
         self
     }
 
+    /// Register a [`PermissionHandler`] to answer the CLI's tool-use
+    /// permission prompts in-flight.
+    ///
+    /// When set, the spawn command line includes
+    /// `--permission-prompt-tool stdio`, which configures the CLI to
+    /// emit `control_request` messages for tool use over the duplex
+    /// channel rather than blocking on a TUI prompt.
+    ///
+    /// Without a handler, the session does not pass
+    /// `--permission-prompt-tool` and the CLI applies its default
+    /// permission policy (driven by `--permission-mode`).
+    #[must_use]
+    pub fn on_permission(mut self, handler: PermissionHandler) -> Self {
+        self.on_permission = Some(handler);
+        self
+    }
+
     fn into_args(self) -> Vec<String> {
         let mut args = vec![
             "--print".to_string(),
@@ -198,6 +360,10 @@ impl DuplexOptions {
         if let Some(p) = self.append_system_prompt {
             args.push("--append-system-prompt".to_string());
             args.push(p);
+        }
+        if self.on_permission.is_some() {
+            args.push("--permission-prompt-tool".to_string());
+            args.push("stdio".to_string());
         }
         args.extend(self.additional_args);
 
@@ -325,6 +491,10 @@ enum OutboundMsg {
         prompt: String,
         reply: oneshot::Sender<Result<TurnResult>>,
     },
+    PermissionResponse {
+        request_id: String,
+        decision: PermissionDecision,
+    },
 }
 
 impl DuplexSession {
@@ -339,6 +509,7 @@ impl DuplexSession {
         let capacity = opts
             .subscriber_capacity
             .unwrap_or(DEFAULT_SUBSCRIBER_CAPACITY);
+        let permission_handler = opts.on_permission.clone();
 
         let mut command_args = Vec::new();
         command_args.extend(claude.global_args.clone());
@@ -382,6 +553,7 @@ impl DuplexSession {
             stdout,
             outbound_rx,
             events_tx.clone(),
+            permission_handler,
         ));
 
         Ok(Self {
@@ -446,6 +618,68 @@ impl DuplexSession {
         self.events_tx.subscribe()
     }
 
+    /// Answer a deferred permission request from a different task.
+    ///
+    /// Use this after the [`PermissionHandler`] returned
+    /// [`PermissionDecision::Defer`] for the matching `request_id`.
+    /// Passing `decision = PermissionDecision::Defer` here is a
+    /// no-op (logged at `warn`); pass `Allow` or `Deny`.
+    ///
+    /// Returns [`Error::DuplexClosed`] if the session task has
+    /// already exited.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::Claude;
+    /// use claude_wrapper::duplex::{
+    ///     DuplexOptions, DuplexSession, PermissionDecision, PermissionHandler,
+    /// };
+    /// use tokio::sync::mpsc;
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// // Forward request_ids out to a UI thread; answer asynchronously.
+    /// let (tx, _rx) = mpsc::unbounded_channel::<String>();
+    /// let handler = PermissionHandler::new(move |req| {
+    ///     let tx = tx.clone();
+    ///     async move {
+    ///         let _ = tx.send(req.request_id);
+    ///         PermissionDecision::Defer
+    ///     }
+    /// });
+    ///
+    /// let claude = Claude::builder().build()?;
+    /// let session = DuplexSession::spawn(
+    ///     &claude,
+    ///     DuplexOptions::default().on_permission(handler),
+    /// ).await?;
+    ///
+    /// // ...later, from the UI thread:
+    /// session.respond_to_permission(
+    ///     "req-abc",
+    ///     PermissionDecision::Allow { updated_input: None },
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn respond_to_permission(
+        &self,
+        request_id: impl Into<String>,
+        decision: PermissionDecision,
+    ) -> Result<()> {
+        if matches!(decision, PermissionDecision::Defer) {
+            warn!("respond_to_permission called with Defer; ignoring");
+            return Ok(());
+        }
+        self.outbound_tx
+            .send(OutboundMsg::PermissionResponse {
+                request_id: request_id.into(),
+                decision,
+            })
+            .map_err(|_| Error::DuplexClosed)?;
+        Ok(())
+    }
+
     /// Close the session and wait for the underlying task to exit.
     ///
     /// Drops the outbound channel sender, which the session task
@@ -477,6 +711,7 @@ async fn run_session(
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
+    permission_handler: Option<PermissionHandler>,
 ) -> Result<()> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
@@ -491,10 +726,41 @@ async fn run_session(
                     if l.trim().is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<Value>(&l) {
-                        Ok(v) => handle_inbound(v, &mut pending, &events_tx),
+                    let parsed = match serde_json::from_str::<Value>(&l) {
+                        Ok(v) => v,
                         Err(e) => {
                             debug!(line = %l, error = %e, "failed to parse duplex event, skipping");
+                            continue;
+                        }
+                    };
+                    match handle_inbound(parsed, &mut pending, &events_tx) {
+                        InboundAction::None => {}
+                        InboundAction::Permission(req) => {
+                            let request_id = req.request_id.clone();
+                            let decision = match permission_handler.as_ref() {
+                                Some(h) => h.invoke(req).await,
+                                None => {
+                                    warn!(
+                                        request_id = %request_id,
+                                        "received can_use_tool with no permission handler; auto-denying"
+                                    );
+                                    PermissionDecision::Deny {
+                                        message:
+                                            "no permission handler configured on duplex session"
+                                                .into(),
+                                    }
+                                }
+                            };
+                            if matches!(decision, PermissionDecision::Defer) {
+                                debug!(
+                                    request_id = %request_id,
+                                    "permission handler deferred; waiting for respond_to_permission"
+                                );
+                            } else if let Err(e) =
+                                write_permission_response(&mut stdin, &request_id, &decision).await
+                            {
+                                warn!(error = %e, "failed to write permission response");
+                            }
                         }
                     }
                 }
@@ -520,6 +786,13 @@ async fn run_session(
                         continue;
                     }
                     pending = Some((reply, Vec::new()));
+                }
+                Some(OutboundMsg::PermissionResponse { request_id, decision }) => {
+                    if let Err(e) =
+                        write_permission_response(&mut stdin, &request_id, &decision).await
+                    {
+                        warn!(error = %e, "failed to write deferred permission response");
+                    }
                 }
                 None => break,
             },
@@ -548,11 +821,23 @@ async fn run_session(
     }
 }
 
+/// Action returned from [`handle_inbound`] for the run loop to act
+/// on after the side-effects (broadcast, accumulate, resolve) are
+/// done.
+enum InboundAction {
+    /// No further action -- side-effects were all handled inline.
+    None,
+    /// A `control_request {subtype: "can_use_tool"}` was received and
+    /// needs the [`PermissionHandler`] invoked. The run loop awaits
+    /// the handler and writes the response.
+    Permission(PermissionRequest),
+}
+
 fn handle_inbound(
     msg: Value,
     pending: &mut Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)>,
     events_tx: &broadcast::Sender<InboundEvent>,
-) {
+) -> InboundAction {
     match msg.get("type").and_then(Value::as_str) {
         Some("result") => {
             if let Some((reply, events)) = pending.take() {
@@ -563,6 +848,32 @@ fn handle_inbound(
             } else {
                 debug!("dropping orphan result event with no pending turn");
             }
+            InboundAction::None
+        }
+        Some("control_request") => {
+            // can_use_tool flows through the permission handler;
+            // anything else is logged + accumulated as Other for now.
+            if msg
+                .get("request")
+                .and_then(|r| r.get("subtype"))
+                .and_then(Value::as_str)
+                == Some("can_use_tool")
+                && let Some(req) = parse_permission_request(&msg)
+            {
+                if let Some((_, events)) = pending.as_mut() {
+                    events.push(msg);
+                }
+                return InboundAction::Permission(req);
+            }
+            debug!(
+                ?msg,
+                "received unhandled control_request; treating as Other"
+            );
+            let _ = events_tx.send(InboundEvent::Other(msg.clone()));
+            if let Some((_, events)) = pending.as_mut() {
+                events.push(msg);
+            }
+            InboundAction::None
         }
         _ => {
             // Broadcast a classified copy. Send error means no
@@ -574,8 +885,22 @@ fn handle_inbound(
             } else {
                 debug!("dropping inbound event with no pending turn");
             }
+            InboundAction::None
         }
     }
+}
+
+fn parse_permission_request(msg: &Value) -> Option<PermissionRequest> {
+    let request_id = msg.get("request_id").and_then(Value::as_str)?;
+    let request = msg.get("request")?;
+    let tool_name = request.get("tool_name").and_then(Value::as_str)?;
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    Some(PermissionRequest {
+        request_id: request_id.to_string(),
+        tool_name: tool_name.to_string(),
+        input,
+        raw: request.clone(),
+    })
 }
 
 async fn write_user(stdin: &mut ChildStdin, prompt: &str) -> Result<()> {
@@ -587,8 +912,46 @@ async fn write_user(stdin: &mut ChildStdin, prompt: &str) -> Result<()> {
         },
         "parent_tool_use_id": null,
     });
-    let mut line = serde_json::to_string(&user_msg).map_err(|e| Error::Json {
-        message: "failed to serialize duplex user message".to_string(),
+    write_line(stdin, &user_msg, "user message").await
+}
+
+async fn write_permission_response(
+    stdin: &mut ChildStdin,
+    request_id: &str,
+    decision: &PermissionDecision,
+) -> Result<()> {
+    let inner = match decision {
+        PermissionDecision::Allow { updated_input } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("behavior".to_string(), Value::String("allow".to_string()));
+            if let Some(input) = updated_input {
+                obj.insert("updatedInput".to_string(), input.clone());
+            }
+            Value::Object(obj)
+        }
+        PermissionDecision::Deny { message } => serde_json::json!({
+            "behavior": "deny",
+            "message": message,
+        }),
+        PermissionDecision::Defer => {
+            // Caller path is supposed to filter this; defensive guard.
+            return Ok(());
+        }
+    };
+    let envelope = serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "request_id": request_id,
+            "subtype": "success",
+            "response": inner,
+        },
+    });
+    write_line(stdin, &envelope, "control_response").await
+}
+
+async fn write_line(stdin: &mut ChildStdin, value: &Value, what: &'static str) -> Result<()> {
+    let mut line = serde_json::to_string(value).map_err(|e| Error::Json {
+        message: format!("failed to serialize duplex {what}"),
         source: e,
     })?;
     line.push('\n');
@@ -596,7 +959,7 @@ async fn write_user(stdin: &mut ChildStdin, prompt: &str) -> Result<()> {
         .write_all(line.as_bytes())
         .await
         .map_err(|e| Error::Io {
-            message: "failed to write user message to duplex stdin".to_string(),
+            message: format!("failed to write {what} to duplex stdin"),
             source: e,
             working_dir: None,
         })?;
@@ -834,5 +1197,175 @@ mod tests {
         let args = DuplexOptions::default().subscriber_capacity(64).into_args();
         assert!(!args.iter().any(|a| a.contains("subscriber")));
         assert!(!args.iter().any(|a| a.contains("capacity")));
+    }
+
+    #[test]
+    fn into_args_includes_permission_prompt_tool_when_handler_set() {
+        let handler = PermissionHandler::new(|_req| async move {
+            PermissionDecision::Allow {
+                updated_input: None,
+            }
+        });
+        let args = DuplexOptions::default().on_permission(handler).into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"])
+        );
+    }
+
+    #[test]
+    fn into_args_omits_permission_prompt_tool_without_handler() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
+    }
+
+    #[test]
+    fn parse_permission_request_extracts_fields() {
+        let msg = json!({
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": { "command": "ls" }
+            }
+        });
+        let req = parse_permission_request(&msg).expect("permission request");
+        assert_eq!(req.request_id, "req-1");
+        assert_eq!(req.tool_name, "Bash");
+        assert_eq!(req.input, json!({ "command": "ls" }));
+        assert_eq!(
+            req.raw.get("subtype").and_then(Value::as_str),
+            Some("can_use_tool")
+        );
+    }
+
+    #[test]
+    fn parse_permission_request_returns_none_when_missing_request_id() {
+        let msg = json!({
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+            }
+        });
+        assert!(parse_permission_request(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_permission_request_returns_none_when_missing_tool_name() {
+        let msg = json!({
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": { "subtype": "can_use_tool" }
+        });
+        assert!(parse_permission_request(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_permission_request_handles_missing_input() {
+        let msg = json!({
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+            }
+        });
+        let req = parse_permission_request(&msg).expect("request");
+        assert_eq!(req.input, Value::Null);
+    }
+
+    #[test]
+    fn handle_inbound_returns_permission_for_can_use_tool() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        let action = handle_inbound(
+            json!({
+                "type": "control_request",
+                "request_id": "req-1",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "Bash",
+                    "input": { "command": "ls" }
+                }
+            }),
+            &mut pending,
+            &events_tx,
+        );
+        match action {
+            InboundAction::Permission(req) => {
+                assert_eq!(req.request_id, "req-1");
+                assert_eq!(req.tool_name, "Bash");
+            }
+            InboundAction::None => panic!("expected Permission action"),
+        }
+        // Event should also be accumulated in the pending turn.
+        let (_, events) = pending.as_ref().unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn handle_inbound_treats_unknown_control_request_as_other() {
+        let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        let action = handle_inbound(
+            json!({
+                "type": "control_request",
+                "request_id": "req-2",
+                "request": { "subtype": "future_subtype" }
+            }),
+            &mut pending,
+            &events_tx,
+        );
+        assert!(matches!(action, InboundAction::None));
+        let event = events_rx.try_recv().expect("broadcast");
+        assert!(matches!(event, InboundEvent::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn permission_handler_invokes_closure_async() {
+        let handler = PermissionHandler::new(|req| async move {
+            if req.tool_name == "Bash" {
+                PermissionDecision::Deny {
+                    message: "no bash".into(),
+                }
+            } else {
+                PermissionDecision::Allow {
+                    updated_input: None,
+                }
+            }
+        });
+        let req = PermissionRequest {
+            request_id: "r1".into(),
+            tool_name: "Bash".into(),
+            input: Value::Null,
+            raw: Value::Null,
+        };
+        match handler.invoke(req).await {
+            PermissionDecision::Deny { message } => assert_eq!(message, "no bash"),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_handler_clones_arc() {
+        let handler = PermissionHandler::new(|_req| async move {
+            PermissionDecision::Allow {
+                updated_input: None,
+            }
+        });
+        let cloned = handler.clone();
+        let req = PermissionRequest {
+            request_id: "r1".into(),
+            tool_name: "Read".into(),
+            input: Value::Null,
+            raw: Value::Null,
+        };
+        // Both handles invoke the same underlying closure.
+        let _ = handler.invoke(req.clone()).await;
+        let _ = cloned.invoke(req).await;
     }
 }
