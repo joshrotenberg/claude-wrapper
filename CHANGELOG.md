@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.8.0...v0.9.0) - 2026-05-08
+
+### Added
+
+- *(examples)* add minimal HTTP claude-as-a-service example ([#576](https://github.com/joshrotenberg/claude-wrapper/pull/576))
+- add health/watchdog primitives to DuplexSession ([#575](https://github.com/joshrotenberg/claude-wrapper/pull/575))
+- add Conversation wrapper for DuplexSession bookkeeping ([#574](https://github.com/joshrotenberg/claude-wrapper/pull/574))
+- add DuplexSession::interrupt for clean mid-turn cancel ([#566](https://github.com/joshrotenberg/claude-wrapper/pull/566))
+- add mid-turn permission handling to DuplexSession ([#565](https://github.com/joshrotenberg/claude-wrapper/pull/565))
+- add DuplexSession::subscribe with classified InboundEvent stream ([#564](https://github.com/joshrotenberg/claude-wrapper/pull/564))
+- add DuplexSession for long-lived stream-json conversations ([#562](https://github.com/joshrotenberg/claude-wrapper/pull/562))
+
+### Other
+
+- *(examples)* add DuplexSession examples for chat and interrupt ([#570](https://github.com/joshrotenberg/claude-wrapper/pull/570))
+- reposition DuplexSession as the recommended multi-turn primitive ([#569](https://github.com/joshrotenberg/claude-wrapper/pull/569))
+- *(duplex)* expand live integration coverage and tighten assertions ([#568](https://github.com/joshrotenberg/claude-wrapper/pull/568))
+- update changelog ([#560](https://github.com/joshrotenberg/claude-wrapper/pull/560))
+
 ## [0.8.0] - 2026-05-04
 
 ### Features
