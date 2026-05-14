@@ -66,6 +66,16 @@ struct ChatOpenInput {
     /// (no callback wired through MCP today).
     #[serde(default)]
     warn_at_usd: Option<f64>,
+    /// Run this chat in a fresh git worktree (`claude --worktree`).
+    /// `true` uses a default-named worktree; pass `worktree_name`
+    /// to choose a name explicitly.
+    #[serde(default)]
+    worktree: Option<bool>,
+    /// Name for the fresh worktree (implies `worktree = true`).
+    /// Useful for "agent runs in isolation" -- the chat's writes
+    /// land in a side worktree instead of the current working tree.
+    #[serde(default)]
+    worktree_name: Option<String>,
 }
 
 fn tool_chat_open(state: &ServerState) -> Tool {
@@ -88,6 +98,15 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                 }
                 if let Some(s) = input.append_system_prompt {
                     opts = opts.append_system_prompt(s);
+                }
+                // worktree_name implies worktree-enabled.
+                let want_worktree =
+                    input.worktree_name.is_some() || input.worktree.unwrap_or(false);
+                if want_worktree {
+                    opts = opts.arg("--worktree");
+                    if let Some(name) = input.worktree_name {
+                        opts = opts.arg(name);
+                    }
                 }
 
                 let session = DuplexSession::spawn(&state.claude, opts)

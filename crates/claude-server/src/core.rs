@@ -36,6 +36,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_version(),
         tool_cli_version(state),
+        tool_query(state),
         tool_query_sync(state),
         tool_agents(state),
         tool_auth_status(state),
@@ -92,7 +93,7 @@ fn tool_cli_version(state: &ServerState) -> Tool {
         .build()
 }
 
-// -- claude_query ----------------------------------------------------
+// -- claude_query / claude_query_sync -------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct QueryInput {
@@ -107,6 +108,80 @@ struct QueryInput {
     /// Resume a previous session by id.
     #[serde(default)]
     resume: Option<String>,
+    /// Run the query in a fresh git worktree (`claude --worktree`).
+    /// Useful for "agent runs in isolation" -- the query's writes
+    /// land in a side worktree instead of the current working tree.
+    /// Named worktrees aren't yet supported on the single-shot path
+    /// (wrapper limitation; see chat_open for the named variant).
+    #[serde(default)]
+    worktree: Option<bool>,
+}
+
+fn build_query(input: &QueryInput) -> QueryCommand {
+    // output_format on the builder lands BEFORE the `--` separator,
+    // unlike execute_json's late push -- wrapper bug worked around.
+    let mut q = QueryCommand::new(input.prompt.clone()).output_format(OutputFormat::Json);
+    if let Some(ref m) = input.model {
+        q = q.model(m.clone());
+    }
+    if let Some(ref s) = input.system_prompt {
+        q = q.system_prompt(s.clone());
+    }
+    if let Some(ref r) = input.resume {
+        q = q.resume(r.clone());
+    }
+    if input.worktree.unwrap_or(false) {
+        q = q.worktree();
+    }
+    q
+}
+
+fn parse_query_envelope(stdout: &str) -> Result<serde_json::Value, tower_mcp::Error> {
+    let parsed: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| internal(format!("parse query JSON: {e}; stdout={stdout}")))?;
+    Ok(json!({
+        "result": parsed.get("result").cloned().unwrap_or(serde_json::Value::Null),
+        "session_id": parsed.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+        "total_cost_usd": parsed.get("total_cost_usd").cloned().unwrap_or(serde_json::Value::Null),
+        "duration_ms": parsed.get("duration_ms").cloned().unwrap_or(serde_json::Value::Null),
+        "num_turns": parsed.get("num_turns").cloned().unwrap_or(serde_json::Value::Null),
+        "is_error": parsed.get("is_error").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+fn tool_query(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("claude_query")
+        .description(
+            "Fire a single-shot agent query and return immediately with a \
+             turn_id. The query runs in the background; poll with `turn_get`, \
+             block with `turn_wait`, cancel with `turn_cancel`. For the \
+             blocking variant, see `claude_query_sync`.",
+        )
+        .handler(move |input: QueryInput| {
+            let state = state.clone();
+            async move {
+                let handle = state.turns.register(None).await;
+                let turn_id = handle.turn_id.clone();
+                let claude = state.claude.clone();
+                tokio::spawn(async move {
+                    if handle.is_cancelled() {
+                        handle.cancelled();
+                        return;
+                    }
+                    let q = build_query(&input);
+                    match q.execute(&claude).await {
+                        Ok(out) => match parse_query_envelope(&out.stdout) {
+                            Ok(env) => handle.complete(env),
+                            Err(e) => handle.fail(e.to_string()),
+                        },
+                        Err(e) => handle.fail(e),
+                    }
+                });
+                Ok(CallToolResult::json(json!({"turn_id": turn_id})))
+            }
+        })
+        .build()
 }
 
 fn tool_query_sync(state: &ServerState) -> Tool {
@@ -122,31 +197,10 @@ fn tool_query_sync(state: &ServerState) -> Tool {
         .handler(move |input: QueryInput| {
             let claude = Arc::clone(&claude);
             async move {
-                // Setting output_format on the builder ensures it lands
-                // before the `--` separator. (execute_json appends it
-                // after, where it gets eaten as prompt text -- wrapper
-                // bug, worked around here.)
-                let mut q = QueryCommand::new(input.prompt).output_format(OutputFormat::Json);
-                if let Some(m) = input.model {
-                    q = q.model(m);
-                }
-                if let Some(s) = input.system_prompt {
-                    q = q.system_prompt(s);
-                }
-                if let Some(r) = input.resume {
-                    q = q.resume(r);
-                }
+                let q = build_query(&input);
                 let out = q.execute(&claude).await.map_err(internal)?;
-                let parsed: serde_json::Value = serde_json::from_str(&out.stdout)
-                    .map_err(|e| internal(format!("parse query JSON: {e}; stdout={}", out.stdout)))?;
-                Ok(CallToolResult::json(json!({
-                    "result": parsed.get("result").cloned().unwrap_or(serde_json::Value::Null),
-                    "session_id": parsed.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
-                    "total_cost_usd": parsed.get("total_cost_usd").cloned().unwrap_or(serde_json::Value::Null),
-                    "duration_ms": parsed.get("duration_ms").cloned().unwrap_or(serde_json::Value::Null),
-                    "num_turns": parsed.get("num_turns").cloned().unwrap_or(serde_json::Value::Null),
-                    "is_error": parsed.get("is_error").cloned().unwrap_or(serde_json::Value::Null),
-                })))
+                let env = parse_query_envelope(&out.stdout)?;
+                Ok(CallToolResult::json(env))
             }
         })
         .build()

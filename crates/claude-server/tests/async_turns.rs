@@ -254,6 +254,46 @@ async fn live_turn_wait_timeout_then_settle() {
 
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
+async fn live_claude_query_async_loop() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let fire = client
+        .call_tool(
+            "claude_query",
+            serde_json::json!({
+                "prompt": "Reply with exactly the word QUERIED.",
+                "model": "haiku",
+            }),
+        )
+        .await;
+    let fbody: serde_json::Value = serde_json::from_str(&fire.all_text()).expect("fire json");
+    let turn_id = fbody["turn_id"].as_str().expect("turn_id").to_string();
+    eprintln!("claude_query fired turn: {turn_id}");
+
+    let waited = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_id.clone(), "timeout_secs": 30.0}),
+        )
+        .await;
+    let wv: serde_json::Value = serde_json::from_str(&waited.all_text()).expect("wait json");
+    eprintln!("settled: {wv}");
+    assert_eq!(wv["status"], serde_json::json!("done"));
+    let r = wv["result"]["result"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(r.contains("QUERIED"), "expected QUERIED, got {r:?}");
+    assert!(
+        wv["chat_id"].is_null(),
+        "single-shot turn should have null chat_id, got {wv}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns real claude binary"]
 async fn live_two_chats_run_in_parallel() {
     use std::time::Instant;
 
