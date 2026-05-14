@@ -15,6 +15,7 @@ use claude_wrapper::Claude;
 use claude_wrapper::conversation::Conversation;
 
 use crate::config::ServerConfig;
+use crate::turns::TurnRegistry;
 
 /// Opaque identifier for a server-held chat.
 pub type ChatId = String;
@@ -25,6 +26,10 @@ pub struct ServerState {
     pub claude: Arc<Claude>,
     pub config: Arc<ServerConfig>,
     pub chats: Arc<RwLock<HashMap<ChatId, Arc<Mutex<Conversation>>>>>,
+    /// Async-turn registry. Bare-named `chat_send` / `claude_query`
+    /// fire a turn into the background and register a handle here;
+    /// `turn_get` / `turn_wait` / `turn_cancel` operate on it.
+    pub turns: Arc<TurnRegistry>,
 }
 
 impl ServerState {
@@ -33,6 +38,7 @@ impl ServerState {
             claude,
             config,
             chats: Arc::new(RwLock::new(HashMap::new())),
+            turns: Arc::new(TurnRegistry::new()),
         }
     }
 
