@@ -60,6 +60,7 @@ mod core;
 mod prompts;
 mod resources;
 mod state;
+mod turn_tools;
 mod turns;
 
 use std::sync::Arc;
@@ -96,6 +97,9 @@ pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRo
     for tool in chat::tools(&state) {
         router = router.tool(tool);
     }
+    for tool in turn_tools::tools(&state) {
+        router = router.tool(tool);
+    }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
@@ -123,6 +127,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     let mut all: Vec<ToolInfo> = core::tools(&state)
         .into_iter()
         .chain(chat::tools(&state))
+        .chain(turn_tools::tools(&state))
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

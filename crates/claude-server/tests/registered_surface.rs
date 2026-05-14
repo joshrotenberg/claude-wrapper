@@ -44,6 +44,11 @@ fn registered_tools_includes_core_l2_surface() {
         "chat_interrupt",
         "chat_budget",
         "chat_close",
+        // Turn registry
+        "turn_get",
+        "turn_wait",
+        "turn_cancel",
+        "turn_list",
     ] {
         assert!(
             names.contains(&expected),

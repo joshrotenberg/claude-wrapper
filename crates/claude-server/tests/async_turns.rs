@@ -16,6 +16,44 @@ fn cfg() -> ServerConfig {
 }
 
 #[tokio::test]
+async fn turn_get_unknown_id_errors() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+    let r = client
+        .call_tool("turn_get", serde_json::json!({"turn_id": "turn_nope"}))
+        .await;
+    let text = r.all_text();
+    assert!(
+        text.contains("no turn with id"),
+        "expected unknown-turn error, got {text}"
+    );
+}
+
+#[tokio::test]
+async fn turn_cancel_unknown_id_is_a_noop() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+    let r = client
+        .call_tool("turn_cancel", serde_json::json!({"turn_id": "turn_nope"}))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&r.all_text()).expect("json");
+    assert_eq!(v["ok"], serde_json::json!(true));
+    assert_eq!(v["existed"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn turn_list_starts_empty() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+    let r = client.call_tool("turn_list", serde_json::json!({})).await;
+    let v: serde_json::Value = serde_json::from_str(&r.all_text()).expect("json");
+    assert_eq!(v["turns"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
 async fn chat_send_unknown_chat_errors_synchronously() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
@@ -87,6 +125,127 @@ async fn live_chat_send_returns_turn_id_immediately() {
     // Until then we just let the turn finish in the background by
     // sleeping briefly so the worker can publish before close.
     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+    let _ = client
+        .call_tool("chat_close", serde_json::json!({"chat_id": chat_id}))
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "spawns real claude binary"]
+async fn live_chat_send_then_turn_wait_settles() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let open = client
+        .call_tool("chat_open", serde_json::json!({"model": "haiku"}))
+        .await;
+    let body: serde_json::Value = serde_json::from_str(&open.all_text()).expect("open json");
+    let chat_id = body["chat_id"].as_str().unwrap().to_string();
+
+    // Fire async.
+    let fire = client
+        .call_tool(
+            "chat_send",
+            serde_json::json!({
+                "chat_id": chat_id.clone(),
+                "prompt": "Reply with exactly the word WAITED and nothing else.",
+            }),
+        )
+        .await;
+    let fbody: serde_json::Value = serde_json::from_str(&fire.all_text()).expect("fire json");
+    let turn_id = fbody["turn_id"].as_str().unwrap().to_string();
+
+    // turn_get right away: should be running.
+    let pre = client
+        .call_tool("turn_get", serde_json::json!({"turn_id": turn_id.clone()}))
+        .await;
+    let pre_v: serde_json::Value = serde_json::from_str(&pre.all_text()).expect("get json");
+    assert_eq!(
+        pre_v["status"],
+        serde_json::json!("running"),
+        "pre: {pre_v}"
+    );
+
+    // Wait with a generous timeout.
+    let waited = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_id.clone(), "timeout_secs": 30.0}),
+        )
+        .await;
+    let wv: serde_json::Value = serde_json::from_str(&waited.all_text()).expect("wait json");
+    eprintln!("settled: {wv}");
+    assert_eq!(wv["status"], serde_json::json!("done"));
+    let result_text = wv["result"]["result"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        result_text.contains("WAITED"),
+        "expected WAITED, got {result_text:?}"
+    );
+
+    // turn_list should show the settled turn.
+    let list = client.call_tool("turn_list", serde_json::json!({})).await;
+    let lv: serde_json::Value = serde_json::from_str(&list.all_text()).expect("list json");
+    let turns = lv["turns"].as_array().expect("array");
+    assert!(turns.iter().any(|t| t["turn_id"] == turn_id));
+
+    let _ = client
+        .call_tool("chat_close", serde_json::json!({"chat_id": chat_id}))
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "spawns real claude binary"]
+async fn live_turn_wait_timeout_then_settle() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let open = client
+        .call_tool("chat_open", serde_json::json!({"model": "haiku"}))
+        .await;
+    let chat_id = serde_json::from_str::<serde_json::Value>(&open.all_text()).unwrap()["chat_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let fire = client
+        .call_tool(
+            "chat_send",
+            serde_json::json!({
+                "chat_id": chat_id.clone(),
+                "prompt": "Reply with the word ECHO.",
+            }),
+        )
+        .await;
+    let turn_id = serde_json::from_str::<serde_json::Value>(&fire.all_text()).unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Tight 50ms timeout -- a real haiku turn is at least ~1s.
+    let early = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_id.clone(), "timeout_secs": 0.05}),
+        )
+        .await;
+    let ev: serde_json::Value = serde_json::from_str(&early.all_text()).expect("json");
+    assert_eq!(ev["status"], serde_json::json!("timeout"), "ev: {ev}");
+
+    // Now wait properly.
+    let settled = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_id, "timeout_secs": 30.0}),
+        )
+        .await;
+    let sv: serde_json::Value = serde_json::from_str(&settled.all_text()).expect("json");
+    assert_eq!(sv["status"], serde_json::json!("done"));
 
     let _ = client
         .call_tool("chat_close", serde_json::json!({"chat_id": chat_id}))
