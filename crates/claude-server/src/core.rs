@@ -24,7 +24,9 @@ use claude_wrapper::OutputFormat;
 use claude_wrapper::QueryCommand;
 use claude_wrapper::command::agents::AgentsCommand;
 use claude_wrapper::command::auth::AuthStatusCommand;
-use claude_wrapper::command::auto_mode::{AutoModeConfigCommand, AutoModeDefaultsCommand};
+use claude_wrapper::command::auto_mode::{
+    AutoModeConfigCommand, AutoModeCritiqueCommand, AutoModeDefaultsCommand,
+};
 use claude_wrapper::command::doctor::DoctorCommand;
 use claude_wrapper::command::marketplace::MarketplaceListCommand;
 use claude_wrapper::command::mcp::{McpGetCommand, McpListCommand};
@@ -49,6 +51,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_marketplace_list(state),
         tool_auto_mode_config(state),
         tool_auto_mode_defaults(state),
+        tool_auto_mode_critique(state),
         tool_doctor(state),
     ];
     #[cfg(feature = "sync-agent-turns")]
@@ -427,6 +430,70 @@ fn tool_auto_mode_defaults(state: &ServerState) -> Tool {
                     .await
                     .map_err(internal)?;
                 Ok(command_output_json(&out))
+            }
+        })
+        .build()
+}
+
+// -- claude_auto_mode_critique --------------------------------------
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct AutoModeCritiqueInput {
+    /// Optional model override (e.g. `sonnet`, `haiku`).
+    #[serde(default)]
+    model: Option<String>,
+}
+
+fn tool_auto_mode_critique(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("claude_auto_mode_critique")
+        .description(
+            "Fire `claude auto-mode critique` to get AI feedback on the active \
+             auto-mode rules. Async by default -- returns a turn_id; the work \
+             runs in the background. Poll with turn_get / turn_wait. Single-shot \
+             agent turn (model-backed); same shape as claude_query.",
+        )
+        .handler(move |input: AutoModeCritiqueInput| {
+            let state = state.clone();
+            async move {
+                let handle = state.turns.register(None).await;
+                let turn_id = handle.turn_id.clone();
+                let claude = state.claude.clone();
+                let span = tracing::info_span!(
+                    "claude_auto_mode_critique",
+                    turn_id = %turn_id,
+                    model = input.model.as_deref().unwrap_or("default"),
+                );
+                tracing::info!(parent: &span, "fired async critique");
+                tokio::spawn(
+                    async move {
+                        if handle.is_cancelled() {
+                            handle.cancelled();
+                            return;
+                        }
+                        let mut cmd = AutoModeCritiqueCommand::new();
+                        if let Some(m) = input.model {
+                            cmd = cmd.model(m);
+                        }
+                        match cmd.execute(&claude).await {
+                            Ok(out) => {
+                                tracing::info!(exit_code = out.exit_code, "critique done");
+                                handle.complete(json!({
+                                    "stdout": strip_ansi(&out.stdout),
+                                    "stderr": strip_ansi(&out.stderr),
+                                    "exit_code": out.exit_code,
+                                    "success": out.success,
+                                }));
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "critique failed");
+                                handle.fail(e);
+                            }
+                        }
+                    }
+                    .instrument(span),
+                );
+                Ok(CallToolResult::json(json!({"turn_id": turn_id})))
             }
         })
         .build()

@@ -34,6 +34,7 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_marketplace_list",
         "claude_auto_mode_config",
         "claude_auto_mode_defaults",
+        "claude_auto_mode_critique",
         "claude_doctor",
         // L2.5 chat (always-on)
         "chat_open",
