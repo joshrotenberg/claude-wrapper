@@ -7,9 +7,12 @@
 //! Today: a sanitized view of the server config and a list of the
 //! registered tools. Chat resources land with the L2.5 surface.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 use tower_mcp::protocol::ReadResourceResult;
-use tower_mcp::{Resource, ResourceBuilder};
+use tower_mcp::resource::ResourceTemplate;
+use tower_mcp::{Resource, ResourceBuilder, ResourceTemplateBuilder};
 
 use crate::state::ServerState;
 
@@ -19,6 +22,65 @@ pub(crate) fn resources(state: &ServerState) -> Vec<Resource> {
         resource_tools(state),
         resource_chats(state),
     ]
+}
+
+/// MCP resource templates -- URI-templated resources that take
+/// path parameters (RFC 6570 Level 1, e.g. `{id}`).
+pub(crate) fn templates(state: &ServerState) -> Vec<ResourceTemplate> {
+    vec![template_chat_detail(state)]
+}
+
+fn template_chat_detail(state: &ServerState) -> ResourceTemplate {
+    let state = state.clone();
+    ResourceTemplateBuilder::new("claude://chats/{id}")
+        .name("Chat detail")
+        .description(
+            "Per-chat snapshot keyed by chat_id: full TurnResult history, \
+             cumulative cost, session id, optional budget state. UIs subscribe \
+             here instead of polling chat_history.",
+        )
+        .mime_type("application/json")
+        .handler(move |uri: String, vars: HashMap<String, String>| {
+            let state = state.clone();
+            async move {
+                let id = vars.get("id").cloned().unwrap_or_default();
+                let conv = state
+                    .get_chat(&id)
+                    .await
+                    .ok_or_else(|| tower_mcp::Error::internal(format!("no chat with id `{id}`")))?;
+                let guard = conv.lock().await;
+                let turns: Vec<_> = guard
+                    .history()
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "result": t.result_text(),
+                            "session_id": t.session_id(),
+                            "cost_usd": t.total_cost_usd(),
+                            "duration_ms": t.duration_ms(),
+                        })
+                    })
+                    .collect();
+                let budget = guard.budget().map(|b| {
+                    json!({
+                        "total_usd": b.total_usd(),
+                        "max_usd": b.max_usd(),
+                        "remaining_usd": b.remaining_usd(),
+                        "warn_at_usd": b.warn_at_usd(),
+                    })
+                });
+                let body = json!({
+                    "chat_id": id,
+                    "session_id": guard.session_id(),
+                    "total_turns": guard.total_turns(),
+                    "total_cost_usd": guard.total_cost_usd(),
+                    "budget": budget,
+                    "turns": turns,
+                });
+                let text = serde_json::to_string_pretty(&body).unwrap_or_default();
+                Ok(ReadResourceResult::text(uri, text))
+            }
+        })
 }
 
 fn resource_chats(state: &ServerState) -> Resource {

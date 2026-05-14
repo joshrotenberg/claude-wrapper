@@ -49,6 +49,29 @@ async fn chat_close_unknown_id_is_a_noop() {
 }
 
 #[tokio::test]
+async fn chats_id_template_unknown_id_errors() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    // The template handler errors when the chat_id doesn't exist;
+    // tower-mcp surfaces that as a JSON-RPC error. send_request
+    // doesn't panic on errors (read_resource does), so we use it
+    // here.
+    let err = client
+        .send_request_expect_error(
+            "resources/read",
+            Some(serde_json::json!({"uri": "claude://chats/chat_not_real"})),
+        )
+        .await;
+    let msg = err["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("no chat with id"),
+        "expected unknown-chat error, got {err}"
+    );
+}
+
+#[tokio::test]
 async fn chats_resource_round_trips_empty() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
@@ -189,6 +212,65 @@ async fn live_chat_open_send_close_roundtrip() {
 }
 
 #[cfg(feature = "sync-agent-turns")]
+#[tokio::test]
+#[ignore = "spawns real claude binary"]
+async fn live_chats_id_template_returns_history() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    // Open a chat and run one turn so the template has history.
+    let open = client
+        .call_tool(
+            "chat_open",
+            serde_json::json!({"model": "haiku", "max_cost_usd": 0.5}),
+        )
+        .await;
+    let body: serde_json::Value = serde_json::from_str(&open.all_text()).expect("open json");
+    let chat_id = body["chat_id"].as_str().unwrap().to_string();
+
+    let fire = client
+        .call_tool(
+            "chat_send",
+            serde_json::json!({
+                "chat_id": chat_id.clone(),
+                "prompt": "Reply with the word TEMPLATE.",
+            }),
+        )
+        .await;
+    let turn_id = serde_json::from_str::<serde_json::Value>(&fire.all_text()).unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_id, "timeout_secs": 30.0}),
+        )
+        .await;
+
+    // Now read claude://chats/<id> via the template.
+    let uri = format!("claude://chats/{chat_id}");
+    let result = client.read_resource(&uri).await;
+    let text = result
+        .contents
+        .first()
+        .and_then(|c| c.text.clone())
+        .unwrap_or_default();
+    eprintln!("template body: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("template json");
+    assert_eq!(v["chat_id"].as_str(), Some(chat_id.as_str()));
+    assert!(v["session_id"].is_string(), "session_id missing: {text}");
+    assert_eq!(v["total_turns"], serde_json::json!(1));
+    assert!(v["budget"]["max_usd"].as_f64() == Some(0.5));
+    let turns = v["turns"].as_array().expect("turns array");
+    assert_eq!(turns.len(), 1);
+
+    let _ = client
+        .call_tool("chat_close", serde_json::json!({"chat_id": chat_id}))
+        .await;
+}
+
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
 async fn live_chat_budget_tracks_spend() {

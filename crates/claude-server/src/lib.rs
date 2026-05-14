@@ -110,6 +110,9 @@ pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRo
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
+    for template in resources::templates(&state) {
+        router = router.resource_template(template);
+    }
     for prompt in prompts::prompts(&state) {
         router = router.prompt(prompt);
     }
