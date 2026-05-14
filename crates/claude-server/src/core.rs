@@ -36,7 +36,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_version(),
         tool_cli_version(state),
-        tool_query(state),
+        tool_query_sync(state),
         tool_agents(state),
         tool_auth_status(state),
         tool_mcp_list(state),
@@ -109,13 +109,14 @@ struct QueryInput {
     resume: Option<String>,
 }
 
-fn tool_query(state: &ServerState) -> Tool {
+fn tool_query_sync(state: &ServerState) -> Tool {
     let claude = state.claude.clone();
-    ToolBuilder::new("claude_query")
+    ToolBuilder::new("claude_query_sync")
         .description(
-            "Single-shot query against the claude CLI. Returns the assistant text, \
-             session id, and cost (when available). For multi-turn conversations \
-             use the chat_* tools (when wired).",
+            "Blocking single-shot query against the claude CLI. Holds the \
+             connection open for the duration of the turn. Returns assistant \
+             text, session id, and cost. Prefer the async `claude_query` for \
+             agent turns; use this when you genuinely want to block.",
         )
         .read_only()
         .handler(move |input: QueryInput| {

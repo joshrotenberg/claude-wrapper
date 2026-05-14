@@ -33,8 +33,8 @@ use crate::state::ServerState;
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_chat_open(state),
-        tool_chat_send(state),
-        tool_chat_send_stream(state),
+        tool_chat_send_sync(state),
+        tool_chat_send_stream_sync(state),
         tool_chat_list(state),
         tool_chat_history(state),
         tool_chat_interrupt(state),
@@ -110,7 +110,7 @@ fn tool_chat_open(state: &ServerState) -> Tool {
         .build()
 }
 
-// -- chat_send -------------------------------------------------------
+// -- chat_send_sync --------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ChatSendInput {
@@ -120,13 +120,14 @@ struct ChatSendInput {
     prompt: String,
 }
 
-fn tool_chat_send(state: &ServerState) -> Tool {
+fn tool_chat_send_sync(state: &ServerState) -> Tool {
     let state = state.clone();
-    ToolBuilder::new("chat_send")
+    ToolBuilder::new("chat_send_sync")
         .description(
-            "Send a turn to a chat opened with chat_open. Blocks until the \
-             assistant finishes the turn. Returns the assistant text, \
-             session id, cumulative cost, and turn count.",
+            "Blocking turn send. Holds the connection open until the assistant \
+             finishes the turn, then returns assistant text + cost + turn count. \
+             For agent turns prefer `chat_send` (async, returns turn_id); use \
+             this when you genuinely want to block.",
         )
         .handler(move |input: ChatSendInput| {
             let state = state.clone();
@@ -152,27 +153,30 @@ fn tool_chat_send(state: &ServerState) -> Tool {
         .build()
 }
 
-// -- chat_send_stream -----------------------------------------------
+// -- chat_send_stream_sync ------------------------------------------
 //
-// Streaming variant of chat_send. Forwards every InboundEvent the
-// duplex session emits to the MCP client as a `notifications/progress`
-// message, so callers see assistant text deltas, tool-use blocks, and
-// system events as they arrive instead of waiting for the final
-// TurnResult.
+// Streaming variant of chat_send_sync. Holds the connection open and
+// forwards every InboundEvent the duplex session emits to the MCP
+// client as a `notifications/progress` message so callers see
+// assistant text deltas / tool-use blocks / system events as they
+// arrive. Sync because the request stays open for the duration of
+// the turn -- async streaming is a separate problem (likely solved
+// via resource subscriptions on per-turn URIs).
 //
 // Implementation detail: we subscribe to the broadcast BEFORE calling
 // send so we never miss the SystemInit or first Assistant chunk.
 // The forwarder runs in a spawned task with a clone of `Context`;
 // when send returns we abort it.
 
-fn tool_chat_send_stream(state: &ServerState) -> Tool {
+fn tool_chat_send_stream_sync(state: &ServerState) -> Tool {
     let state = state.clone();
-    ToolBuilder::new("chat_send_stream")
+    ToolBuilder::new("chat_send_stream_sync")
         .description(
-            "Streaming variant of chat_send. Each event from the underlying \
+            "Blocking streaming turn send. Each event from the underlying \
              duplex session is forwarded as an MCP `notifications/progress` \
              event (assistant deltas, tool-use blocks, system events). \
-             The final return is identical to chat_send.",
+             The final return is identical to chat_send_sync. Held connection \
+             for the duration of the turn -- explicit sync per design rule.",
         )
         .extractor_handler(
             state,

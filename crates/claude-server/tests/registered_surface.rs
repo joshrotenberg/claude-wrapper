@@ -23,7 +23,7 @@ fn registered_tools_includes_core_l2_surface() {
         // L2 passthrough
         "claude_version",
         "claude_cli_version",
-        "claude_query",
+        "claude_query_sync",
         "claude_agents",
         "claude_auth_status",
         "claude_mcp_list",
@@ -36,8 +36,8 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_doctor",
         // L2.5 chat
         "chat_open",
-        "chat_send",
-        "chat_send_stream",
+        "chat_send_sync",
+        "chat_send_stream_sync",
         "chat_list",
         "chat_history",
         "chat_interrupt",
@@ -153,14 +153,14 @@ async fn live_claude_cli_version_returns_three_numbers() {
 
 #[tokio::test]
 #[ignore = "spawns real claude binary; run with --ignored"]
-async fn live_claude_query_simple_prompt() {
+async fn live_claude_query_sync_simple_prompt() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
     client.initialize().await;
 
     let result = client
         .call_tool(
-            "claude_query",
+            "claude_query_sync",
             serde_json::json!({
                 "prompt": "Reply with exactly the word OK and nothing else.",
                 "model": "haiku",

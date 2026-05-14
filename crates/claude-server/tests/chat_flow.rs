@@ -115,7 +115,7 @@ async fn live_chat_open_send_close_roundtrip() {
     // Send a turn.
     let sent = client
         .call_tool(
-            "chat_send",
+            "chat_send_sync",
             serde_json::json!({
                 "chat_id": chat_id,
                 "prompt": "Reply with exactly the word ALPHA and nothing else.",
@@ -132,7 +132,7 @@ async fn live_chat_open_send_close_roundtrip() {
     // Send a second turn -- the assistant should remember the first.
     let sent2 = client
         .call_tool(
-            "chat_send",
+            "chat_send_sync",
             serde_json::json!({
                 "chat_id": chat_id,
                 "prompt": "What word did I just ask you to reply with?",
@@ -219,7 +219,7 @@ async fn live_chat_budget_tracks_spend() {
     // Send a turn.
     let _ = client
         .call_tool(
-            "chat_send",
+            "chat_send_sync",
             serde_json::json!({
                 "chat_id": chat_id.clone(),
                 "prompt": "Reply with the single word BUDGET.",
@@ -251,7 +251,7 @@ async fn live_chat_budget_tracks_spend() {
 
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
-async fn live_chat_send_stream_emits_progress() {
+async fn live_chat_send_stream_sync_emits_progress() {
     use tower_mcp::context::ServerNotification;
 
     let router = build_router(cfg()).expect("router built");
@@ -274,7 +274,7 @@ async fn live_chat_send_stream_emits_progress() {
         .send_request(
             "tools/call",
             Some(serde_json::json!({
-                "name": "chat_send_stream",
+                "name": "chat_send_stream_sync",
                 "arguments": {
                     "chat_id": chat_id.clone(),
                     "prompt": "Reply with one short sentence describing the color blue.",
