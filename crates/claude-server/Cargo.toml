@@ -1,0 +1,36 @@
+[package]
+name = "claude-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90.0"
+authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshrotenberg/claude-wrapper"
+description = "MCP server layer over claude-wrapper"
+publish = false
+
+[dependencies]
+claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }
+tokio = { version = "1", features = ["process", "time", "io-util", "macros", "rt-multi-thread", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-mcp = "0.10"
+schemars = "1"
+toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
+tower-mcp = { version = "0.10", features = ["testing"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+# The canonical "raw, no-frills MCP server CLI". Lives in examples/
+# because the library is the product and the binary is just one
+# demonstration of how to wire it. `cargo run --example server`.
+[[example]]
+name = "server"
+path = "examples/server.rs"

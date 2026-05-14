@@ -2,4 +2,5 @@
 resolver = "3"
 members = [
     "crates/claude-wrapper",
+    "crates/claude-server",
 ]

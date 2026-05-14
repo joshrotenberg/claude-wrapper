@@ -5,3 +5,8 @@ CLAUDE.md
 .worktrees/
 NAME_IDEAS.md
 /tmp/
+
+# claude-server spike: local dev wiring + design notes
+.mcp.json
+.claude-server-dev.toml
+mcp-spec.md

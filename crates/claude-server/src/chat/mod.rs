@@ -1,0 +1,469 @@
+//! L2.5 chat surface: tools that wrap [`DuplexSession`] +
+//! [`Conversation`] for multi-turn work.
+//!
+//! Single-shot prompts go through [`crate::cli::tool_query`]
+//! (`claude_query`). For anything that needs accumulated context
+//! across turns -- coordinator/SME flows, interactive UIs, anything
+//! mid-turn-interruptible -- open a chat, send turns against it,
+//! close it when you're done.
+//!
+//! The wrapper provides:
+//! - [`DuplexSession`] -- the long-lived stream-json subprocess.
+//! - [`Conversation`] -- host-side accounting (history, cost,
+//!   optional budget) on top.
+//!
+//! We hold one [`Conversation`] per server-side chat, behind a
+//! [`tokio::sync::Mutex`] so turns within a chat are serialized.
+
+use std::sync::Arc;
+
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
+use tower_mcp::extract::{Context, Json, State};
+use tower_mcp::{CallToolResult, Tool, ToolBuilder};
+
+use claude_wrapper::budget::BudgetTracker;
+use claude_wrapper::conversation::Conversation;
+use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+
+use crate::state::ServerState;
+
+/// Build the L2.5 chat tool list.
+pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
+    vec![
+        tool_chat_open(state),
+        tool_chat_send(state),
+        tool_chat_send_stream(state),
+        tool_chat_list(state),
+        tool_chat_history(state),
+        tool_chat_interrupt(state),
+        tool_chat_budget(state),
+        tool_chat_close(state),
+    ]
+}
+
+// -- chat_open ------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ChatOpenInput {
+    /// Optional model (e.g. `sonnet`, `haiku`).
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional system prompt for the session.
+    #[serde(default)]
+    system_prompt: Option<String>,
+    /// Optional appended system prompt.
+    #[serde(default)]
+    append_system_prompt: Option<String>,
+    /// Hard cumulative cost ceiling in USD. When the chat's running
+    /// total reaches this, further chat_send calls error before
+    /// touching claude.
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+    /// Soft warning threshold in USD. Logged via tracing when crossed
+    /// (no callback wired through MCP today).
+    #[serde(default)]
+    warn_at_usd: Option<f64>,
+}
+
+fn tool_chat_open(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_open")
+        .description(
+            "Open a long-lived chat backed by a duplex `claude` subprocess. \
+             Returns a chat_id you pass to chat_send / chat_close / etc. \
+             Turns within a chat are serialized; multiple chats run in parallel.",
+        )
+        .handler(move |input: ChatOpenInput| {
+            let state = state.clone();
+            async move {
+                let mut opts = DuplexOptions::default();
+                if let Some(m) = input.model {
+                    opts = opts.model(m);
+                }
+                if let Some(s) = input.system_prompt {
+                    opts = opts.system_prompt(s);
+                }
+                if let Some(s) = input.append_system_prompt {
+                    opts = opts.append_system_prompt(s);
+                }
+
+                let session = DuplexSession::spawn(&state.claude, opts)
+                    .await
+                    .map_err(super_internal)?;
+                let mut conv = Conversation::new(session);
+                if let Some(max) = input.max_cost_usd {
+                    let mut b = BudgetTracker::builder().max_usd(max);
+                    if let Some(w) = input.warn_at_usd {
+                        b = b.warn_at_usd(w);
+                    }
+                    conv = conv.with_budget(b.build());
+                }
+                let id = state.insert_chat(conv).await;
+                Ok(CallToolResult::json(json!({
+                    "chat_id": id,
+                    "max_cost_usd": input.max_cost_usd,
+                })))
+            }
+        })
+        .build()
+}
+
+// -- chat_send -------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChatSendInput {
+    /// Identifier returned by `chat_open`.
+    chat_id: String,
+    /// The user prompt for this turn.
+    prompt: String,
+}
+
+fn tool_chat_send(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_send")
+        .description(
+            "Send a turn to a chat opened with chat_open. Blocks until the \
+             assistant finishes the turn. Returns the assistant text, \
+             session id, cumulative cost, and turn count.",
+        )
+        .handler(move |input: ChatSendInput| {
+            let state = state.clone();
+            async move {
+                let conv = state.get_chat(&input.chat_id).await.ok_or_else(|| {
+                    tower_mcp::Error::internal(format!(
+                        "no chat with id `{}` (was it closed?)",
+                        input.chat_id
+                    ))
+                })?;
+                let mut guard = conv.lock().await;
+                let turn = guard.send(input.prompt).await.map_err(super_internal)?;
+                Ok(CallToolResult::json(json!({
+                    "result": turn.result_text(),
+                    "session_id": turn.session_id(),
+                    "turn_cost_usd": turn.total_cost_usd(),
+                    "duration_ms": turn.duration_ms(),
+                    "cumulative_cost_usd": guard.total_cost_usd(),
+                    "total_turns": guard.total_turns(),
+                })))
+            }
+        })
+        .build()
+}
+
+// -- chat_send_stream -----------------------------------------------
+//
+// Streaming variant of chat_send. Forwards every InboundEvent the
+// duplex session emits to the MCP client as a `notifications/progress`
+// message, so callers see assistant text deltas, tool-use blocks, and
+// system events as they arrive instead of waiting for the final
+// TurnResult.
+//
+// Implementation detail: we subscribe to the broadcast BEFORE calling
+// send so we never miss the SystemInit or first Assistant chunk.
+// The forwarder runs in a spawned task with a clone of `Context`;
+// when send returns we abort it.
+
+fn tool_chat_send_stream(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_send_stream")
+        .description(
+            "Streaming variant of chat_send. Each event from the underlying \
+             duplex session is forwarded as an MCP `notifications/progress` \
+             event (assistant deltas, tool-use blocks, system events). \
+             The final return is identical to chat_send.",
+        )
+        .extractor_handler(
+            state,
+            |State(state): State<ServerState>,
+             ctx: Context,
+             Json(input): Json<ChatSendInput>| async move {
+                let conv = state.get_chat(&input.chat_id).await.ok_or_else(|| {
+                    tower_mcp::Error::internal(format!(
+                        "no chat with id `{}` (was it closed?)",
+                        input.chat_id
+                    ))
+                })?;
+                let mut guard = conv.lock().await;
+
+                let mut rx = guard.session().subscribe();
+                let ctx_for_task = ctx.clone();
+                let forwarder = tokio::spawn(async move {
+                    let mut counter: f64 = 0.0;
+                    loop {
+                        match rx.recv().await {
+                            Ok(event) => {
+                                counter += 1.0;
+                                let msg = stringify_event(&event);
+                                ctx_for_task
+                                    .report_progress(counter, None, Some(&msg))
+                                    .await;
+                            }
+                            // Lagged: skip and keep going.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            // Closed: session ended.
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+
+                let send_result = guard.send(input.prompt).await;
+                forwarder.abort();
+                let turn = send_result.map_err(super_internal)?;
+
+                Ok(CallToolResult::json(json!({
+                    "result": turn.result_text(),
+                    "session_id": turn.session_id(),
+                    "turn_cost_usd": turn.total_cost_usd(),
+                    "duration_ms": turn.duration_ms(),
+                    "cumulative_cost_usd": guard.total_cost_usd(),
+                    "total_turns": guard.total_turns(),
+                })))
+            },
+        )
+        .build()
+}
+
+/// Render an [`InboundEvent`] as a short string suitable for the
+/// `message` field of a progress notification. We pull the assistant
+/// text where present so consumers can show progressive output;
+/// other event types fall back to a type tag.
+fn stringify_event(event: &InboundEvent) -> String {
+    match event {
+        InboundEvent::SystemInit { session_id } => format!("system.init session={session_id}"),
+        InboundEvent::Assistant(v) => {
+            if let Some(text) = extract_assistant_text(v) {
+                format!("assistant {}", truncate(&text, 200))
+            } else {
+                "assistant".to_string()
+            }
+        }
+        InboundEvent::StreamEvent(_) => "stream_event".to_string(),
+        InboundEvent::User(_) => "user".to_string(),
+        InboundEvent::Other(v) => v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(|s| format!("other.{s}"))
+            .unwrap_or_else(|| "other".to_string()),
+    }
+}
+
+fn extract_assistant_text(v: &serde_json::Value) -> Option<String> {
+    let blocks = v
+        .get("message")
+        .and_then(|m| m.get("content"))?
+        .as_array()?;
+    let mut buf = String::new();
+    for b in blocks {
+        if b.get("type").and_then(|t| t.as_str()) == Some("text")
+            && let Some(s) = b.get("text").and_then(|t| t.as_str())
+        {
+            buf.push_str(s);
+        }
+    }
+    if buf.is_empty() { None } else { Some(buf) }
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}
+
+// -- chat_list ------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct NoArgs {}
+
+fn tool_chat_list(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_list")
+        .description("List currently open chats with their cumulative cost and turn count.")
+        .read_only()
+        .handler(move |_input: NoArgs| {
+            let state = state.clone();
+            async move {
+                let map = state.chats.read().await;
+                let mut entries = Vec::with_capacity(map.len());
+                for (id, conv) in map.iter() {
+                    let guard = conv.lock().await;
+                    entries.push(json!({
+                        "chat_id": id,
+                        "total_turns": guard.total_turns(),
+                        "total_cost_usd": guard.total_cost_usd(),
+                        "session_id": guard.session_id(),
+                    }));
+                }
+                Ok(CallToolResult::json(json!({"chats": entries})))
+            }
+        })
+        .build()
+}
+
+// -- chat_history ---------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChatHistoryInput {
+    /// Identifier of the chat to inspect.
+    chat_id: String,
+}
+
+fn tool_chat_history(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_history")
+        .description(
+            "Return the full per-turn history of a chat: the assistant text, \
+             cost, and duration for each turn.",
+        )
+        .read_only()
+        .handler(move |input: ChatHistoryInput| {
+            let state = state.clone();
+            async move {
+                let conv = state.get_chat(&input.chat_id).await.ok_or_else(|| {
+                    tower_mcp::Error::internal(format!("no chat with id `{}`", input.chat_id))
+                })?;
+                let guard = conv.lock().await;
+                let turns: Vec<_> = guard
+                    .history()
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "result": t.result_text(),
+                            "session_id": t.session_id(),
+                            "cost_usd": t.total_cost_usd(),
+                            "duration_ms": t.duration_ms(),
+                        })
+                    })
+                    .collect();
+                Ok(CallToolResult::json(json!({
+                    "chat_id": input.chat_id,
+                    "turns": turns,
+                    "total_cost_usd": guard.total_cost_usd(),
+                    "total_turns": guard.total_turns(),
+                })))
+            }
+        })
+        .build()
+}
+
+// -- chat_interrupt -------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChatInterruptInput {
+    /// Identifier of the chat to interrupt.
+    chat_id: String,
+}
+
+fn tool_chat_interrupt(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_interrupt")
+        .description(
+            "Send a clean mid-turn interrupt to a chat. The in-flight turn \
+             (if any) returns with a partial result; the session stays open \
+             for further turns.",
+        )
+        .handler(move |input: ChatInterruptInput| {
+            let state = state.clone();
+            async move {
+                let conv = state.get_chat(&input.chat_id).await.ok_or_else(|| {
+                    tower_mcp::Error::internal(format!("no chat with id `{}`", input.chat_id))
+                })?;
+                // Interrupting needs &DuplexSession access -- Conversation
+                // exposes that through `session()`. We don't need to hold
+                // the mutex across the interrupt; the in-flight `send`
+                // holds it for us.
+                let guard = conv.lock().await;
+                guard.session().interrupt().await.map_err(super_internal)?;
+                Ok(CallToolResult::json(json!({"ok": true})))
+            }
+        })
+        .build()
+}
+
+// -- chat_budget ----------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChatBudgetInput {
+    /// Identifier of the chat whose budget to inspect.
+    chat_id: String,
+}
+
+fn tool_chat_budget(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_budget")
+        .description(
+            "Read the BudgetTracker state for a chat: total spent so far, \
+             configured ceiling, remaining, and warn threshold. Returns \
+             `{ \"budget\": null }` if the chat was opened without a \
+             max_cost_usd.",
+        )
+        .read_only()
+        .handler(move |input: ChatBudgetInput| {
+            let state = state.clone();
+            async move {
+                let conv = state.get_chat(&input.chat_id).await.ok_or_else(|| {
+                    tower_mcp::Error::internal(format!("no chat with id `{}`", input.chat_id))
+                })?;
+                let guard = conv.lock().await;
+                let body = match guard.budget() {
+                    None => json!({"chat_id": input.chat_id, "budget": null}),
+                    Some(b) => json!({
+                        "chat_id": input.chat_id,
+                        "budget": {
+                            "total_usd": b.total_usd(),
+                            "max_usd": b.max_usd(),
+                            "remaining_usd": b.remaining_usd(),
+                            "warn_at_usd": b.warn_at_usd(),
+                        },
+                    }),
+                };
+                Ok(CallToolResult::json(body))
+            }
+        })
+        .build()
+}
+
+// -- chat_close -----------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChatCloseInput {
+    /// Identifier of the chat to close.
+    chat_id: String,
+}
+
+fn tool_chat_close(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_close")
+        .description("Drop a chat from the server. No-op if the id is unknown.")
+        .handler(move |input: ChatCloseInput| {
+            let state = state.clone();
+            async move {
+                let removed = state.remove_chat(&input.chat_id).await;
+                let existed = removed.is_some();
+                if let Some(arc) = removed {
+                    // Try to drain into close(); only proceed if we hold the
+                    // last reference, otherwise just drop.
+                    if let Ok(mutex) = Arc::try_unwrap(arc) {
+                        let conv = mutex.into_inner();
+                        let _ = conv.close().await;
+                    }
+                }
+                Ok(CallToolResult::json(json!({
+                    "ok": true,
+                    "existed": existed,
+                })))
+            }
+        })
+        .build()
+}
+
+// -- helpers --------------------------------------------------------
+
+fn super_internal(e: impl std::fmt::Display) -> tower_mcp::Error {
+    tower_mcp::Error::internal(e.to_string())
+}
