@@ -8,13 +8,14 @@
 //! Run with `cargo run --example server -- serve` (or `tools` /
 //! `help`).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use claude_server::{ServerConfig, build_router, registered_tools};
-use tower_mcp::StdioTransport;
+use tower_mcp::{HttpTransport, StdioTransport};
 
 /// Raw MCP server CLI for `claude-server`. Wires the library router
 /// to a transport. Reach for this when you want a working binary;
@@ -35,6 +36,17 @@ struct Cli {
 enum Cmd {
     /// Serve over stdio (default).
     Serve,
+    /// Serve over HTTP via axum. Localhost-only by default.
+    ServeHttp {
+        /// Bind address. Defaults to 127.0.0.1:7800. Be intentional
+        /// before binding to anything other than localhost.
+        #[arg(long, default_value = "127.0.0.1:7800")]
+        bind: SocketAddr,
+        /// Optional bearer token. When set, every request must
+        /// include `Authorization: Bearer <token>` or it gets a 401.
+        #[arg(long)]
+        bearer: Option<String>,
+    },
     /// Print the registered tool surface as JSON and exit.
     Tools,
 }
@@ -51,6 +63,23 @@ async fn main() -> Result<()> {
             let router = build_router(cfg).context("build_router")?;
             let mut transport = StdioTransport::new(router);
             transport.run().await.context("stdio transport")?;
+        }
+        Cmd::ServeHttp { bind, bearer } => {
+            let router = build_router(cfg).context("build_router")?;
+            let mut app = HttpTransport::new(router).into_router();
+            if let Some(token) = bearer {
+                use axum::middleware;
+                app = app.layer(middleware::from_fn(move |req, next| {
+                    let token = token.clone();
+                    bearer_guard(req, next, token)
+                }));
+                tracing::info!("bearer auth enabled");
+            }
+            let listener = tokio::net::TcpListener::bind(bind)
+                .await
+                .with_context(|| format!("binding {bind}"))?;
+            tracing::info!(%bind, "claude-server listening on http");
+            axum::serve(listener, app).await.context("axum::serve")?;
         }
         Cmd::Tools => {
             let tools = registered_tools(cfg).context("registered_tools")?;
@@ -89,4 +118,23 @@ fn init_tracing() {
         .with_target(false)
         .with_ansi(false)
         .try_init();
+}
+
+/// Reject any request whose `Authorization: Bearer <token>` doesn't
+/// match the configured token. Constant-time string compare would be
+/// nicer but we're not handling untrusted input at scale here.
+async fn bearer_guard(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    expected: String,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match header {
+        Some(t) if t == expected => Ok(next.run(req).await),
+        _ => Err(axum::http::StatusCode::UNAUTHORIZED),
+    }
 }
