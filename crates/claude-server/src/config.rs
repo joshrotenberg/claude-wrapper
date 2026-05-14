@@ -13,6 +13,29 @@ use serde::{Deserialize, Serialize};
 pub struct ServerConfig {
     /// Wrapper-side knobs: binary, working dir, env, global args.
     pub claude: ClaudeConfig,
+    /// Async-turn registry knobs: TTL + sweeper cadence. Defaults
+    /// to 1 hour TTL with a 60-second sweep interval.
+    pub turns: TurnConfig,
+}
+
+/// Knobs for the async-turn registry's TTL eviction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TurnConfig {
+    /// Terminal turns (done/failed/cancelled) older than this are
+    /// evicted by the background sweeper. In seconds.
+    pub ttl_secs: u64,
+    /// How often the sweeper runs. In seconds.
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for TurnConfig {
+    fn default() -> Self {
+        Self {
+            ttl_secs: 3600, // 1 hour
+            sweep_interval_secs: 60,
+        }
+    }
 }
 
 /// Inputs to the [`claude_wrapper::ClaudeBuilder`].

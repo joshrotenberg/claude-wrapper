@@ -228,6 +228,52 @@ impl TurnRegistry {
         }
     }
 
+    /// Evict terminal-status entries whose `finished_at_us` is older
+    /// than `ttl`. Running entries are never evicted. Returns the
+    /// number of entries removed.
+    ///
+    /// Designed to be called periodically by [`Self::spawn_sweeper`].
+    /// Tests can call directly with a small ttl to verify behavior.
+    pub async fn evict_expired(&self, ttl: std::time::Duration) -> usize {
+        let cutoff = now_us().saturating_sub(ttl.as_micros());
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        entries.retain(|_, e| {
+            let snap = e.snapshot_rx.borrow();
+            if !snap.status.is_terminal() {
+                return true; // keep all running
+            }
+            match snap.finished_at_us {
+                Some(t) => t > cutoff, // keep if newer than cutoff
+                None => true,          // weird state; keep
+            }
+        });
+        before - entries.len()
+    }
+
+    /// Spawn a background tokio task that calls
+    /// [`Self::evict_expired`] every `interval` until the registry is
+    /// dropped. Returns the [`tokio::task::JoinHandle`] in case the
+    /// caller wants to abort it during shutdown.
+    pub fn spawn_sweeper(
+        self: Arc<Self>,
+        ttl: std::time::Duration,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            // Skip the immediate firing; first eviction happens after `interval`.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let n = self.evict_expired(ttl).await;
+                if n > 0 {
+                    tracing::debug!(evicted = n, "turn registry sweeper");
+                }
+            }
+        })
+    }
+
     /// List snapshots, optionally filtered to one chat.
     pub async fn list(&self, chat_id: Option<&str>) -> Vec<TurnSnapshot> {
         let entries = self.entries.read().await;
@@ -363,6 +409,45 @@ mod tests {
         let a = r.list(Some("chat_a")).await;
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].chat_id.as_deref(), Some("chat_a"));
+    }
+
+    #[tokio::test]
+    async fn evict_expired_keeps_running_drops_old_terminal() {
+        let r = TurnRegistry::new();
+        let still_running = r.register(None).await;
+        let h_done = r.register(None).await;
+        h_done.complete(serde_json::json!(null));
+
+        // ttl = 0 should evict the just-completed entry but keep the
+        // running one. (now_us > finished_at_us by definition.)
+        let n = r.evict_expired(Duration::from_micros(0)).await;
+        assert_eq!(n, 1);
+        assert!(r.get(&still_running.turn_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn evict_expired_keeps_recent_terminal() {
+        let r = TurnRegistry::new();
+        let h = r.register(None).await;
+        let id = h.turn_id.clone();
+        h.complete(serde_json::json!(null));
+
+        // ttl = 1 hour: the entry just completed, well within ttl.
+        let n = r.evict_expired(Duration::from_secs(3600)).await;
+        assert_eq!(n, 0);
+        assert!(r.get(&id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn evict_expired_handles_failed_and_cancelled() {
+        let r = TurnRegistry::new();
+        let h_failed = r.register(None).await;
+        let h_cancelled = r.register(None).await;
+        h_failed.fail("oops");
+        h_cancelled.cancelled();
+
+        let n = r.evict_expired(Duration::from_micros(0)).await;
+        assert_eq!(n, 2);
     }
 
     #[test]

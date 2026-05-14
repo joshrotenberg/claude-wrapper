@@ -67,7 +67,7 @@ use std::sync::Arc;
 
 use tower_mcp::McpRouter;
 
-pub use self::config::{ClaudeConfig, ServerConfig};
+pub use self::config::{ClaudeConfig, ServerConfig, TurnConfig};
 pub use self::state::ServerState;
 
 use claude_wrapper::Claude;
@@ -81,6 +81,13 @@ use claude_wrapper::Claude;
 pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRouter> {
     let claude = build_claude(&config.claude)?;
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
+
+    // Spawn the turn-registry TTL sweeper. Runs forever until the
+    // registry's last Arc is dropped (the JoinHandle is intentionally
+    // not retained -- we don't have a graceful-shutdown story today).
+    let ttl = std::time::Duration::from_secs(state.config.turns.ttl_secs);
+    let interval = std::time::Duration::from_secs(state.config.turns.sweep_interval_secs);
+    let _sweeper = state.turns.clone().spawn_sweeper(ttl, interval);
 
     let mut router = McpRouter::new()
         .server_info("claude-server", env!("CARGO_PKG_VERSION"))
