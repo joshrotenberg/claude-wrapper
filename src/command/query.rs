@@ -572,14 +572,7 @@ impl QueryCommand {
     /// deserializes the response into a [`QueryResult`](crate::types::QueryResult).
     #[cfg(all(feature = "json", feature = "async"))]
     pub async fn execute_json(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
-        // Build args with JSON output format forced
-        let mut args = self.build_args();
-
-        // Override output format to json if not already set
-        if self.output_format.is_none() {
-            args.push("--output-format".to_string());
-            args.push("json".to_string());
-        }
+        let args = self.build_args_with_forced_json();
 
         let output = exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?;
 
@@ -603,12 +596,7 @@ impl QueryCommand {
     /// Blocking mirror of [`QueryCommand::execute_json`].
     #[cfg(all(feature = "sync", feature = "json"))]
     pub fn execute_json_sync(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
-        let mut args = self.build_args();
-
-        if self.output_format.is_none() {
-            args.push("--output-format".to_string());
-            args.push("json".to_string());
-        }
+        let args = self.build_args_with_forced_json();
 
         let output = exec::run_claude_with_retry_sync(claude, args, self.retry_policy.as_ref())?;
 
@@ -616,6 +604,22 @@ impl QueryCommand {
             message: format!("failed to parse query result: {e}"),
             source: e,
         })
+    }
+
+    /// Like [`Self::build_args`], but if `output_format` is unset on
+    /// this command, force it to `json`. The naive approach -- call
+    /// `build_args` then `args.push("--output-format")` -- breaks
+    /// because `build_args` already appended `--` and the prompt at
+    /// the end, so the late flag becomes positional and is eaten as
+    /// part of the prompt. We clone-and-set instead so the flag
+    /// lands in its proper slot before `--`.
+    fn build_args_with_forced_json(&self) -> Vec<String> {
+        if self.output_format.is_some() {
+            return self.build_args();
+        }
+        let mut effective = self.clone();
+        effective.output_format = Some(OutputFormat::Json);
+        effective.build_args()
     }
 
     fn build_args(&self) -> Vec<String> {
@@ -874,6 +878,50 @@ mod tests {
         let cmd = QueryCommand::new("hello world");
         let args = cmd.args();
         assert_eq!(args, vec!["--print", "--", "hello world"]);
+    }
+
+    #[test]
+    fn build_args_with_forced_json_inserts_flag_before_separator() {
+        // Regression: prior to this fix, execute_json appended
+        // --output-format json AFTER build_args's `-- prompt` tail,
+        // so the flag was treated as positional and eaten as part
+        // of the prompt. With the fix the flag must land BEFORE the
+        // `--` separator.
+        let cmd = QueryCommand::new("hello");
+        let args = cmd.build_args_with_forced_json();
+
+        // The trailing pair must still be the separator + prompt.
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--".to_string(), "hello".to_string()],
+        );
+
+        // --output-format json must appear BEFORE `--`.
+        let sep = args.iter().position(|a| a == "--").expect("`--` present");
+        let fmt = args
+            .iter()
+            .position(|a| a == "--output-format")
+            .expect("--output-format present");
+        assert!(
+            fmt < sep,
+            "--output-format must come before `--` separator; got {args:?}"
+        );
+        assert_eq!(args[fmt + 1], "json");
+    }
+
+    #[test]
+    fn build_args_with_forced_json_respects_explicit_format() {
+        // If the caller already set output_format on the builder,
+        // the helper must NOT override it.
+        let cmd = QueryCommand::new("hello").output_format(OutputFormat::Text);
+        let args = cmd.build_args_with_forced_json();
+        let fmt = args
+            .iter()
+            .position(|a| a == "--output-format")
+            .expect("--output-format present");
+        assert_eq!(args[fmt + 1], "text");
+        // Just one occurrence -- not double-pushed.
+        assert_eq!(args.iter().filter(|a| *a == "--output-format").count(), 1);
     }
 
     #[test]
