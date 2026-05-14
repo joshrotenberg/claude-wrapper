@@ -57,6 +57,7 @@
 mod chat;
 pub mod config;
 mod core;
+mod mutations;
 mod prompts;
 mod resources;
 mod state;
@@ -67,7 +68,7 @@ use std::sync::Arc;
 
 use tower_mcp::McpRouter;
 
-pub use self::config::{ClaudeConfig, ServerConfig, TurnConfig};
+pub use self::config::{ClaudeConfig, ServerConfig, ServerPolicy, TurnConfig};
 pub use self::state::ServerState;
 
 use claude_wrapper::Claude;
@@ -107,6 +108,12 @@ pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRo
     for tool in turn_tools::tools(&state) {
         router = router.tool(tool);
     }
+    if state.config.policy.allow_mutations {
+        for tool in mutations::tools(&state) {
+            router = router.tool(tool);
+        }
+        tracing::info!("mutating tools registered (policy.allow_mutations = true)");
+    }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
@@ -134,10 +141,16 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     let claude = build_claude(&config.claude)?;
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
 
+    let muts: Vec<_> = if state.config.policy.allow_mutations {
+        mutations::tools(&state)
+    } else {
+        Vec::new()
+    };
     let mut all: Vec<ToolInfo> = core::tools(&state)
         .into_iter()
         .chain(chat::tools(&state))
         .chain(turn_tools::tools(&state))
+        .chain(muts)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

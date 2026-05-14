@@ -448,7 +448,7 @@ fn command_output_json(out: &CommandOutput) -> CallToolResult {
 /// two-byte sequences (`ESC c`, `ESC =`, etc.). Conservative -- if we
 /// see an `ESC` we don't recognise, we still drop it so users don't
 /// end up with stray control bytes in their MCP payloads.
-fn strip_ansi(input: &str) -> String {
+pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;

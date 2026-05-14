@@ -16,6 +16,22 @@ pub struct ServerConfig {
     /// Async-turn registry knobs: TTL + sweeper cadence. Defaults
     /// to 1 hour TTL with a 60-second sweep interval.
     pub turns: TurnConfig,
+    /// Server-level policy: what mutating operations are allowed.
+    /// Defaults are deliberately conservative (no mutations).
+    pub policy: ServerPolicy,
+}
+
+/// Server-level policy flags. Mutating tools (mcp_add, plugin_install,
+/// etc.) are NOT registered unless [`Self::allow_mutations`] is true.
+/// When off the model literally cannot discover them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerPolicy {
+    /// When true, register CLI mutating tools that change MCP server
+    /// config, plugins, marketplaces. Default false because an
+    /// unmonitored coordinator could otherwise rewrite your claude
+    /// setup without warning.
+    pub allow_mutations: bool,
 }
 
 /// Knobs for the async-turn registry's TTL eviction.
