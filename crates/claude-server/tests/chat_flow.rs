@@ -94,6 +94,7 @@ async fn chat_budget_returns_null_when_no_budget() {
     );
 }
 
+#[cfg(feature = "sync-agent-turns")]
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
 async fn live_chat_open_send_close_roundtrip() {
@@ -187,6 +188,7 @@ async fn live_chat_open_send_close_roundtrip() {
     );
 }
 
+#[cfg(feature = "sync-agent-turns")]
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
 async fn live_chat_budget_tracks_spend() {
@@ -249,6 +251,7 @@ async fn live_chat_budget_tracks_spend() {
         .await;
 }
 
+#[cfg(feature = "sync-agent-turns")]
 #[tokio::test]
 #[ignore = "spawns real claude binary"]
 async fn live_chat_send_stream_sync_emits_progress() {

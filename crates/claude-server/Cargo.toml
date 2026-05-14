@@ -9,6 +9,15 @@ repository = "https://github.com/joshrotenberg/claude-wrapper"
 description = "MCP server layer over claude-wrapper"
 publish = false
 
+[features]
+default = ["sync-agent-turns"]
+# Sync (blocking) variants of agent-turn tools: chat_send_sync,
+# chat_send_stream_sync, claude_query_sync. On by default for
+# ergonomic builds. `default-features = false` drops them entirely
+# so the model literally can't discover blocking variants -- the
+# "agent sits waiting" failure mode becomes structurally impossible.
+sync-agent-turns = []
+
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }
 tokio = { version = "1", features = ["process", "time", "io-util", "macros", "rt-multi-thread", "sync"] }

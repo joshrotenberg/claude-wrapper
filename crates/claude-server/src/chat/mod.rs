@@ -20,28 +20,36 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
+#[cfg(feature = "sync-agent-turns")]
 use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
 use claude_wrapper::budget::BudgetTracker;
 use claude_wrapper::conversation::Conversation;
-use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+#[cfg(feature = "sync-agent-turns")]
+use claude_wrapper::duplex::InboundEvent;
+use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
 
 use crate::state::ServerState;
 
 /// Build the L2.5 chat tool list.
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
-    vec![
+    #[cfg_attr(not(feature = "sync-agent-turns"), allow(unused_mut))]
+    let mut out = vec![
         tool_chat_open(state),
         tool_chat_send(state),
-        tool_chat_send_sync(state),
-        tool_chat_send_stream_sync(state),
         tool_chat_list(state),
         tool_chat_history(state),
         tool_chat_interrupt(state),
         tool_chat_budget(state),
         tool_chat_close(state),
-    ]
+    ];
+    #[cfg(feature = "sync-agent-turns")]
+    {
+        out.push(tool_chat_send_sync(state));
+        out.push(tool_chat_send_stream_sync(state));
+    }
+    out
 }
 
 // -- chat_open ------------------------------------------------------
@@ -219,6 +227,7 @@ struct ChatSendInput {
     prompt: String,
 }
 
+#[cfg(feature = "sync-agent-turns")]
 fn tool_chat_send_sync(state: &ServerState) -> Tool {
     let state = state.clone();
     ToolBuilder::new("chat_send_sync")
@@ -267,6 +276,7 @@ fn tool_chat_send_sync(state: &ServerState) -> Tool {
 // The forwarder runs in a spawned task with a clone of `Context`;
 // when send returns we abort it.
 
+#[cfg(feature = "sync-agent-turns")]
 fn tool_chat_send_stream_sync(state: &ServerState) -> Tool {
     let state = state.clone();
     ToolBuilder::new("chat_send_stream_sync")
@@ -332,6 +342,7 @@ fn tool_chat_send_stream_sync(state: &ServerState) -> Tool {
 /// `message` field of a progress notification. We pull the assistant
 /// text where present so consumers can show progressive output;
 /// other event types fall back to a type tag.
+#[cfg(feature = "sync-agent-turns")]
 fn stringify_event(event: &InboundEvent) -> String {
     match event {
         InboundEvent::SystemInit { session_id } => format!("system.init session={session_id}"),
@@ -352,6 +363,7 @@ fn stringify_event(event: &InboundEvent) -> String {
     }
 }
 
+#[cfg(feature = "sync-agent-turns")]
 fn extract_assistant_text(v: &serde_json::Value) -> Option<String> {
     let blocks = v
         .get("message")
@@ -368,6 +380,7 @@ fn extract_assistant_text(v: &serde_json::Value) -> Option<String> {
     if buf.is_empty() { None } else { Some(buf) }
 }
 
+#[cfg(feature = "sync-agent-turns")]
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

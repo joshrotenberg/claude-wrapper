@@ -10,6 +10,7 @@
 //! `claude_mcp_list`, `claude_plugin_validate`, etc. The CLI command
 //! `claude foo bar baz` maps to `claude_foo_bar_baz`.
 
+#[cfg(feature = "sync-agent-turns")]
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -33,11 +34,11 @@ use crate::state::ServerState;
 
 /// Build the full L2 passthrough tool list.
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
-    vec![
+    #[cfg_attr(not(feature = "sync-agent-turns"), allow(unused_mut))]
+    let mut out = vec![
         tool_version(),
         tool_cli_version(state),
         tool_query(state),
-        tool_query_sync(state),
         tool_agents(state),
         tool_auth_status(state),
         tool_mcp_list(state),
@@ -48,7 +49,12 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_auto_mode_config(state),
         tool_auto_mode_defaults(state),
         tool_doctor(state),
-    ]
+    ];
+    #[cfg(feature = "sync-agent-turns")]
+    {
+        out.push(tool_query_sync(state));
+    }
+    out
 }
 
 // -- shared inputs ---------------------------------------------------
@@ -184,6 +190,7 @@ fn tool_query(state: &ServerState) -> Tool {
         .build()
 }
 
+#[cfg(feature = "sync-agent-turns")]
 fn tool_query_sync(state: &ServerState) -> Tool {
     let claude = state.claude.clone();
     ToolBuilder::new("claude_query_sync")

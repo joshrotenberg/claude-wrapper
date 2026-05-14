@@ -19,12 +19,12 @@ fn registered_tools_includes_core_l2_surface() {
     let tools = registered_tools(cfg()).expect("config built");
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-    for expected in [
-        // L2 passthrough
+    #[cfg_attr(not(feature = "sync-agent-turns"), allow(unused_mut))]
+    let mut expected: Vec<&str> = vec![
+        // L2 passthrough (always-on)
         "claude_version",
         "claude_cli_version",
         "claude_query",
-        "claude_query_sync",
         "claude_agents",
         "claude_auth_status",
         "claude_mcp_list",
@@ -35,25 +35,47 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_auto_mode_config",
         "claude_auto_mode_defaults",
         "claude_doctor",
-        // L2.5 chat
+        // L2.5 chat (always-on)
         "chat_open",
         "chat_send",
-        "chat_send_sync",
-        "chat_send_stream_sync",
         "chat_list",
         "chat_history",
         "chat_interrupt",
         "chat_budget",
         "chat_close",
-        // Turn registry
+        // Turn registry (always-on)
         "turn_get",
         "turn_wait",
         "turn_cancel",
         "turn_list",
-    ] {
+    ];
+    #[cfg(feature = "sync-agent-turns")]
+    expected.extend([
+        "claude_query_sync",
+        "chat_send_sync",
+        "chat_send_stream_sync",
+    ]);
+    for expected in expected {
         assert!(
             names.contains(&expected),
             "missing tool {expected} in {names:?}"
+        );
+    }
+}
+
+#[cfg(not(feature = "sync-agent-turns"))]
+#[test]
+fn registered_tools_omits_sync_agent_turn_tools_when_feature_off() {
+    let tools = registered_tools(cfg()).expect("config built");
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    for forbidden in [
+        "claude_query_sync",
+        "chat_send_sync",
+        "chat_send_stream_sync",
+    ] {
+        assert!(
+            !names.contains(&forbidden),
+            "tool {forbidden} should NOT be registered with sync-agent-turns disabled; got {names:?}"
         );
     }
 }
@@ -158,6 +180,7 @@ async fn live_claude_cli_version_returns_three_numbers() {
     assert!(v["patch"].is_u64(), "patch: {text}");
 }
 
+#[cfg(feature = "sync-agent-turns")]
 #[tokio::test]
 #[ignore = "spawns real claude binary; run with --ignored"]
 async fn live_claude_query_sync_simple_prompt() {
