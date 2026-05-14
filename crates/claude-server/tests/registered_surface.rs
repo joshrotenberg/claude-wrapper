@@ -36,6 +36,7 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_doctor",
         // L2.5 chat
         "chat_open",
+        "chat_send",
         "chat_send_sync",
         "chat_send_stream_sync",
         "chat_list",

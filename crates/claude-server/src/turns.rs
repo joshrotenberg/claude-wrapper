@@ -316,9 +316,8 @@ mod tests {
         let h = r.register(None).await;
         let id = h.turn_id.clone();
         let r2 = r.clone();
-        let waiter = tokio::spawn(async move {
-            r2.wait(&id, None).await.expect("ok").expect("terminal")
-        });
+        let waiter =
+            tokio::spawn(async move { r2.wait(&id, None).await.expect("ok").expect("terminal") });
         tokio::time::sleep(Duration::from_millis(20)).await;
         h.complete(serde_json::json!({"x": 1}));
         let snap = waiter.await.expect("joined");

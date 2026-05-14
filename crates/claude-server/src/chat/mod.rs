@@ -33,6 +33,7 @@ use crate::state::ServerState;
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
     vec![
         tool_chat_open(state),
+        tool_chat_send(state),
         tool_chat_send_sync(state),
         tool_chat_send_stream_sync(state),
         tool_chat_list(state),
@@ -104,6 +105,85 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                 Ok(CallToolResult::json(json!({
                     "chat_id": id,
                     "max_cost_usd": input.max_cost_usd,
+                })))
+            }
+        })
+        .build()
+}
+
+// -- chat_send (async, default) -------------------------------------
+//
+// Fires the turn into a background task and returns immediately
+// with the new turn_id. Within a chat, turns still serialize via
+// the Conversation mutex -- the second chat_send to the same chat
+// queues behind the first, and starts when the first finishes.
+//
+// Use turn_get / turn_wait / turn_cancel to drive the turn's
+// lifecycle. The agent never blocks on this call.
+
+fn tool_chat_send(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("chat_send")
+        .description(
+            "Fire a turn against an open chat and return immediately with a \
+             turn_id. The turn runs in the background; poll with `turn_get`, \
+             block with `turn_wait`, or cancel with `turn_cancel`. Turns within \
+             a single chat still serialize (second turn queues behind first). \
+             For the blocking variant, see `chat_send_sync`.",
+        )
+        .handler(move |input: ChatSendInput| {
+            let state = state.clone();
+            async move {
+                // Confirm chat exists before promising a turn_id.
+                if state.get_chat(&input.chat_id).await.is_none() {
+                    return Err(tower_mcp::Error::internal(format!(
+                        "no chat with id `{}` (was it closed?)",
+                        input.chat_id
+                    )));
+                }
+                let handle = state.turns.register(Some(input.chat_id.clone())).await;
+                let turn_id = handle.turn_id.clone();
+
+                let state_for_worker = state.clone();
+                let chat_id_for_worker = input.chat_id.clone();
+                let prompt = input.prompt;
+                tokio::spawn(async move {
+                    if handle.is_cancelled() {
+                        handle.cancelled();
+                        return;
+                    }
+                    let conv = match state_for_worker.get_chat(&chat_id_for_worker).await {
+                        Some(c) => c,
+                        None => {
+                            handle.fail(format!(
+                                "no chat with id `{chat_id_for_worker}` (was it closed?)"
+                            ));
+                            return;
+                        }
+                    };
+                    let mut guard = conv.lock().await;
+                    if handle.is_cancelled() {
+                        handle.cancelled();
+                        return;
+                    }
+                    match guard.send(prompt).await {
+                        Ok(turn) => {
+                            handle.complete(json!({
+                                "result": turn.result_text(),
+                                "session_id": turn.session_id(),
+                                "turn_cost_usd": turn.total_cost_usd(),
+                                "duration_ms": turn.duration_ms(),
+                                "cumulative_cost_usd": guard.total_cost_usd(),
+                                "total_turns": guard.total_turns(),
+                            }));
+                        }
+                        Err(e) => handle.fail(e),
+                    }
+                });
+
+                Ok(CallToolResult::json(json!({
+                    "turn_id": turn_id,
+                    "chat_id": input.chat_id,
                 })))
             }
         })
