@@ -23,6 +23,7 @@ use serde_json::json;
 #[cfg(feature = "sync-agent-turns")]
 use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
+use tracing::Instrument;
 
 use claude_wrapper::budget::BudgetTracker;
 use claude_wrapper::conversation::Conversation;
@@ -172,43 +173,71 @@ fn tool_chat_send(state: &ServerState) -> Tool {
                 }
                 let handle = state.turns.register(Some(input.chat_id.clone())).await;
                 let turn_id = handle.turn_id.clone();
+                let span = tracing::info_span!(
+                    "chat_send",
+                    turn_id = %turn_id,
+                    chat_id = %input.chat_id,
+                    prompt_len = input.prompt.len(),
+                );
+                tracing::info!(parent: &span, "fired async turn");
 
                 let state_for_worker = state.clone();
                 let chat_id_for_worker = input.chat_id.clone();
                 let prompt = input.prompt;
-                tokio::spawn(async move {
-                    if handle.is_cancelled() {
-                        handle.cancelled();
-                        return;
-                    }
-                    let conv = match state_for_worker.get_chat(&chat_id_for_worker).await {
-                        Some(c) => c,
-                        None => {
-                            handle.fail(format!(
-                                "no chat with id `{chat_id_for_worker}` (was it closed?)"
-                            ));
+                tokio::spawn(
+                    async move {
+                        if handle.is_cancelled() {
+                            tracing::info!("turn cancelled before start");
+                            handle.cancelled();
                             return;
                         }
-                    };
-                    let mut guard = conv.lock().await;
-                    if handle.is_cancelled() {
-                        handle.cancelled();
-                        return;
-                    }
-                    match guard.send(prompt).await {
-                        Ok(turn) => {
-                            handle.complete(json!({
-                                "result": turn.result_text(),
-                                "session_id": turn.session_id(),
-                                "turn_cost_usd": turn.total_cost_usd(),
-                                "duration_ms": turn.duration_ms(),
-                                "cumulative_cost_usd": guard.total_cost_usd(),
-                                "total_turns": guard.total_turns(),
-                            }));
+                        let conv = match state_for_worker.get_chat(&chat_id_for_worker).await {
+                            Some(c) => c,
+                            None => {
+                                tracing::warn!("chat closed before turn could acquire it");
+                                handle.fail(format!(
+                                    "no chat with id `{chat_id_for_worker}` (was it closed?)"
+                                ));
+                                return;
+                            }
+                        };
+                        let mut guard = conv.lock().await;
+                        if handle.is_cancelled() {
+                            tracing::info!("turn cancelled while waiting for mutex");
+                            handle.cancelled();
+                            return;
                         }
-                        Err(e) => handle.fail(e),
+                        match guard.send(prompt).await {
+                            Ok(turn) => {
+                                let cost = turn.total_cost_usd();
+                                let dur = turn.duration_ms();
+                                let result_text = turn.result_text().map(str::to_string);
+                                let session_id = turn.session_id().map(str::to_string);
+                                let cumulative = guard.total_cost_usd();
+                                let total_turns = guard.total_turns();
+                                tracing::info!(
+                                    cost_usd = ?cost,
+                                    duration_ms = ?dur,
+                                    cumulative_cost_usd = cumulative,
+                                    "turn done"
+                                );
+                                handle.complete(json!({
+                                    "result": result_text,
+                                    "session_id": session_id,
+                                    "turn_cost_usd": cost,
+                                    "duration_ms": dur,
+                                    "cumulative_cost_usd": cumulative,
+                                    "total_turns": total_turns,
+                                }));
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "turn failed");
+                                handle.fail(e);
+                            }
+                        }
                     }
-                });
+                    .instrument(span),
+                );
 
                 Ok(CallToolResult::json(json!({
                     "turn_id": turn_id,

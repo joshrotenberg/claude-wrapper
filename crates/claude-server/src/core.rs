@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
+use tracing::Instrument;
 
 use claude_wrapper::ClaudeCommand;
 use claude_wrapper::OutputFormat;
@@ -170,20 +171,46 @@ fn tool_query(state: &ServerState) -> Tool {
                 let handle = state.turns.register(None).await;
                 let turn_id = handle.turn_id.clone();
                 let claude = state.claude.clone();
-                tokio::spawn(async move {
-                    if handle.is_cancelled() {
-                        handle.cancelled();
-                        return;
+                let span = tracing::info_span!(
+                    "claude_query",
+                    turn_id = %turn_id,
+                    model = input.model.as_deref().unwrap_or("default"),
+                    prompt_len = input.prompt.len(),
+                );
+                tracing::info!(parent: &span, "fired async query");
+                tokio::spawn(
+                    async move {
+                        if handle.is_cancelled() {
+                            tracing::info!("query cancelled before start");
+                            handle.cancelled();
+                            return;
+                        }
+                        let q = build_query(&input);
+                        match q.execute(&claude).await {
+                            Ok(out) => match parse_query_envelope(&out.stdout) {
+                                Ok(env) => {
+                                    let cost = env.get("total_cost_usd").and_then(|v| v.as_f64());
+                                    let dur = env.get("duration_ms").and_then(|v| v.as_u64());
+                                    tracing::info!(
+                                        cost_usd = ?cost,
+                                        duration_ms = ?dur,
+                                        "query done"
+                                    );
+                                    handle.complete(env);
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "parse failed");
+                                    handle.fail(e.to_string());
+                                }
+                            },
+                            Err(e) => {
+                                tracing::error!(error = %e, "query failed");
+                                handle.fail(e);
+                            }
+                        }
                     }
-                    let q = build_query(&input);
-                    match q.execute(&claude).await {
-                        Ok(out) => match parse_query_envelope(&out.stdout) {
-                            Ok(env) => handle.complete(env),
-                            Err(e) => handle.fail(e.to_string()),
-                        },
-                        Err(e) => handle.fail(e),
-                    }
-                });
+                    .instrument(span),
+                );
                 Ok(CallToolResult::json(json!({"turn_id": turn_id})))
             }
         })

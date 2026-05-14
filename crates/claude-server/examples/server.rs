@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use claude_server::{ServerConfig, build_router, registered_tools};
+use tower_mcp::middleware::McpTracingLayer;
 use tower_mcp::{HttpTransport, StdioTransport};
 
 /// Raw MCP server CLI for `claude-server`. Wires the library router
@@ -61,12 +62,14 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Cmd::Serve) {
         Cmd::Serve => {
             let router = build_router(cfg).context("build_router")?;
-            let mut transport = StdioTransport::new(router);
+            let mut transport = StdioTransport::new(router).layer(McpTracingLayer::new());
             transport.run().await.context("stdio transport")?;
         }
         Cmd::ServeHttp { bind, bearer } => {
             let router = build_router(cfg).context("build_router")?;
-            let mut app = HttpTransport::new(router).into_router();
+            let mut app = HttpTransport::new(router)
+                .layer(McpTracingLayer::new())
+                .into_router();
             if let Some(token) = bearer {
                 use axum::middleware;
                 app = app.layer(middleware::from_fn(move |req, next| {
@@ -111,7 +114,7 @@ async fn load_config(path: Option<PathBuf>) -> Result<ServerConfig> {
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,claude_server=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,claude_server=info,tower_mcp=info"));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

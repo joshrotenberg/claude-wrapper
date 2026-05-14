@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -27,6 +27,49 @@ use serde_json::Value;
 use tokio::sync::{RwLock, watch};
 
 use crate::state::ChatId;
+
+/// Process-wide counters maintained by [`TurnRegistry`]. All updates
+/// happen from the [`TurnHandle`] terminal methods so workers don't
+/// have to remember to bump anything explicitly. Snapshots are
+/// surfaced via the `metrics_summary` tool and `claude://metrics`
+/// resource.
+#[derive(Default, Debug)]
+pub struct Metrics {
+    pub turns_fired: AtomicU64,
+    pub turns_done: AtomicU64,
+    pub turns_failed: AtomicU64,
+    pub turns_cancelled: AtomicU64,
+    /// Currently-running turns. Signed because a worker that races
+    /// to complete after a registry shutdown could underflow; we'd
+    /// rather see -1 than wrap to u64::MAX.
+    pub in_flight: AtomicI64,
+    /// Cumulative cost in micro-USD (multiply by 1e-6 for USD).
+    /// u64 storage so atomic ops work; 1 USD = 1_000_000.
+    pub total_cost_micros: AtomicU64,
+}
+
+impl Metrics {
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            turns_fired: self.turns_fired.load(Ordering::Relaxed),
+            turns_done: self.turns_done.load(Ordering::Relaxed),
+            turns_failed: self.turns_failed.load(Ordering::Relaxed),
+            turns_cancelled: self.turns_cancelled.load(Ordering::Relaxed),
+            in_flight: self.in_flight.load(Ordering::Relaxed),
+            total_cost_usd: (self.total_cost_micros.load(Ordering::Relaxed) as f64) / 1_000_000.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricsSnapshot {
+    pub turns_fired: u64,
+    pub turns_done: u64,
+    pub turns_failed: u64,
+    pub turns_cancelled: u64,
+    pub in_flight: i64,
+    pub total_cost_usd: f64,
+}
 
 /// Opaque identifier for an async turn. Format: `turn_<hex>_<counter>`.
 pub type TurnId = String;
@@ -83,6 +126,7 @@ pub struct TurnHandle {
     pub turn_id: TurnId,
     pub cancel: Arc<AtomicBool>,
     snapshot_tx: watch::Sender<TurnSnapshot>,
+    metrics: Arc<Metrics>,
 }
 
 impl TurnHandle {
@@ -95,11 +139,27 @@ impl TurnHandle {
 
     /// Publish a Done terminal state with the worker's JSON result.
     pub fn complete(self, result: Value) {
+        // Pull the per-turn cost out of the standard envelope shape
+        // chat_send / claude_query workers produce, so total_cost
+        // metrics tick up automatically.
+        let cost = result
+            .get("turn_cost_usd")
+            .and_then(Value::as_f64)
+            .or_else(|| result.get("total_cost_usd").and_then(Value::as_f64))
+            .unwrap_or(0.0);
+        let micros = (cost.max(0.0) * 1_000_000.0) as u64;
         let mut snap = self.snapshot_tx.borrow().clone();
         snap.status = TurnStatus::Done;
         snap.finished_at_us = Some(now_us());
         snap.result = Some(result);
         let _ = self.snapshot_tx.send(snap);
+        self.metrics.turns_done.fetch_add(1, Ordering::Relaxed);
+        self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if micros > 0 {
+            self.metrics
+                .total_cost_micros
+                .fetch_add(micros, Ordering::Relaxed);
+        }
     }
 
     /// Publish a Failed terminal state.
@@ -109,6 +169,8 @@ impl TurnHandle {
         snap.finished_at_us = Some(now_us());
         snap.error = Some(error.to_string());
         let _ = self.snapshot_tx.send(snap);
+        self.metrics.turns_failed.fetch_add(1, Ordering::Relaxed);
+        self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Publish a Cancelled terminal state. Workers call this when
@@ -118,6 +180,8 @@ impl TurnHandle {
         snap.status = TurnStatus::Cancelled;
         snap.finished_at_us = Some(now_us());
         let _ = self.snapshot_tx.send(snap);
+        self.metrics.turns_cancelled.fetch_add(1, Ordering::Relaxed);
+        self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -135,11 +199,17 @@ struct TurnEntry {
 #[derive(Default)]
 pub struct TurnRegistry {
     entries: RwLock<HashMap<TurnId, TurnEntry>>,
+    metrics: Arc<Metrics>,
 }
 
 impl TurnRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Read-only handle to the process-wide metrics counters.
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     /// Register a fresh turn. Returns a worker-side [`TurnHandle`]
@@ -166,10 +236,13 @@ impl TurnRegistry {
                 cancel: cancel.clone(),
             },
         );
+        self.metrics.turns_fired.fetch_add(1, Ordering::Relaxed);
+        self.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
         TurnHandle {
             turn_id,
             cancel,
             snapshot_tx: tx,
+            metrics: self.metrics.clone(),
         }
     }
 

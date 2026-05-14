@@ -21,7 +21,37 @@ pub(crate) fn resources(state: &ServerState) -> Vec<Resource> {
         resource_config(state),
         resource_tools(state),
         resource_chats(state),
+        resource_metrics(state),
     ]
+}
+
+fn resource_metrics(state: &ServerState) -> Resource {
+    let state = state.clone();
+    ResourceBuilder::new("claude://metrics")
+        .name("Process metrics")
+        .description(
+            "Process-wide turn counters as JSON: turns_fired/done/failed/\
+             cancelled, in_flight, total_cost_usd. Same shape as the \
+             metrics_summary tool. UIs subscribe here for live dashboards.",
+        )
+        .mime_type("application/json")
+        .handler(move || {
+            let state = state.clone();
+            async move {
+                let snap = state.turns.metrics().snapshot();
+                let body = json!({
+                    "turns_fired": snap.turns_fired,
+                    "turns_done": snap.turns_done,
+                    "turns_failed": snap.turns_failed,
+                    "turns_cancelled": snap.turns_cancelled,
+                    "in_flight": snap.in_flight,
+                    "total_cost_usd": snap.total_cost_usd,
+                });
+                let text = serde_json::to_string_pretty(&body).unwrap_or_default();
+                Ok(ReadResourceResult::text("claude://metrics", text))
+            }
+        })
+        .build()
 }
 
 /// MCP resource templates -- URI-templated resources that take

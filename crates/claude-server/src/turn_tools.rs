@@ -25,7 +25,40 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_turn_wait(state),
         tool_turn_cancel(state),
         tool_turn_list(state),
+        tool_metrics_summary(state),
     ]
+}
+
+// -- metrics_summary -------------------------------------------------
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct NoArgs {}
+
+fn tool_metrics_summary(state: &ServerState) -> Tool {
+    let state = state.clone();
+    ToolBuilder::new("metrics_summary")
+        .description(
+            "Snapshot of process-wide turn counters: turns_fired / done / \
+             failed / cancelled, in_flight, total_cost_usd. Lets a \
+             coordinator agent introspect its own spend mid-run -- \
+             \"before I fire another turn, how much have I spent?\"",
+        )
+        .read_only()
+        .handler(move |_input: NoArgs| {
+            let state = state.clone();
+            async move {
+                let snap = state.turns.metrics().snapshot();
+                Ok(CallToolResult::json(json!({
+                    "turns_fired": snap.turns_fired,
+                    "turns_done": snap.turns_done,
+                    "turns_failed": snap.turns_failed,
+                    "turns_cancelled": snap.turns_cancelled,
+                    "in_flight": snap.in_flight,
+                    "total_cost_usd": snap.total_cost_usd,
+                })))
+            }
+        })
+        .build()
 }
 
 // -- turn_get --------------------------------------------------------
