@@ -32,9 +32,10 @@ use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
 
 use crate::state::ServerState;
 
+mod slash;
+
 /// Build the L2.5 chat tool list.
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
-    #[cfg_attr(not(feature = "sync-agent-turns"), allow(unused_mut))]
     let mut out = vec![
         tool_chat_open(state),
         tool_chat_send(state),
@@ -44,6 +45,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_chat_budget(state),
         tool_chat_close(state),
     ];
+    out.extend(slash::tools(state));
     #[cfg(feature = "sync-agent-turns")]
     {
         out.push(tool_chat_send_sync(state));

@@ -48,6 +48,8 @@ fn registered_tools_includes_core_l2_surface() {
         "turn_wait",
         "turn_cancel",
         "turn_list",
+        // Slash-command tools (always-on)
+        "chat_compact",
     ];
     #[cfg(feature = "sync-agent-turns")]
     expected.extend([
