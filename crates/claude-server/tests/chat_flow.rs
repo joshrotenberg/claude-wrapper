@@ -55,6 +55,32 @@ async fn chat_open_schema_exposes_working_dir() {
 }
 
 #[tokio::test]
+async fn chat_open_schema_exposes_resume_fields() {
+    // P0 from the Finestra-direction plan: hosts upgrade a passive
+    // on-disk session to a live duplex chat. Both `resume` and
+    // `continue_session` should be discoverable via tools/list.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let tools = client.list_tools().await;
+    let chat_open = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("chat_open"))
+        .expect("chat_open in tools/list");
+    let props = chat_open["inputSchema"]["properties"]
+        .as_object()
+        .expect("input schema properties");
+    for field in ["resume", "continue_session"] {
+        assert!(
+            props.contains_key(field),
+            "chat_open schema should expose {field}; got {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_close_unknown_id_is_a_noop() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
@@ -419,5 +445,119 @@ async fn live_chat_send_stream_sync_emits_progress() {
 
     let _ = client
         .call_tool("chat_close", serde_json::json!({"chat_id": chat_id}))
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "spawns real claude binary"]
+async fn live_chat_open_resume_continues_prior_conversation() {
+    // P0 demo, all in one process: open chat A, plant a recallable
+    // fact, capture its session_id, close. Open chat B with
+    // resume = that session_id and ask the model to recall -- it
+    // should pick up the prior context rather than starting fresh.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    // Chat A: plant a fact.
+    let open_a = client
+        .call_tool("chat_open", serde_json::json!({"model": "haiku"}))
+        .await;
+    let body_a: serde_json::Value = serde_json::from_str(&open_a.all_text()).expect("open A json");
+    let chat_a = body_a["chat_id"].as_str().unwrap().to_string();
+
+    // Natural-sounding turn -- "remember the secret word X" reads as
+    // a prompt-injection test and gets refused; just having a normal
+    // exchange works fine.
+    let send_a = client
+        .call_tool(
+            "chat_send",
+            serde_json::json!({
+                "chat_id": chat_a.clone(),
+                "prompt": "Pick a fruit -- not a common one. Reply with just the fruit name, no explanation.",
+            }),
+        )
+        .await;
+    let turn_a = serde_json::from_str::<serde_json::Value>(&send_a.all_text()).unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let waited_a = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_a, "timeout_secs": 30.0}),
+        )
+        .await;
+    let wv_a: serde_json::Value = serde_json::from_str(&waited_a.all_text()).expect("wait A json");
+    assert_eq!(wv_a["status"], serde_json::json!("done"));
+    let session_id = wv_a["result"]["session_id"]
+        .as_str()
+        .expect("session_id present")
+        .to_string();
+    let picked_fruit = wv_a["result"]["result"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("session {session_id} picked: {picked_fruit:?}");
+
+    // Close A; the duplex process exits. The on-disk JSONL remains
+    // and the session_id is what `--resume` keys on.
+    let _ = client
+        .call_tool("chat_close", serde_json::json!({"chat_id": chat_a}))
+        .await;
+
+    // Chat B: resume the same session_id, ask a recall question.
+    let open_b = client
+        .call_tool(
+            "chat_open",
+            serde_json::json!({"model": "haiku", "resume": session_id}),
+        )
+        .await;
+    let body_b: serde_json::Value = serde_json::from_str(&open_b.all_text()).expect("open B json");
+    let chat_b = body_b["chat_id"].as_str().unwrap().to_string();
+
+    let send_b = client
+        .call_tool(
+            "chat_send",
+            serde_json::json!({
+                "chat_id": chat_b.clone(),
+                "prompt": "What fruit did you just pick? Reply with just the fruit name.",
+            }),
+        )
+        .await;
+    let turn_b = serde_json::from_str::<serde_json::Value>(&send_b.all_text()).unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let waited_b = client
+        .call_tool(
+            "turn_wait",
+            serde_json::json!({"turn_id": turn_b, "timeout_secs": 30.0}),
+        )
+        .await;
+    let wv_b: serde_json::Value = serde_json::from_str(&waited_b.all_text()).expect("wait B json");
+    eprintln!("resumed reply: {wv_b}");
+    assert_eq!(wv_b["status"], serde_json::json!("done"));
+    let recall = wv_b["result"]["result"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let expected = picked_fruit.trim().to_lowercase();
+    // Strongest assertion: same session_id across both opens proves
+    // --resume took effect at the CLI level. The recall check is a
+    // belt-and-suspenders semantic check that the conversation
+    // history actually flowed through.
+    assert_eq!(
+        wv_b["result"]["session_id"].as_str(),
+        Some(session_id.as_str()),
+        "resumed session should keep the same session_id"
+    );
+    assert!(
+        recall.contains(&expected),
+        "expected the resumed turn to recall the picked fruit `{expected}`; got {recall:?}"
+    );
+
+    let _ = client
+        .call_tool("chat_close", serde_json::json!({"chat_id": chat_b}))
         .await;
 }

@@ -94,6 +94,18 @@ struct ChatOpenInput {
     /// roots simultaneously.
     #[serde(default)]
     working_dir: Option<std::path::PathBuf>,
+    /// Resume a prior session by id. Maps to `claude --resume
+    /// <session_id>` on the spawned duplex process. Use case:
+    /// upgrade a passive on-disk JSONL session to a live duplex
+    /// chat. Subsequent `chat_send` turns extend the existing
+    /// conversation rather than starting fresh.
+    #[serde(default)]
+    resume: Option<String>,
+    /// Continue the most recent session in the resolved working
+    /// directory (`claude --continue`). Mutually exclusive with
+    /// `resume` at the CLI level; passing both lets the CLI decide.
+    #[serde(default)]
+    continue_session: Option<bool>,
 }
 
 fn tool_chat_open(state: &ServerState) -> Tool {
@@ -116,6 +128,12 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                 }
                 if let Some(s) = input.append_system_prompt {
                     opts = opts.append_system_prompt(s);
+                }
+                if let Some(id) = input.resume {
+                    opts = opts.resume(id);
+                }
+                if input.continue_session.unwrap_or(false) {
+                    opts = opts.continue_session();
                 }
                 // worktree_name implies worktree-enabled.
                 let want_worktree =
