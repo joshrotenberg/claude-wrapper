@@ -43,6 +43,13 @@ metrics = []
 # runtime gate hides the tools from `tools/list`.
 mutations = []
 
+# Read-only access to historical sessions on disk
+# (`~/.claude/projects/<slug>/<session_id>.jsonl`). Tools:
+# claude_project_list, claude_session_list, claude_session_get.
+# Resources: claude://projects, claude://sessions/{id}. Built on
+# claude_wrapper::history; no new deps.
+history = []
+
 # Sync (blocking) variants of agent-turn tools: chat_send_sync,
 # chat_send_stream_sync, claude_query_sync. On by default for
 # ergonomic builds. `default-features = false` drops them entirely
@@ -51,8 +58,9 @@ mutations = []
 sync-agent-turns = []
 
 # Convenience profile: the kitchen sink for Finestra-class
-# deployments that want the full surface including mutations.
-full = ["chat", "core", "metrics", "sync-agent-turns", "mutations"]
+# deployments that want the full surface including mutations
+# and historical session reads.
+full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }

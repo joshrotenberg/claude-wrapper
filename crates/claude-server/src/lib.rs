@@ -41,7 +41,7 @@
 
 //! ## Surfaces
 //!
-//! claude-server exposes three tool surfaces, layered by intent:
+//! claude-server exposes several tool surfaces, layered by intent:
 //!
 //! 1. **Core** -- 1:1 mirror of the `claude` CLI. Every
 //!    subcommand you could shell out to lives here, with the
@@ -50,7 +50,12 @@
 //!    `claude` subprocesses, manage turn ordering, expose cost and
 //!    history, and stream events back as MCP progress notifications.
 //!    This is where the server earns its keep over a dumb passthrough.
-//! 3. **Artifacts** (planned) -- CRUD over `~/.claude/skills/`,
+//! 3. **History** (`history` feature) -- read-only access to
+//!    `~/.claude/projects/<slug>/<session_id>.jsonl` files. Tools:
+//!    `claude_project_list`, `claude_session_list`,
+//!    `claude_session_get`. Resources: `claude://projects`,
+//!    `claude://projects/{slug}`, `claude://sessions/{id}`.
+//! 4. **Artifacts** (planned) -- CRUD over `~/.claude/skills/`,
 //!    `~/.claude/agents/`, plugin manifests, MCP server configs.
 //!    Not yet wired.
 
@@ -59,6 +64,8 @@ mod chat;
 pub mod config;
 #[cfg(feature = "core")]
 mod core;
+#[cfg(feature = "history")]
+mod history;
 #[cfg(feature = "mutations")]
 mod mutations;
 mod prompts;
@@ -162,11 +169,13 @@ fn build_router_inner(
                - Resume:        chat_open(resume: \"<session_id>\")\n\
              \n\
              DISCOVERY:\n\
-               - claude://tools      -- the full registered tool surface\n\
-               - claude://config     -- server config (env values redacted)\n\
-               - claude://chats      -- live chats with cost + turn count\n\
-               - claude://chats/{id} -- one chat's full history (subscribable)\n\
-               - claude://metrics    -- process counters; check spend mid-run\n\
+               - claude://tools         -- the full registered tool surface\n\
+               - claude://config        -- server config (env values redacted)\n\
+               - claude://chats         -- live chats with cost + turn count\n\
+               - claude://chats/{id}    -- one chat's full history (subscribable)\n\
+               - claude://metrics       -- process counters; check spend mid-run\n\
+               - claude://projects      -- on-disk project history (history feature)\n\
+               - claude://sessions/{id} -- full parsed JSONL log for a session\n\
              \n\
              For a longer walkthrough call `prompts/get usage_guide`.",
         );
@@ -189,6 +198,18 @@ fn build_router_inner(
             router = router.tool(tool);
         }
         tracing::info!("mutating tools registered (policy.allow_mutations = true)");
+    }
+    #[cfg(feature = "history")]
+    {
+        for tool in history::tools(&state) {
+            router = router.tool(tool);
+        }
+        for resource in history::resources(&state) {
+            router = router.resource(resource);
+        }
+        for template in history::templates(&state) {
+            router = router.resource_template(template);
+        }
     }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
@@ -220,7 +241,12 @@ pub struct ToolInfo {
 pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<Vec<ToolInfo>> {
     let claude = build_claude(&config.claude)?;
     #[cfg_attr(
-        not(any(feature = "core", feature = "chat", feature = "mutations")),
+        not(any(
+            feature = "core",
+            feature = "chat",
+            feature = "mutations",
+            feature = "history"
+        )),
         allow(unused_variables)
     )]
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
@@ -233,6 +259,11 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     };
     #[cfg(not(feature = "mutations"))]
     let muts: Vec<tower_mcp::Tool> = Vec::new();
+
+    #[cfg(feature = "history")]
+    let history_tools = history::tools(&state);
+    #[cfg(not(feature = "history"))]
+    let history_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "core")]
     let core_tools = core::tools(&state);
@@ -252,6 +283,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
         .chain(chat_tools)
         .chain(turn_tool_list)
         .chain(muts)
+        .chain(history_tools)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

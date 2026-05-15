@@ -19,6 +19,12 @@ pub struct ServerConfig {
     /// Server-level policy: what mutating operations are allowed.
     /// Defaults are deliberately conservative (no mutations).
     pub policy: ServerPolicy,
+    /// Override the on-disk history root that the `history` feature
+    /// reads from. Defaults to `~/.claude/projects`. Useful for
+    /// tests (point at a tempdir) and non-default Claude Code
+    /// installs. Only consulted when the `history` Cargo feature
+    /// is enabled.
+    pub history_root: Option<PathBuf>,
 }
 
 /// Server-level policy flags. Mutating tools (mcp_add, plugin_install,

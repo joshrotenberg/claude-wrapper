@@ -160,6 +160,12 @@ within a single chat queue.
   on KEY/TOKEN/SECRET/PASSWORD).
 - `claude://tools` -- the registered tool surface; useful for \
   programmatic introspection.
+- `claude://projects` (history feature) -- every project under \
+  `~/.claude/projects/` with session counts. Pair with \
+  `claude://projects/{slug}` for that project's session list and \
+  `claude://sessions/{id}` for the full parsed entry log. Same \
+  shape as the `claude_project_list` / `claude_session_list` / \
+  `claude_session_get` tools.
 
 Before firing an expensive turn, `metrics_summary` lets you check \
 cumulative spend. Open chats with `max_cost_usd` to enforce a hard \
@@ -185,7 +191,6 @@ the budget is exhausted.
 
 - Skills CRUD (`~/.claude/skills/`) -- planned, not yet wired
 - Agents CRUD (`~/.claude/agents/`) -- planned
-- Historical session reads from `.jsonl` -- planned (P1 on the roadmap)
 - Worktree introspection / removal -- planned
 
 For now, those surfaces live elsewhere or require direct filesystem access.
