@@ -31,6 +31,30 @@ async fn chat_list_starts_empty() {
 }
 
 #[tokio::test]
+async fn chat_open_schema_exposes_working_dir() {
+    // Schema discovery: clients should see `working_dir` as an
+    // optional field on chat_open so per-chat project routing is
+    // discoverable through tools/list.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let tools = client.list_tools().await;
+    let chat_open = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("chat_open"))
+        .expect("chat_open in tools/list");
+    let props = chat_open["inputSchema"]["properties"]
+        .as_object()
+        .expect("input schema properties");
+    assert!(
+        props.contains_key("working_dir"),
+        "chat_open schema should expose working_dir; got {:?}",
+        props.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn chat_close_unknown_id_is_a_noop() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);

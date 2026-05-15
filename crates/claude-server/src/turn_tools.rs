@@ -20,20 +20,25 @@ use crate::state::ServerState;
 use crate::turns::TurnSnapshot;
 
 pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
-    vec![
+    #[cfg_attr(not(feature = "metrics"), allow(unused_mut))]
+    let mut out = vec![
         tool_turn_get(state),
         tool_turn_wait(state),
         tool_turn_cancel(state),
         tool_turn_list(state),
-        tool_metrics_summary(state),
-    ]
+    ];
+    #[cfg(feature = "metrics")]
+    out.push(tool_metrics_summary(state));
+    out
 }
 
 // -- metrics_summary -------------------------------------------------
 
+#[cfg(feature = "metrics")]
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct NoArgs {}
 
+#[cfg(feature = "metrics")]
 fn tool_metrics_summary(state: &ServerState) -> Tool {
     let state = state.clone();
     ToolBuilder::new("metrics_summary")

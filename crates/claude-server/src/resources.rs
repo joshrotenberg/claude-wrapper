@@ -7,24 +7,29 @@
 //! Today: a sanitized view of the server config and a list of the
 //! registered tools. Chat resources land with the L2.5 surface.
 
+#[cfg(feature = "chat")]
 use std::collections::HashMap;
 
 use serde_json::json;
+#[cfg(feature = "chat")]
+use tower_mcp::ResourceTemplateBuilder;
 use tower_mcp::protocol::ReadResourceResult;
 use tower_mcp::resource::ResourceTemplate;
-use tower_mcp::{Resource, ResourceBuilder, ResourceTemplateBuilder};
+use tower_mcp::{Resource, ResourceBuilder};
 
 use crate::state::ServerState;
 
 pub(crate) fn resources(state: &ServerState) -> Vec<Resource> {
-    vec![
-        resource_config(state),
-        resource_tools(state),
-        resource_chats(state),
-        resource_metrics(state),
-    ]
+    #[cfg_attr(not(any(feature = "chat", feature = "metrics")), allow(unused_mut))]
+    let mut out = vec![resource_config(state), resource_tools(state)];
+    #[cfg(feature = "chat")]
+    out.push(resource_chats(state));
+    #[cfg(feature = "metrics")]
+    out.push(resource_metrics(state));
+    out
 }
 
+#[cfg(feature = "metrics")]
 fn resource_metrics(state: &ServerState) -> Resource {
     let state = state.clone();
     ResourceBuilder::new("claude://metrics")
@@ -56,10 +61,18 @@ fn resource_metrics(state: &ServerState) -> Resource {
 
 /// MCP resource templates -- URI-templated resources that take
 /// path parameters (RFC 6570 Level 1, e.g. `{id}`).
-pub(crate) fn templates(state: &ServerState) -> Vec<ResourceTemplate> {
-    vec![template_chat_detail(state)]
+pub(crate) fn templates(_state: &ServerState) -> Vec<ResourceTemplate> {
+    #[cfg(feature = "chat")]
+    {
+        vec![template_chat_detail(_state)]
+    }
+    #[cfg(not(feature = "chat"))]
+    {
+        Vec::new()
+    }
 }
 
+#[cfg(feature = "chat")]
 fn template_chat_detail(state: &ServerState) -> ResourceTemplate {
     let state = state.clone();
     ResourceTemplateBuilder::new("claude://chats/{id}")
@@ -113,6 +126,7 @@ fn template_chat_detail(state: &ServerState) -> ResourceTemplate {
         })
 }
 
+#[cfg(feature = "chat")]
 fn resource_chats(state: &ServerState) -> Resource {
     let state = state.clone();
     ResourceBuilder::new("claude://chats")

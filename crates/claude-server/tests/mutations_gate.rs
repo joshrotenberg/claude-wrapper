@@ -3,6 +3,13 @@
 //! installation (MCP servers, plugins, marketplaces). The gating is
 //! the contract: with `policy.allow_mutations = false` the model
 //! literally cannot discover them.
+//!
+//! Only meaningful when the `mutations` Cargo feature is enabled.
+//! Without it the mutations module isn't compiled at all -- the
+//! "off" assertions still hold trivially, but `mutations_on_...`
+//! has no path that registers tools to assert against.
+
+#![cfg(feature = "mutations")]
 
 use claude_server::{ServerConfig, ServerPolicy, registered_tools};
 

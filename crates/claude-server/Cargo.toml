@@ -10,13 +10,49 @@ description = "MCP server layer over claude-wrapper"
 publish = false
 
 [features]
-default = ["sync-agent-turns"]
+# Default surface: 1:1 CLI passthrough + duplex chat sidecar +
+# process metrics + sync agent-turn variants. Tuned for the
+# common "MCP server over claude" use case. Larger surfaces
+# (mutations, artifacts, history, worktrees) are opt-in so
+# consumers who only want chat don't pay for them.
+default = ["chat", "core", "metrics", "sync-agent-turns"]
+
+# 1:1 mirror of `claude` CLI: query (async + sync), version,
+# cli_version, agents, auth_status, mcp_list/get,
+# plugin_list/validate, marketplace_list, auto_mode_*, doctor.
+# Plus the turn registry data layer (TurnRegistry) which the async
+# claude_query needs.
+core = []
+
+# Long-lived duplex chat surface: chat_open / send / list /
+# history / interrupt / budget / close / compact, the turn_*
+# control tools (turn_get / wait / cancel / list), and the
+# claude://chats[/{id}] resources. Built on DuplexSession +
+# Conversation in claude-wrapper.
+chat = []
+
+# Process counters + metrics_summary tool + claude://metrics
+# resource. Cheap; lets coordinator agents introspect spend.
+metrics = []
+
+# Mutating CLI passthrough: mcp_add / add_json / remove,
+# plugin_install / uninstall / enable / disable / update,
+# marketplace_add / remove / update. Double-gated: this Cargo
+# feature must be on AND `policy.allow_mutations = true` at
+# runtime. Compile-time gate strips the code entirely;
+# runtime gate hides the tools from `tools/list`.
+mutations = []
+
 # Sync (blocking) variants of agent-turn tools: chat_send_sync,
 # chat_send_stream_sync, claude_query_sync. On by default for
 # ergonomic builds. `default-features = false` drops them entirely
 # so the model literally can't discover blocking variants -- the
 # "agent sits waiting" failure mode becomes structurally impossible.
 sync-agent-turns = []
+
+# Convenience profile: the kitchen sink for Finestra-class
+# deployments that want the full surface including mutations.
+full = ["chat", "core", "metrics", "sync-agent-turns", "mutations"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }

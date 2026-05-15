@@ -87,6 +87,13 @@ struct ChatOpenInput {
     /// land in a side worktree instead of the current working tree.
     #[serde(default)]
     worktree_name: Option<String>,
+    /// Per-chat working directory override. The spawned `claude`
+    /// subprocess starts in this directory instead of the
+    /// server-default `ServerConfig::claude::working_dir`.
+    /// Lets a single server host chats against multiple project
+    /// roots simultaneously.
+    #[serde(default)]
+    working_dir: Option<std::path::PathBuf>,
 }
 
 fn tool_chat_open(state: &ServerState) -> Tool {
@@ -120,7 +127,13 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                     }
                 }
 
-                let session = DuplexSession::spawn(&state.claude, opts)
+                // Per-chat working_dir override clones the Claude
+                // client; without override we use the server-default.
+                let claude = match input.working_dir {
+                    Some(dir) => std::sync::Arc::new(state.claude.with_working_dir(dir)),
+                    None => state.claude.clone(),
+                };
+                let session = DuplexSession::spawn(&claude, opts)
                     .await
                     .map_err(super_internal)?;
                 let mut conv = Conversation::new(session);

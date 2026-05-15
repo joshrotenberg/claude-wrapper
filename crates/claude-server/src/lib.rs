@@ -54,13 +54,17 @@
 //!    `~/.claude/agents/`, plugin manifests, MCP server configs.
 //!    Not yet wired.
 
+#[cfg(feature = "chat")]
 mod chat;
 pub mod config;
+#[cfg(feature = "core")]
 mod core;
+#[cfg(feature = "mutations")]
 mod mutations;
 mod prompts;
 mod resources;
 mod state;
+#[cfg(feature = "chat")]
 mod turn_tools;
 mod turns;
 
@@ -142,15 +146,19 @@ fn build_router_inner(
              to discover the active surface.",
         );
 
+    #[cfg(feature = "core")]
     for tool in core::tools(&state) {
         router = router.tool(tool);
     }
+    #[cfg(feature = "chat")]
     for tool in chat::tools(&state) {
         router = router.tool(tool);
     }
+    #[cfg(feature = "chat")]
     for tool in turn_tools::tools(&state) {
         router = router.tool(tool);
     }
+    #[cfg(feature = "mutations")]
     if state.config.policy.allow_mutations {
         for tool in mutations::tools(&state) {
             router = router.tool(tool);
@@ -186,17 +194,38 @@ pub struct ToolInfo {
 /// assembling a transport. Useful for `claude-server tools`.
 pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<Vec<ToolInfo>> {
     let claude = build_claude(&config.claude)?;
+    #[cfg_attr(
+        not(any(feature = "core", feature = "chat", feature = "mutations")),
+        allow(unused_variables)
+    )]
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
 
-    let muts: Vec<_> = if state.config.policy.allow_mutations {
+    #[cfg(feature = "mutations")]
+    let muts: Vec<tower_mcp::Tool> = if state.config.policy.allow_mutations {
         mutations::tools(&state)
     } else {
         Vec::new()
     };
-    let mut all: Vec<ToolInfo> = core::tools(&state)
+    #[cfg(not(feature = "mutations"))]
+    let muts: Vec<tower_mcp::Tool> = Vec::new();
+
+    #[cfg(feature = "core")]
+    let core_tools = core::tools(&state);
+    #[cfg(not(feature = "core"))]
+    let core_tools: Vec<tower_mcp::Tool> = Vec::new();
+    #[cfg(feature = "chat")]
+    let chat_tools = chat::tools(&state);
+    #[cfg(not(feature = "chat"))]
+    let chat_tools: Vec<tower_mcp::Tool> = Vec::new();
+    #[cfg(feature = "chat")]
+    let turn_tool_list = turn_tools::tools(&state);
+    #[cfg(not(feature = "chat"))]
+    let turn_tool_list: Vec<tower_mcp::Tool> = Vec::new();
+
+    let mut all: Vec<ToolInfo> = core_tools
         .into_iter()
-        .chain(chat::tools(&state))
-        .chain(turn_tools::tools(&state))
+        .chain(chat_tools)
+        .chain(turn_tool_list)
         .chain(muts)
         .map(|t| ToolInfo {
             name: t.name.clone(),
