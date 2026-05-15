@@ -23,7 +23,6 @@ claude-wrapper = { path = "../claude-wrapper", default-features = false, feature
 tokio = { version = "1", features = ["process", "time", "io-util", "macros", "rt-multi-thread", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-mcp = { version = "0.10", features = ["http"] }
