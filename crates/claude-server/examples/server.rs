@@ -15,8 +15,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use claude_server::{
-    ServerConfig, build_router, build_router_with_notification_sender, notification_channel,
-    registered_tools,
+    ServerConfig, build_router_with_notification_sender, notification_channel, registered_tools,
 };
 use tower::Layer;
 use tower_mcp::HttpTransport;
@@ -78,14 +77,16 @@ async fn main() -> Result<()> {
             transport.run().await.context("stdio transport")?;
         }
         Cmd::ServeHttp { bind, bearer } => {
-            // HttpTransport currently creates its own notification
-            // channel and overrides the router's, so chat workers that
-            // fire `claude://chats/{id}` updates against state's channel
-            // won't reach HTTP subscribers today. Stdio works; HTTP
-            // subscription support needs an upstream tower-mcp change
-            // to accept an external sender.
-            let router = build_router(cfg).context("build_router")?;
-            let mut app = HttpTransport::new(router)
+            // Notification-aware construction, mirroring stdio. Chat
+            // workers fire `claude://chats/{id}` resource updates
+            // through `notif_tx`; the HTTP transport drains `notif_rx`
+            // and fans the items out to every live SSE session.
+            // Requires tower-mcp >= 0.10.1
+            // (HttpTransport::with_notifications).
+            let (notif_tx, notif_rx) = notification_channel(256);
+            let router = build_router_with_notification_sender(cfg, notif_tx)
+                .context("build_router_with_notification_sender")?;
+            let mut app = HttpTransport::with_notifications(router, notif_rx)
                 .layer(McpTracingLayer::new())
                 .into_router();
             if let Some(token) = bearer {
