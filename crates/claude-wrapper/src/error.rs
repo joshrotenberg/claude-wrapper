@@ -85,6 +85,16 @@ pub enum Error {
         /// The error message extracted from the CLI's control_response.
         message: String,
     },
+
+    /// A history-module operation (parsing or locating session
+    /// JSONL under `~/.claude/projects/`) failed in a way that
+    /// doesn't fit the I/O or JSON variants -- e.g. unknown
+    /// session id, missing user home directory.
+    #[error("history error: {message}")]
+    History {
+        /// Human-readable description of what went wrong.
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for Error {

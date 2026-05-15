@@ -297,6 +297,8 @@ pub mod dangerous;
 pub mod duplex;
 pub mod error;
 pub mod exec;
+#[cfg(feature = "json")]
+pub mod history;
 pub mod mcp_config;
 pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
