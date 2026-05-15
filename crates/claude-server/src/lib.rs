@@ -140,10 +140,35 @@ fn build_router_inner(
     let mut router = McpRouter::new()
         .server_info("claude-server", env!("CARGO_PKG_VERSION"))
         .instructions(
-            "MCP server exposing the Claude Code CLI via claude-wrapper. \
-             `claude.*` tools are 1:1 passthroughs to the CLI. \
-             Read `claude://config` and `claude://tools` resources \
-             to discover the active surface.",
+            "MCP server exposing the Claude Code CLI via claude-wrapper.\n\
+             \n\
+             THREE SURFACES:\n\
+               - claude_*  -- 1:1 mirror of the `claude` CLI\n\
+               - chat_*    -- long-lived multi-turn conversations\n\
+               - turn_*    -- async lifecycle for in-flight turns\n\
+             \n\
+             ASYNC BY DEFAULT for agent turns. The bare `chat_send` and \
+             `claude_query` return a turn_id immediately and run in the \
+             background -- poll with `turn_get`, block with `turn_wait`, \
+             cancel with `turn_cancel`. The `*_sync` variants hold your \
+             request connection open until the turn completes; reach for \
+             them only if you genuinely need to block.\n\
+             \n\
+             TYPICAL FLOWS:\n\
+               - Single-shot:   claude_query(prompt) -> turn_id; turn_wait(id)\n\
+               - Conversation:  chat_open -> chat_id; \
+             chat_send(id, prompt) -> turn_id; turn_wait; repeat; chat_close\n\
+               - Multi-project: chat_open(working_dir: \"/path/to/repo\")\n\
+               - Resume:        chat_open(resume: \"<session_id>\")\n\
+             \n\
+             DISCOVERY:\n\
+               - claude://tools      -- the full registered tool surface\n\
+               - claude://config     -- server config (env values redacted)\n\
+               - claude://chats      -- live chats with cost + turn count\n\
+               - claude://chats/{id} -- one chat's full history (subscribable)\n\
+               - claude://metrics    -- process counters; check spend mid-run\n\
+             \n\
+             For a longer walkthrough call `prompts/get usage_guide`.",
         );
 
     #[cfg(feature = "core")]

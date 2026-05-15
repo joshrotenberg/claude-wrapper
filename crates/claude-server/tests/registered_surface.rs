@@ -150,7 +150,7 @@ async fn resources_list_contains_config_and_tools() {
 }
 
 #[tokio::test]
-async fn prompts_list_contains_describe_server() {
+async fn prompts_list_contains_describe_server_and_usage_guide() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
     client.initialize().await;
@@ -160,7 +160,56 @@ async fn prompts_list_contains_describe_server() {
         .iter()
         .map(|p| p["name"].as_str().unwrap_or_default())
         .collect();
-    assert!(names.contains(&"describe_server"), "names: {names:?}");
+    for expected in ["describe_server", "usage_guide"] {
+        assert!(
+            names.contains(&expected),
+            "missing prompt {expected} in {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn usage_guide_prompt_returns_handbook() {
+    // The usage_guide prompt is the agent-facing handbook. Sanity-
+    // check shape (substantial body, mentions the design rules and
+    // the most important tools/resources) so a fresh agent that
+    // requests it gets useful onboarding context, not a stub.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .get_prompt("usage_guide", std::collections::HashMap::new())
+        .await;
+    let text: String = result
+        .messages
+        .iter()
+        .filter_map(|m| {
+            serde_json::to_value(&m.content).ok().and_then(|v| {
+                v.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            })
+        })
+        .collect();
+    assert!(
+        text.len() > 1000,
+        "usage_guide should be substantial; got {} bytes",
+        text.len()
+    );
+    for needle in [
+        "async-by-default",
+        "chat_send",
+        "claude_query",
+        "turn_wait",
+        "claude://chats",
+        "max_cost_usd",
+    ] {
+        assert!(
+            text.to_lowercase().contains(&needle.to_lowercase()),
+            "usage_guide should mention {needle}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------
