@@ -112,17 +112,28 @@ async fn fire_slash(
         }
         match guard.send(prompt).await {
             Ok(turn) => {
+                let result_text = turn.result_text().map(str::to_string);
+                let session_id = turn.session_id().map(str::to_string);
+                let cost = turn.total_cost_usd();
+                let dur = turn.duration_ms();
+                let cumulative = guard.total_cost_usd();
+                let total_turns = guard.total_turns();
+                drop(guard);
                 handle.complete(json!({
-                    "result": turn.result_text(),
-                    "session_id": turn.session_id(),
-                    "turn_cost_usd": turn.total_cost_usd(),
-                    "duration_ms": turn.duration_ms(),
-                    "cumulative_cost_usd": guard.total_cost_usd(),
-                    "total_turns": guard.total_turns(),
+                    "result": result_text,
+                    "session_id": session_id,
+                    "turn_cost_usd": cost,
+                    "duration_ms": dur,
+                    "cumulative_cost_usd": cumulative,
+                    "total_turns": total_turns,
                 }));
             }
-            Err(e) => handle.fail(e),
+            Err(e) => {
+                drop(guard);
+                handle.fail(e);
+            }
         }
+        state_for_worker.notify_resource_updated(format!("claude://chats/{chat_id_for_worker}"));
     });
 
     Ok(CallToolResult::json(json!({

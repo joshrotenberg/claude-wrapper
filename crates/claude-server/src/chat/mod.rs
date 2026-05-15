@@ -132,6 +132,7 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                     conv = conv.with_budget(b.build());
                 }
                 let id = state.insert_chat(conv).await;
+                state.notify_resources_list_changed();
                 Ok(CallToolResult::json(json!({
                     "chat_id": id,
                     "max_cost_usd": input.max_cost_usd,
@@ -215,6 +216,7 @@ fn tool_chat_send(state: &ServerState) -> Tool {
                                 let session_id = turn.session_id().map(str::to_string);
                                 let cumulative = guard.total_cost_usd();
                                 let total_turns = guard.total_turns();
+                                drop(guard);
                                 tracing::info!(
                                     cost_usd = ?cost,
                                     duration_ms = ?dur,
@@ -231,10 +233,14 @@ fn tool_chat_send(state: &ServerState) -> Tool {
                                 }));
                             }
                             Err(e) => {
+                                drop(guard);
                                 tracing::error!(error = %e, "turn failed");
                                 handle.fail(e);
                             }
                         }
+                        state_for_worker.notify_resource_updated(format!(
+                            "claude://chats/{chat_id_for_worker}"
+                        ));
                     }
                     .instrument(span),
                 );
@@ -279,14 +285,17 @@ fn tool_chat_send_sync(state: &ServerState) -> Tool {
                 })?;
                 let mut guard = conv.lock().await;
                 let turn = guard.send(input.prompt).await.map_err(super_internal)?;
-                Ok(CallToolResult::json(json!({
+                let body = json!({
                     "result": turn.result_text(),
                     "session_id": turn.session_id(),
                     "turn_cost_usd": turn.total_cost_usd(),
                     "duration_ms": turn.duration_ms(),
                     "cumulative_cost_usd": guard.total_cost_usd(),
                     "total_turns": guard.total_turns(),
-                })))
+                });
+                drop(guard);
+                state.notify_resource_updated(format!("claude://chats/{}", input.chat_id));
+                Ok(CallToolResult::json(body))
             }
         })
         .build()
@@ -356,14 +365,17 @@ fn tool_chat_send_stream_sync(state: &ServerState) -> Tool {
                 forwarder.abort();
                 let turn = send_result.map_err(super_internal)?;
 
-                Ok(CallToolResult::json(json!({
+                let body = json!({
                     "result": turn.result_text(),
                     "session_id": turn.session_id(),
                     "turn_cost_usd": turn.total_cost_usd(),
                     "duration_ms": turn.duration_ms(),
                     "cumulative_cost_usd": guard.total_cost_usd(),
                     "total_turns": guard.total_turns(),
-                })))
+                });
+                drop(guard);
+                state.notify_resource_updated(format!("claude://chats/{}", input.chat_id));
+                Ok(CallToolResult::json(body))
             },
         )
         .build()
@@ -599,6 +611,9 @@ fn tool_chat_close(state: &ServerState) -> Tool {
                         let conv = mutex.into_inner();
                         let _ = conv.close().await;
                     }
+                }
+                if existed {
+                    state.notify_resources_list_changed();
                 }
                 Ok(CallToolResult::json(json!({
                     "ok": true,

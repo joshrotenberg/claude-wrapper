@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
+use tower_mcp::context::{NotificationSender, ServerNotification};
 
 use claude_wrapper::Claude;
 use claude_wrapper::conversation::Conversation;
@@ -30,6 +31,12 @@ pub struct ServerState {
     /// fire a turn into the background and register a handle here;
     /// `turn_get` / `turn_wait` / `turn_cancel` operate on it.
     pub turns: Arc<TurnRegistry>,
+    /// Optional notification sender. Set when the server is built
+    /// via [`crate::build_router_with_notification_sender`] so chat
+    /// workers can fire `notifications/resources/updated` for
+    /// `claude://chats/{id}` after a turn settles. None means
+    /// notifications no-op (the legacy `build_router` path).
+    pub notifier: Option<NotificationSender>,
 }
 
 impl ServerState {
@@ -39,7 +46,32 @@ impl ServerState {
             config,
             chats: Arc::new(RwLock::new(HashMap::new())),
             turns: Arc::new(TurnRegistry::new()),
+            notifier: None,
         }
+    }
+
+    /// Construct with an attached notification sender. Workers will
+    /// fire `notifications/resources/updated` events through this
+    /// channel; the corresponding receiver feeds the transport.
+    pub fn with_notifier(mut self, notifier: NotificationSender) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Fire a `notifications/resources/updated` for `uri` if a
+    /// notifier is attached. Best-effort -- a full channel or
+    /// missing notifier is a silent no-op.
+    pub fn notify_resource_updated(&self, uri: impl Into<String>) {
+        let Some(tx) = &self.notifier else { return };
+        let _ = tx.try_send(ServerNotification::ResourceUpdated { uri: uri.into() });
+    }
+
+    /// Fire `notifications/resources/list_changed`. Best-effort.
+    /// Used when a chat opens or closes -- the `claude://chats` list
+    /// resource shape changed.
+    pub fn notify_resources_list_changed(&self) {
+        let Some(tx) = &self.notifier else { return };
+        let _ = tx.try_send(ServerNotification::ResourcesListChanged);
     }
 
     /// Insert a chat and return its id.

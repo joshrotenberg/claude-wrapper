@@ -14,9 +14,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use claude_server::{ServerConfig, build_router, registered_tools};
+use claude_server::{
+    ServerConfig, build_router, build_router_with_notification_sender, notification_channel,
+    registered_tools,
+};
+use tower::Layer;
+use tower_mcp::HttpTransport;
 use tower_mcp::middleware::McpTracingLayer;
-use tower_mcp::{HttpTransport, StdioTransport};
+use tower_mcp::transport::stdio::GenericStdioTransport;
 
 /// Raw MCP server CLI for `claude-server`. Wires the library router
 /// to a transport. Reach for this when you want a working binary;
@@ -61,11 +66,24 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Cmd::Serve) {
         Cmd::Serve => {
-            let router = build_router(cfg).context("build_router")?;
-            let mut transport = StdioTransport::new(router).layer(McpTracingLayer::new());
+            // Notification-aware construction: we own the channel, share
+            // its sender with both the library (so chat workers fire
+            // claude://chats/{id} resource updates) and the router; the
+            // receiver feeds the stdio transport.
+            let (notif_tx, notif_rx) = notification_channel(256);
+            let router = build_router_with_notification_sender(cfg, notif_tx)
+                .context("build_router_with_notification_sender")?;
+            let service = McpTracingLayer::new().layer(router);
+            let mut transport = GenericStdioTransport::with_notifications(service, notif_rx);
             transport.run().await.context("stdio transport")?;
         }
         Cmd::ServeHttp { bind, bearer } => {
+            // HttpTransport currently creates its own notification
+            // channel and overrides the router's, so chat workers that
+            // fire `claude://chats/{id}` updates against state's channel
+            // won't reach HTTP subscribers today. Stdio works; HTTP
+            // subscription support needs an upstream tower-mcp change
+            // to accept an external sender.
             let router = build_router(cfg).context("build_router")?;
             let mut app = HttpTransport::new(router)
                 .layer(McpTracingLayer::new())

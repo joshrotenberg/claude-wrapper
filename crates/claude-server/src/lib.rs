@@ -67,21 +67,64 @@ mod turns;
 use std::sync::Arc;
 
 use tower_mcp::McpRouter;
+use tower_mcp::context::NotificationSender;
 
 pub use self::config::{ClaudeConfig, ServerConfig, ServerPolicy, TurnConfig};
 pub use self::state::ServerState;
+pub use tower_mcp::context::{NotificationReceiver, notification_channel};
 
 use claude_wrapper::Claude;
 
-/// Build the MCP router from a [`ServerConfig`].
+/// Build the MCP router from a [`ServerConfig`] without notification
+/// support. Subscriptions to `claude://chats/{id}` (or any other
+/// resource) won't fire `notifications/resources/updated` -- callers
+/// have to poll. Suitable for stdio-only deployments where the
+/// transport doesn't surface notifications anyway.
 ///
-/// Constructs a [`Claude`] client from [`ServerConfig::claude`],
-/// builds [`ServerState`], and registers the L2 CLI passthrough
-/// surface plus resources and prompts. Hand the returned router to a
-/// transport (stdio, HTTP, etc.) to serve it.
+/// For deployments that want subscription updates (UIs, HTTP
+/// dashboards), use [`build_router_with_notification_sender`].
 pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRouter> {
+    build_router_inner(config, None)
+}
+
+/// Build the MCP router with an attached notification sender.
+///
+/// Wires `tx` into both [`ServerState`] (so chat workers can fire
+/// `notifications/resources/updated` after a turn settles) AND into
+/// the underlying [`McpRouter`] (so router-internal events go down
+/// the same channel). The corresponding [`NotificationReceiver`]
+/// must be plumbed into the transport (e.g.
+/// `GenericStdioTransport::with_notifications` or `HttpTransport`'s
+/// notification handling).
+///
+/// Typical wiring:
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use claude_server::{build_router_with_notification_sender, notification_channel};
+///
+/// let (tx, rx) = notification_channel(256);
+/// let router = build_router_with_notification_sender(Default::default(), tx)?;
+/// // ... hand `router` and `rx` to a notification-aware transport
+/// # let _ = (router, rx);
+/// # Ok(()) }
+/// ```
+pub fn build_router_with_notification_sender(
+    config: ServerConfig,
+    tx: NotificationSender,
+) -> claude_wrapper::error::Result<McpRouter> {
+    build_router_inner(config, Some(tx))
+}
+
+fn build_router_inner(
+    config: ServerConfig,
+    notifier: Option<NotificationSender>,
+) -> claude_wrapper::error::Result<McpRouter> {
     let claude = build_claude(&config.claude)?;
-    let state = ServerState::new(Arc::new(claude), Arc::new(config));
+    let mut state = ServerState::new(Arc::new(claude), Arc::new(config));
+    if let Some(ref tx) = notifier {
+        state = state.with_notifier(tx.clone());
+    }
 
     // Spawn the turn-registry TTL sweeper. Runs forever until the
     // registry's last Arc is dropped (the JoinHandle is intentionally
@@ -122,6 +165,10 @@ pub fn build_router(config: ServerConfig) -> claude_wrapper::error::Result<McpRo
     }
     for prompt in prompts::prompts(&state) {
         router = router.prompt(prompt);
+    }
+
+    if let Some(tx) = notifier {
+        router = router.with_notification_sender(tx);
     }
 
     Ok(router)
