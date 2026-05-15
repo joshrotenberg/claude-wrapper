@@ -43,10 +43,10 @@
 //!
 //! claude-server exposes three tool surfaces, layered by intent:
 //!
-//! 1. **Core** ([`core`]) -- 1:1 mirror of the `claude` CLI. Every
+//! 1. **Core** -- 1:1 mirror of the `claude` CLI. Every
 //!    subcommand you could shell out to lives here, with the
 //!    deliberate exception of interactive (no `-p`) mode. Always on.
-//! 2. **Chat** ([`chat`]) -- the duplex sidecar. We hold long-lived
+//! 2. **Chat** -- the duplex sidecar. We hold long-lived
 //!    `claude` subprocesses, manage turn ordering, expose cost and
 //!    history, and stream events back as MCP progress notifications.
 //!    This is where the server earns its keep over a dumb passthrough.
