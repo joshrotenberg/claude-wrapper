@@ -305,6 +305,8 @@ pub struct DuplexOptions {
     model: Option<String>,
     system_prompt: Option<String>,
     append_system_prompt: Option<String>,
+    resume: Option<String>,
+    continue_session: bool,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
@@ -329,6 +331,40 @@ impl DuplexOptions {
     #[must_use]
     pub fn append_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.append_system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Resume a prior session by id (`--resume <session_id>`).
+    ///
+    /// Mirrors [`QueryCommand::resume`](crate::QueryCommand::resume)
+    /// for the duplex path. The spawned `claude` process picks up the
+    /// conversation that produced `session_id` and continues it; turns
+    /// sent through [`DuplexSession::send`] append to the existing
+    /// history rather than starting fresh.
+    ///
+    /// Use case: a host (IDE, MCP server, agent backend) wants to
+    /// upgrade a passive on-disk session to a live duplex one --
+    /// pulls the `session_id` out of the existing JSONL log, opens a
+    /// duplex session here, and the next turn extends the same
+    /// conversation.
+    ///
+    /// `resume` and [`Self::continue_session`] are mutually exclusive
+    /// at the CLI; passing both lets the CLI decide (it errors today).
+    #[must_use]
+    pub fn resume(mut self, session_id: impl Into<String>) -> Self {
+        self.resume = Some(session_id.into());
+        self
+    }
+
+    /// Continue the most recent session in the current working
+    /// directory (`--continue`).
+    ///
+    /// Mirrors [`QueryCommand::continue_session`](crate::QueryCommand::continue_session)
+    /// for the duplex path. Use [`Self::resume`] to pick a specific
+    /// session id; use this when "the last one" is what you want.
+    #[must_use]
+    pub fn continue_session(mut self) -> Self {
+        self.continue_session = true;
         self
     }
 
@@ -393,6 +429,13 @@ impl DuplexOptions {
         if let Some(p) = self.append_system_prompt {
             args.push("--append-system-prompt".to_string());
             args.push(p);
+        }
+        if let Some(id) = self.resume {
+            args.push("--resume".to_string());
+            args.push(id);
+        }
+        if self.continue_session {
+            args.push("--continue".to_string());
         }
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
@@ -1283,6 +1326,52 @@ mod tests {
             .into_args();
         // Last two entries should be the additional args, in order.
         assert_eq!(&args[args.len() - 2..], &["--add-dir", "/tmp/foo"]);
+    }
+
+    #[test]
+    fn into_args_includes_resume_when_set() {
+        let args = DuplexOptions::default().resume("abc-123").into_args();
+        assert!(args.windows(2).any(|w| w == ["--resume", "abc-123"]));
+    }
+
+    #[test]
+    fn into_args_omits_resume_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(
+            !args.iter().any(|a| a == "--resume"),
+            "--resume should not appear without an explicit resume(...) call; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_includes_continue_when_set() {
+        let args = DuplexOptions::default().continue_session().into_args();
+        assert!(args.iter().any(|a| a == "--continue"));
+    }
+
+    #[test]
+    fn into_args_omits_continue_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--continue"));
+    }
+
+    #[test]
+    fn resume_lands_before_additional_args() {
+        // Catches the same class of bug as QueryCommand::execute_json
+        // had: a flag appended after the user-supplied raw args (which
+        // typically include `--`) gets eaten as a positional. Resume
+        // must precede any caller-injected `arg(...)`.
+        let args = DuplexOptions::default()
+            .resume("xyz")
+            .arg("--")
+            .arg("trailing")
+            .into_args();
+        let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
+        let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            resume_pos < dash_dash_pos,
+            "--resume must precede `--` separator; got {args:?}"
+        );
     }
 
     #[test]
