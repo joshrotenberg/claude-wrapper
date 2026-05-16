@@ -190,6 +190,12 @@ within a single chat queue.
   `is_main`, `is_detached`, `is_bare`, `is_locked`, `is_prunable`. \
   Useful after `chat_open(worktree=true, worktree_name=X)` to see \
   what got spawned.
+- `claude://jobs` (jobs feature) -- background-job state from \
+  `~/.claude/jobs/` -- the same on-disk store the `claude agents` \
+  TUI writes to. Pair with `claude://jobs/{short_id}` for one \
+  job's full record. Same shape as the `claude_job_list` / \
+  `claude_job_get` tools. Each job carries a `session_path` -- \
+  cross-link to the `history` feature to read the full transcript.
 
 Before firing an expensive turn, `metrics_summary` lets you check \
 cumulative spend. Open chats with `max_cost_usd` to enforce a hard \

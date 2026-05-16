@@ -65,6 +65,12 @@
 //!    introspection. Tools: `worktree_list`. Resources:
 //!    `claude://worktrees`. Useful for hosts orchestrating
 //!    `chat_open(worktree=true)` to inspect what they've spawned.
+//! 6. **Jobs** (`jobs` feature) -- read-only access to background-job
+//!    state Claude Code's `claude agents` daemon writes to
+//!    `~/.claude/jobs/`. Tools: `claude_job_list`,
+//!    `claude_job_get`. Resources: `claude://jobs`,
+//!    `claude://jobs/{short_id}`. Cross-link with the `history`
+//!    feature via the job's `session_path`.
 
 #[cfg(feature = "artifacts")]
 mod artifacts;
@@ -76,6 +82,8 @@ mod core;
 mod errors;
 #[cfg(feature = "history")]
 mod history;
+#[cfg(feature = "jobs")]
+mod jobs;
 #[cfg(feature = "mutations")]
 mod mutations;
 mod prompts;
@@ -191,6 +199,8 @@ fn build_router_inner(
                - claude://agents        -- user-level agents (artifacts feature)\n\
                - claude://agents/{stem} -- one agent's full record + body\n\
                - claude://worktrees     -- git worktrees (worktrees feature)\n\
+               - claude://jobs          -- background-job state (jobs feature)\n\
+               - claude://jobs/{id}     -- one job's full timeline + state\n\
              \n\
              For a longer walkthrough call `prompts/get usage_guide`.",
         );
@@ -257,6 +267,18 @@ fn build_router_inner(
             router = router.resource_template(template);
         }
     }
+    #[cfg(feature = "jobs")]
+    {
+        for tool in jobs::tools(&state) {
+            router = router.tool(tool);
+        }
+        for resource in jobs::resources(&state) {
+            router = router.resource(resource);
+        }
+        for template in jobs::templates(&state) {
+            router = router.resource_template(template);
+        }
+    }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
@@ -293,7 +315,8 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
             feature = "mutations",
             feature = "history",
             feature = "artifacts",
-            feature = "worktrees"
+            feature = "worktrees",
+            feature = "jobs"
         )),
         allow(unused_variables)
     )]
@@ -332,6 +355,11 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     #[cfg(not(feature = "worktrees"))]
     let worktrees_tools: Vec<tower_mcp::Tool> = Vec::new();
 
+    #[cfg(feature = "jobs")]
+    let jobs_tools = jobs::tools(&state);
+    #[cfg(not(feature = "jobs"))]
+    let jobs_tools: Vec<tower_mcp::Tool> = Vec::new();
+
     #[cfg(feature = "core")]
     let core_tools = core::tools(&state);
     #[cfg(not(feature = "core"))]
@@ -354,6 +382,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
         .chain(artifacts_tools)
         .chain(artifacts_mut_tools)
         .chain(worktrees_tools)
+        .chain(jobs_tools)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

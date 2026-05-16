@@ -63,6 +63,16 @@ artifacts = []
 # to inspect the worktrees they've spawned.
 worktrees = []
 
+# Read-only access to background-job state on disk
+# (`~/.claude/jobs/<short-id>/state.json` + `timeline.jsonl`).
+# Tools: claude_job_list, claude_job_get. Resources: claude://jobs,
+# claude://jobs/{short_id}. Built on claude_wrapper::jobs; no new
+# deps. Lets coordinator agents reason about background work
+# launched via `claude agents` (which writes the same on-disk
+# state). Read-only by design -- the dispatch protocol is
+# undocumented.
+jobs = []
+
 # Sync (blocking) variants of agent-turn tools: chat_send_sync,
 # chat_send_stream_sync, claude_query_sync. On by default for
 # ergonomic builds. `default-features = false` drops them entirely
@@ -73,7 +83,7 @@ sync-agent-turns = []
 # Convenience profile: the kitchen sink for Finestra-class
 # deployments that want the full surface including mutations
 # and historical session reads.
-full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts", "worktrees"]
+full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts", "worktrees", "jobs"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }

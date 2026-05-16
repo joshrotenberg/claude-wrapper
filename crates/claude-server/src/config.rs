@@ -39,6 +39,12 @@ pub struct ServerConfig {
     /// want a per-server "default repo." Only consulted when the
     /// `worktrees` Cargo feature is enabled.
     pub worktrees_root: Option<PathBuf>,
+    /// Override the on-disk jobs root that the `jobs` feature reads
+    /// from. Defaults to `~/.claude/jobs`. Same semantics as
+    /// [`Self::history_root`] -- intended for tests and non-default
+    /// Claude Code installs. Only consulted when the `jobs` Cargo
+    /// feature is enabled.
+    pub jobs_root: Option<PathBuf>,
 }
 
 /// Server-level policy flags. Mutating tools (mcp_add, plugin_install,
