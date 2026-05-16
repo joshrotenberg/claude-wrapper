@@ -6,6 +6,7 @@ pub mod install;
 pub mod marketplace;
 pub mod mcp;
 pub mod plugin;
+pub mod project;
 pub mod query;
 pub mod raw;
 pub mod update;
