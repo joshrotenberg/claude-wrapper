@@ -310,6 +310,7 @@ pub mod streaming;
 pub mod tool_pattern;
 pub mod types;
 pub mod version;
+pub mod worktrees;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

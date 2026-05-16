@@ -108,6 +108,16 @@ pub enum Error {
         message: String,
     },
 
+    /// A worktrees-module operation (running or parsing
+    /// `git worktree list --porcelain`) failed in a way that
+    /// doesn't fit the I/O variant -- e.g. git not on PATH,
+    /// path isn't a git repo, malformed porcelain output.
+    #[error("worktrees error: {message}")]
+    Worktrees {
+        /// Human-readable description of what went wrong.
+        message: String,
+    },
+
     /// A `claude` invocation failed and looked auth-shaped to the
     /// classifier. Hosts can match on this variant to trigger a
     /// re-auth flow, surface a clean message, or skip retries.
