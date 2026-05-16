@@ -319,6 +319,7 @@ pub use budget::{BudgetBuilder, BudgetTracker};
 pub use command::ClaudeCommand;
 #[cfg(feature = "sync")]
 pub use command::ClaudeCommandSyncExt;
+#[allow(deprecated)]
 pub use command::agents::AgentsCommand;
 pub use command::auth::{
     AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, SetupTokenCommand,
