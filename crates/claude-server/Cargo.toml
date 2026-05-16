@@ -57,6 +57,12 @@ history = []
 # come in a follow-up under the existing `mutations` feature.
 artifacts = []
 
+# Read-only git worktree introspection. Tools: worktree_list.
+# Resources: claude://worktrees. Built on claude_wrapper::worktrees;
+# no new deps. Useful for hosts orchestrating chat_open(worktree=true)
+# to inspect the worktrees they've spawned.
+worktrees = []
+
 # Sync (blocking) variants of agent-turn tools: chat_send_sync,
 # chat_send_stream_sync, claude_query_sync. On by default for
 # ergonomic builds. `default-features = false` drops them entirely
@@ -67,7 +73,7 @@ sync-agent-turns = []
 # Convenience profile: the kitchen sink for Finestra-class
 # deployments that want the full surface including mutations
 # and historical session reads.
-full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts"]
+full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts", "worktrees"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }

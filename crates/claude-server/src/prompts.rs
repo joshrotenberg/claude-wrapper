@@ -178,6 +178,14 @@ within a single chat queue.
   Cargo feature AND `policy.allow_mutations = true` at runtime; \
   when on, `agent_write` is upsert by default (`if_not_exists: true` \
   for create-only).
+- `claude://worktrees` (worktrees feature) -- git worktrees for \
+  the server's default repo (config.worktrees_root, then \
+  config.claude.working_dir, then process cwd). Same shape as the \
+  `worktree_list` tool, which also accepts an optional `repo_path` \
+  to target a different repo. Each entry: `path`, `head`, `branch`, \
+  `is_main`, `is_detached`, `is_bare`, `is_locked`, `is_prunable`. \
+  Useful after `chat_open(worktree=true, worktree_name=X)` to see \
+  what got spawned.
 
 Before firing an expensive turn, `metrics_summary` lets you check \
 cumulative spend. Open chats with `max_cost_usd` to enforce a hard \

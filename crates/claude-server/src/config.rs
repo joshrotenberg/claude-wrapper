@@ -31,6 +31,14 @@ pub struct ServerConfig {
     /// non-default Claude Code installs. Only consulted when the
     /// `artifacts` Cargo feature is enabled.
     pub agents_root: Option<PathBuf>,
+    /// Override the repository path that the `worktrees` feature
+    /// targets when no explicit `repo_path` is passed to
+    /// `worktree_list`. Defaults to [`ClaudeConfig::working_dir`]
+    /// when unset, or the process cwd if neither is set. Useful for
+    /// tests (point at a `git init`'d tempdir) and for servers that
+    /// want a per-server "default repo." Only consulted when the
+    /// `worktrees` Cargo feature is enabled.
+    pub worktrees_root: Option<PathBuf>,
 }
 
 /// Server-level policy flags. Mutating tools (mcp_add, plugin_install,

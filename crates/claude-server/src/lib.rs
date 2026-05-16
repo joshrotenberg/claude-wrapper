@@ -55,11 +55,16 @@
 //!    `claude_project_list`, `claude_session_list`,
 //!    `claude_session_get`. Resources: `claude://projects`,
 //!    `claude://projects/{slug}`, `claude://sessions/{id}`.
-//! 4. **Artifacts** (`artifacts` feature) -- read-only access to
-//!    `~/.claude/agents/<stem>.md`. Tools: `agent_list`, `agent_get`.
-//!    Resources: `claude://agents`, `claude://agents/{file_stem}`.
-//!    Skills CRUD and write/delete on agents are planned but not
-//!    yet wired.
+//! 4. **Artifacts** (`artifacts` feature) -- access to
+//!    `~/.claude/agents/<stem>.md`. Read tools: `agent_list`,
+//!    `agent_get`. Mutating tools (gated by `mutations` Cargo
+//!    feature + runtime `policy.allow_mutations`): `agent_write`,
+//!    `agent_delete`. Resources: `claude://agents`,
+//!    `claude://agents/{file_stem}`. Skills CRUD is planned.
+//! 5. **Worktrees** (`worktrees` feature) -- read-only git worktree
+//!    introspection. Tools: `worktree_list`. Resources:
+//!    `claude://worktrees`. Useful for hosts orchestrating
+//!    `chat_open(worktree=true)` to inspect what they've spawned.
 
 #[cfg(feature = "artifacts")]
 mod artifacts;
@@ -79,6 +84,8 @@ mod state;
 #[cfg(feature = "chat")]
 mod turn_tools;
 mod turns;
+#[cfg(feature = "worktrees")]
+mod worktrees;
 
 use std::sync::Arc;
 
@@ -183,6 +190,7 @@ fn build_router_inner(
                - claude://sessions/{id} -- full parsed JSONL log for a session\n\
                - claude://agents        -- user-level agents (artifacts feature)\n\
                - claude://agents/{stem} -- one agent's full record + body\n\
+               - claude://worktrees     -- git worktrees (worktrees feature)\n\
              \n\
              For a longer walkthrough call `prompts/get usage_guide`.",
         );
@@ -237,6 +245,18 @@ fn build_router_inner(
         }
         tracing::info!("artifacts mutating tools registered (policy.allow_mutations = true)");
     }
+    #[cfg(feature = "worktrees")]
+    {
+        for tool in worktrees::tools(&state) {
+            router = router.tool(tool);
+        }
+        for resource in worktrees::resources(&state) {
+            router = router.resource(resource);
+        }
+        for template in worktrees::templates(&state) {
+            router = router.resource_template(template);
+        }
+    }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
@@ -272,7 +292,8 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
             feature = "chat",
             feature = "mutations",
             feature = "history",
-            feature = "artifacts"
+            feature = "artifacts",
+            feature = "worktrees"
         )),
         allow(unused_variables)
     )]
@@ -306,6 +327,11 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     #[cfg(not(all(feature = "artifacts", feature = "mutations")))]
     let artifacts_mut_tools: Vec<tower_mcp::Tool> = Vec::new();
 
+    #[cfg(feature = "worktrees")]
+    let worktrees_tools = worktrees::tools(&state);
+    #[cfg(not(feature = "worktrees"))]
+    let worktrees_tools: Vec<tower_mcp::Tool> = Vec::new();
+
     #[cfg(feature = "core")]
     let core_tools = core::tools(&state);
     #[cfg(not(feature = "core"))]
@@ -327,6 +353,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
         .chain(history_tools)
         .chain(artifacts_tools)
         .chain(artifacts_mut_tools)
+        .chain(worktrees_tools)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),
