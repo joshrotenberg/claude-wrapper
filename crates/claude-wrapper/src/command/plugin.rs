@@ -130,10 +130,17 @@ impl ClaudeCommand for PluginInstallCommand {
 }
 
 /// Uninstall a plugin.
+///
+/// **Headless callers should pass [`Self::yes`]** -- the underlying
+/// CLI requires `-y` whenever stdin/stdout isn't a TTY and will
+/// otherwise wait on a prompt that no one is around to answer.
 #[derive(Debug, Clone)]
 pub struct PluginUninstallCommand {
     plugin: String,
     scope: Option<Scope>,
+    keep_data: bool,
+    prune: bool,
+    yes: bool,
 }
 
 impl PluginUninstallCommand {
@@ -143,6 +150,9 @@ impl PluginUninstallCommand {
         Self {
             plugin: plugin.into(),
             scope: None,
+            keep_data: false,
+            prune: false,
+            yes: false,
         }
     }
 
@@ -150,6 +160,34 @@ impl PluginUninstallCommand {
     #[must_use]
     pub fn scope(mut self, scope: Scope) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Preserve the plugin's persistent data directory
+    /// (`~/.claude/plugins/data/{id}/`) on uninstall (`--keep-data`).
+    /// Default: data is removed alongside the plugin.
+    #[must_use]
+    pub fn keep_data(mut self) -> Self {
+        self.keep_data = true;
+        self
+    }
+
+    /// Also remove auto-installed dependencies that are no longer
+    /// needed (`--prune`). Requires [`Self::yes`] in non-interactive
+    /// contexts (which the wrapper always is).
+    #[must_use]
+    pub fn prune(mut self) -> Self {
+        self.prune = true;
+        self
+    }
+
+    /// Skip the `--prune` confirmation prompt (`-y`). **Required for
+    /// non-TTY callers** -- without it, the CLI will hang waiting on
+    /// stdin. Every wrapper consumer running under `execute()` is
+    /// non-TTY by definition, so you almost always want this on.
+    #[must_use]
+    pub fn yes(mut self) -> Self {
+        self.yes = true;
         self
     }
 }
@@ -162,6 +200,15 @@ impl ClaudeCommand for PluginUninstallCommand {
         if let Some(ref scope) = self.scope {
             args.push("--scope".to_string());
             args.push(scope.as_arg().to_string());
+        }
+        if self.keep_data {
+            args.push("--keep-data".to_string());
+        }
+        if self.prune {
+            args.push("--prune".to_string());
+        }
+        if self.yes {
+            args.push("--yes".to_string());
         }
         args.push(self.plugin.clone());
         args
@@ -472,6 +519,108 @@ impl ClaudeCommand for PluginTagCommand {
     }
 }
 
+/// Show a plugin's component inventory and projected token cost
+/// (`claude plugin details <name>`).
+#[derive(Debug, Clone)]
+pub struct PluginDetailsCommand {
+    plugin: String,
+}
+
+impl PluginDetailsCommand {
+    /// Create a details command for the given plugin name.
+    #[must_use]
+    pub fn new(plugin: impl Into<String>) -> Self {
+        Self {
+            plugin: plugin.into(),
+        }
+    }
+}
+
+impl ClaudeCommand for PluginDetailsCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        vec![
+            "plugin".to_string(),
+            "details".to_string(),
+            self.plugin.clone(),
+        ]
+    }
+
+    #[cfg(feature = "async")]
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
+/// Remove auto-installed dependencies that are no longer needed
+/// (`claude plugin prune` -- alias `autoremove`).
+///
+/// Non-TTY callers should pass [`Self::yes`] -- the underlying CLI
+/// requires `-y` whenever stdin/stdout isn't a TTY and will
+/// otherwise wait on a confirmation prompt.
+#[derive(Debug, Clone, Default)]
+pub struct PluginPruneCommand {
+    dry_run: bool,
+    scope: Option<Scope>,
+    yes: bool,
+}
+
+impl PluginPruneCommand {
+    /// Create a new prune command.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Print what would be removed without removing anything
+    /// (`--dry-run`).
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
+    /// Set the scope (`-s/--scope`). Default: `user`.
+    #[must_use]
+    pub fn scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Skip the confirmation prompt (`-y`). **Required for non-TTY
+    /// callers** -- without it the CLI will hang waiting on stdin.
+    #[must_use]
+    pub fn yes(mut self) -> Self {
+        self.yes = true;
+        self
+    }
+}
+
+impl ClaudeCommand for PluginPruneCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["plugin".to_string(), "prune".to_string()];
+        if self.dry_run {
+            args.push("--dry-run".to_string());
+        }
+        if let Some(ref scope) = self.scope {
+            args.push("--scope".to_string());
+            args.push(scope.as_arg().to_string());
+        }
+        if self.yes {
+            args.push("--yes".to_string());
+        }
+        args
+    }
+
+    #[cfg(feature = "async")]
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +650,38 @@ mod tests {
         assert_eq!(
             ClaudeCommand::args(&cmd),
             vec!["plugin", "uninstall", "old-plugin"]
+        );
+    }
+
+    #[test]
+    fn test_plugin_uninstall_with_all_flags() {
+        let cmd = PluginUninstallCommand::new("old-plugin")
+            .scope(Scope::User)
+            .keep_data()
+            .prune()
+            .yes();
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec![
+                "plugin",
+                "uninstall",
+                "--scope",
+                "user",
+                "--keep-data",
+                "--prune",
+                "--yes",
+                "old-plugin"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_plugin_uninstall_yes_alone() {
+        // Most common headless case: just need to skip the prompt.
+        let cmd = PluginUninstallCommand::new("p").yes();
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec!["plugin", "uninstall", "--yes", "p"]
         );
     }
 
@@ -578,6 +759,40 @@ mod tests {
                 "upstream",
                 "./plugin",
             ]
+        );
+    }
+
+    #[test]
+    fn test_plugin_details() {
+        let cmd = PluginDetailsCommand::new("some-plugin");
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec!["plugin", "details", "some-plugin"]
+        );
+    }
+
+    #[test]
+    fn test_plugin_prune_default() {
+        let cmd = PluginPruneCommand::new();
+        assert_eq!(ClaudeCommand::args(&cmd), vec!["plugin", "prune"]);
+    }
+
+    #[test]
+    fn test_plugin_prune_all_flags() {
+        let cmd = PluginPruneCommand::new().dry_run().scope(Scope::User).yes();
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec!["plugin", "prune", "--dry-run", "--scope", "user", "--yes"]
+        );
+    }
+
+    #[test]
+    fn test_scope_managed_renders_as_arg() {
+        // `claude plugin update --scope managed` added in 2.1.143.
+        let cmd = PluginUpdateCommand::new("p").scope(Scope::Managed);
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec!["plugin", "update", "--scope", "managed", "p"]
         );
     }
 }

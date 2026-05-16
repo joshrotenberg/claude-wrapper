@@ -207,7 +207,7 @@ impl Effort {
 }
 
 /// Scope for MCP and plugin commands.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Scope {
     /// Local scope (current directory).
     #[default]
@@ -216,6 +216,10 @@ pub enum Scope {
     User,
     /// Project scope.
     Project,
+    /// Managed scope -- plugins installed by an outer manager
+    /// rather than directly by the user. Accepted by `claude plugin
+    /// update --scope managed` as of CLI 2.1.143.
+    Managed,
 }
 
 impl Scope {
@@ -224,6 +228,7 @@ impl Scope {
             Self::Local => "local",
             Self::User => "user",
             Self::Project => "project",
+            Self::Managed => "managed",
         }
     }
 }
