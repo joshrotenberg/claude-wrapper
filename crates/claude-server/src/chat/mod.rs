@@ -106,6 +106,23 @@ struct ChatOpenInput {
     /// `resume` at the CLI level; passing both lets the CLI decide.
     #[serde(default)]
     continue_session: Option<bool>,
+    /// Pin this chat to a named subagent (`claude --agent <name>`).
+    /// Resolved by the CLI from inline `agents_json` definitions
+    /// first, then user-level `~/.claude/agents/<name>.md` files.
+    /// Caveat: as of Claude Code 2.1.143, the CLI silently ignores
+    /// an unknown name and falls back to default. Validate against
+    /// `agent_list` / `agent_get` (artifacts feature) if you want
+    /// hard "must exist" semantics.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Inline subagent definitions for this chat
+    /// (`claude --agents <json>`). JSON object keyed by agent name,
+    /// each value carrying at least `description` and `prompt`.
+    /// Inline definitions override on-disk
+    /// `~/.claude/agents/*.md` of the same name. Pair with
+    /// `agent` to select which one to use as the chat's persona.
+    #[serde(default)]
+    agents_json: Option<String>,
 }
 
 fn tool_chat_open(state: &ServerState) -> Tool {
@@ -140,6 +157,12 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                     input.worktree_name.is_some() || input.worktree.unwrap_or(false);
                 if want_worktree {
                     opts = opts.worktree(input.worktree_name.as_deref());
+                }
+                if let Some(json) = input.agents_json {
+                    opts = opts.agents_json(json);
+                }
+                if let Some(name) = input.agent {
+                    opts = opts.agent(name);
                 }
 
                 // Per-chat working_dir override clones the Claude

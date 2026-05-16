@@ -81,6 +81,33 @@ async fn chat_open_schema_exposes_resume_fields() {
 }
 
 #[tokio::test]
+async fn chat_open_schema_exposes_agent_fields() {
+    // Wired through after wrapper PR #595 (typed --agent / --agents
+    // builders). Both fields should be discoverable so a coordinator
+    // agent can pin a chat to a known persona without out-of-band
+    // knowledge of CLI flag names.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let tools = client.list_tools().await;
+    let chat_open = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("chat_open"))
+        .expect("chat_open in tools/list");
+    let props = chat_open["inputSchema"]["properties"]
+        .as_object()
+        .expect("input schema properties");
+    for field in ["agent", "agents_json"] {
+        assert!(
+            props.contains_key(field),
+            "chat_open schema should expose {field}; got {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_close_unknown_id_is_a_noop() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);
