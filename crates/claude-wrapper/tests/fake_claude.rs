@@ -560,6 +560,12 @@ async fn doctor_executes() {
 }
 
 /// Verify that agents command executes through the fake binary.
+///
+/// `AgentsCommand` is deprecated (the real `claude agents` is now an
+/// interactive TUI as of 2.1.143), but the wrapper still constructs
+/// the same arg vector and the test verifies that arg vector lands
+/// on the fake binary correctly.
+#[allow(deprecated)]
 #[tokio::test]
 async fn agents_executes() {
     let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "[]")]);

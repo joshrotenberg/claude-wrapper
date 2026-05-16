@@ -7,28 +7,31 @@ use crate::error::Result;
 use crate::exec;
 use crate::exec::CommandOutput;
 
-/// List configured agents.
+/// **Deprecated.** Wraps `claude agents`, which as of Claude Code
+/// 2.1.143 is an interactive TUI for managing background agent
+/// sessions -- not a way to list user-defined subagent definitions.
+/// Calling `.execute()` non-interactively just emits
+/// `'claude agents' is not available in this environment.` to
+/// stderr and returns empty stdout.
 ///
-/// # Example
+/// Use [`crate::artifacts::AgentsRoot`] to enumerate / read /
+/// write user-level subagent definitions in `~/.claude/agents/`.
+/// There is no current non-interactive CLI surface for the
+/// background-session manager.
 ///
-/// ```no_run
-/// use claude_wrapper::{Claude, ClaudeCommand, AgentsCommand};
-///
-/// # async fn example() -> claude_wrapper::Result<()> {
-/// let claude = Claude::builder().build()?;
-/// let output = AgentsCommand::new()
-///     .setting_sources("user,project")
-///     .execute(&claude)
-///     .await?;
-/// println!("{}", output.stdout);
-/// # Ok(())
-/// # }
-/// ```
+/// Kept for back-compat; will be removed in a future major release.
+#[deprecated(
+    since = "0.10.0",
+    note = "`claude agents` is now an interactive TUI in Claude Code 2.1.143+ (background-session manager). \
+            For listing/reading/writing user subagents in `~/.claude/agents/`, use \
+            `claude_wrapper::artifacts::AgentsRoot`."
+)]
 #[derive(Debug, Clone, Default)]
 pub struct AgentsCommand {
     setting_sources: Option<String>,
 }
 
+#[allow(deprecated)]
 impl AgentsCommand {
     #[must_use]
     pub fn new() -> Self {
@@ -43,6 +46,7 @@ impl AgentsCommand {
     }
 }
 
+#[allow(deprecated)]
 impl ClaudeCommand for AgentsCommand {
     type Output = CommandOutput;
 
@@ -62,6 +66,7 @@ impl ClaudeCommand for AgentsCommand {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::command::ClaudeCommand;
