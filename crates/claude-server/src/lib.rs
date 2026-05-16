@@ -100,7 +100,7 @@ use std::sync::Arc;
 use tower_mcp::McpRouter;
 use tower_mcp::context::NotificationSender;
 
-pub use self::config::{ClaudeConfig, ServerConfig, ServerPolicy, TurnConfig};
+pub use self::config::{ClaudeConfig, ServerConfig, ServerPolicy, SurfacesConfig, TurnConfig};
 pub use self::state::ServerState;
 pub use tower_mcp::context::{NotificationReceiver, notification_channel};
 
@@ -205,27 +205,36 @@ fn build_router_inner(
              For a longer walkthrough call `prompts/get usage_guide`.",
         );
 
+    // Each surface block applies BOTH the compile-time Cargo
+    // feature gate AND the runtime config.surfaces.enable_X
+    // dimmer. Cargo feature is the hard ceiling; runtime config
+    // can disable but not enable beyond what was compiled in.
     #[cfg(feature = "core")]
-    for tool in core::tools(&state) {
-        router = router.tool(tool);
+    if state.config.surfaces.enable_core {
+        for tool in core::tools(&state) {
+            router = router.tool(tool);
+        }
     }
     #[cfg(feature = "chat")]
-    for tool in chat::tools(&state) {
-        router = router.tool(tool);
-    }
-    #[cfg(feature = "chat")]
-    for tool in turn_tools::tools(&state) {
-        router = router.tool(tool);
+    if state.config.surfaces.enable_chat {
+        for tool in chat::tools(&state) {
+            router = router.tool(tool);
+        }
+        for tool in turn_tools::tools(&state) {
+            router = router.tool(tool);
+        }
     }
     #[cfg(feature = "mutations")]
-    if state.config.policy.allow_mutations {
+    if state.config.policy.allow_mutations && state.config.surfaces.enable_mutations {
         for tool in mutations::tools(&state) {
             router = router.tool(tool);
         }
-        tracing::info!("mutating tools registered (policy.allow_mutations = true)");
+        tracing::info!(
+            "mutating tools registered (policy.allow_mutations + surfaces.enable_mutations = true)"
+        );
     }
     #[cfg(feature = "history")]
-    {
+    if state.config.surfaces.enable_history {
         for tool in history::tools(&state) {
             router = router.tool(tool);
         }
@@ -237,7 +246,7 @@ fn build_router_inner(
         }
     }
     #[cfg(feature = "artifacts")]
-    {
+    if state.config.surfaces.enable_artifacts {
         for tool in artifacts::tools(&state) {
             router = router.tool(tool);
         }
@@ -249,14 +258,17 @@ fn build_router_inner(
         }
     }
     #[cfg(all(feature = "artifacts", feature = "mutations"))]
-    if state.config.policy.allow_mutations {
+    if state.config.policy.allow_mutations
+        && state.config.surfaces.enable_mutations
+        && state.config.surfaces.enable_artifacts
+    {
         for tool in artifacts::mutating_tools(&state) {
             router = router.tool(tool);
         }
-        tracing::info!("artifacts mutating tools registered (policy.allow_mutations = true)");
+        tracing::info!("artifacts mutating tools registered");
     }
     #[cfg(feature = "worktrees")]
-    {
+    if state.config.surfaces.enable_worktrees {
         for tool in worktrees::tools(&state) {
             router = router.tool(tool);
         }
@@ -268,7 +280,7 @@ fn build_router_inner(
         }
     }
     #[cfg(feature = "jobs")]
-    {
+    if state.config.surfaces.enable_jobs {
         for tool in jobs::tools(&state) {
             router = router.tool(tool);
         }
@@ -322,27 +334,42 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     )]
     let state = ServerState::new(Arc::new(claude), Arc::new(config));
 
+    // Runtime gate dimmer + compile-time feature ceiling. Each
+    // surface returns an empty Vec when either the Cargo feature
+    // is off OR the runtime surfaces.enable_X flag is false.
     #[cfg(feature = "mutations")]
-    let muts: Vec<tower_mcp::Tool> = if state.config.policy.allow_mutations {
-        mutations::tools(&state)
-    } else {
-        Vec::new()
-    };
+    let muts: Vec<tower_mcp::Tool> =
+        if state.config.policy.allow_mutations && state.config.surfaces.enable_mutations {
+            mutations::tools(&state)
+        } else {
+            Vec::new()
+        };
     #[cfg(not(feature = "mutations"))]
     let muts: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "history")]
-    let history_tools = history::tools(&state);
+    let history_tools = if state.config.surfaces.enable_history {
+        history::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "history"))]
     let history_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "artifacts")]
-    let artifacts_tools = artifacts::tools(&state);
+    let artifacts_tools = if state.config.surfaces.enable_artifacts {
+        artifacts::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "artifacts"))]
     let artifacts_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(all(feature = "artifacts", feature = "mutations"))]
-    let artifacts_mut_tools: Vec<tower_mcp::Tool> = if state.config.policy.allow_mutations {
+    let artifacts_mut_tools: Vec<tower_mcp::Tool> = if state.config.policy.allow_mutations
+        && state.config.surfaces.enable_mutations
+        && state.config.surfaces.enable_artifacts
+    {
         artifacts::mutating_tools(&state)
     } else {
         Vec::new()
@@ -351,25 +378,45 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     let artifacts_mut_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "worktrees")]
-    let worktrees_tools = worktrees::tools(&state);
+    let worktrees_tools = if state.config.surfaces.enable_worktrees {
+        worktrees::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "worktrees"))]
     let worktrees_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "jobs")]
-    let jobs_tools = jobs::tools(&state);
+    let jobs_tools = if state.config.surfaces.enable_jobs {
+        jobs::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "jobs"))]
     let jobs_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "core")]
-    let core_tools = core::tools(&state);
+    let core_tools = if state.config.surfaces.enable_core {
+        core::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "core"))]
     let core_tools: Vec<tower_mcp::Tool> = Vec::new();
     #[cfg(feature = "chat")]
-    let chat_tools = chat::tools(&state);
+    let chat_tools = if state.config.surfaces.enable_chat {
+        chat::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "chat"))]
     let chat_tools: Vec<tower_mcp::Tool> = Vec::new();
     #[cfg(feature = "chat")]
-    let turn_tool_list = turn_tools::tools(&state);
+    let turn_tool_list = if state.config.surfaces.enable_chat {
+        turn_tools::tools(&state)
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "chat"))]
     let turn_tool_list: Vec<tower_mcp::Tool> = Vec::new();
 

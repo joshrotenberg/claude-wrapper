@@ -45,6 +45,69 @@ pub struct ServerConfig {
     /// Claude Code installs. Only consulted when the `jobs` Cargo
     /// feature is enabled.
     pub jobs_root: Option<PathBuf>,
+    /// Per-surface runtime gates. Layered on top of the compile-time
+    /// Cargo features: a Cargo feature being off means a surface is
+    /// **never** registered regardless of this config; a Cargo
+    /// feature being on means the surface defaults to registered
+    /// but can be disabled per-deployment via these flags.
+    pub surfaces: SurfacesConfig,
+}
+
+/// Per-surface runtime gates. All default `true` so out-of-the-box
+/// behavior matches the historical "if it's compiled in, it's
+/// registered" policy. Operators flip individual flags to `false`
+/// when they want a single binary that exposes only a subset.
+///
+/// **Cargo features remain the hard ceiling.** Setting
+/// `enable_artifacts = true` on a binary built without the
+/// `artifacts` feature does nothing -- the surface code isn't
+/// linked in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SurfacesConfig {
+    /// L2 CLI passthrough tools (`claude_*`). Default `true`.
+    pub enable_core: bool,
+    /// L2.5 long-lived chat surface (`chat_*`, `turn_*`,
+    /// `claude://chats[/{id}]`). Default `true`.
+    pub enable_chat: bool,
+    /// Process counters (`metrics_summary`, `claude://metrics`).
+    /// Default `true`.
+    pub enable_metrics: bool,
+    /// Mutating CLI passthrough (`claude_mcp_add`,
+    /// `claude_plugin_install`, etc.) AND mutating artifact tools
+    /// (`agent_write`, `agent_delete`). Layered on top of the
+    /// existing `policy.allow_mutations` runtime check and the
+    /// `mutations` Cargo feature -- ALL three must be true for
+    /// mutating tools to register. Default `true`.
+    pub enable_mutations: bool,
+    /// Historical session reads (`claude_project_list`,
+    /// `claude_session_*`, `claude://projects`, `claude://sessions/{id}`).
+    /// Default `true`.
+    pub enable_history: bool,
+    /// User-level agent artifact reads (`agent_list`, `agent_get`,
+    /// `claude://agents[/{stem}]`). Default `true`.
+    pub enable_artifacts: bool,
+    /// Git worktree introspection (`worktree_list`,
+    /// `claude://worktrees`). Default `true`.
+    pub enable_worktrees: bool,
+    /// Background-job state reads (`claude_job_list`,
+    /// `claude_job_get`, `claude://jobs[/{short_id}]`). Default `true`.
+    pub enable_jobs: bool,
+}
+
+impl Default for SurfacesConfig {
+    fn default() -> Self {
+        Self {
+            enable_core: true,
+            enable_chat: true,
+            enable_metrics: true,
+            enable_mutations: true,
+            enable_history: true,
+            enable_artifacts: true,
+            enable_worktrees: true,
+            enable_jobs: true,
+        }
+    }
 }
 
 /// Server-level policy flags. Mutating tools (mcp_add, plugin_install,

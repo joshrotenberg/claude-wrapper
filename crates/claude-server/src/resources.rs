@@ -202,6 +202,56 @@ fn resource_config(state: &ServerState) -> Resource {
                     "mutations_effective": mutations_compiled_in && cfg.policy.allow_mutations,
                 });
 
+                // Per-surface effective gates -- combine the
+                // compile-time feature with the runtime config flag
+                // so operators can see at a glance what's actually
+                // exposed.
+                let surfaces_block = json!({
+                    "core": {
+                        "compiled_in": cfg!(feature = "core"),
+                        "enabled": cfg.surfaces.enable_core,
+                        "effective": cfg!(feature = "core") && cfg.surfaces.enable_core,
+                    },
+                    "chat": {
+                        "compiled_in": cfg!(feature = "chat"),
+                        "enabled": cfg.surfaces.enable_chat,
+                        "effective": cfg!(feature = "chat") && cfg.surfaces.enable_chat,
+                    },
+                    "metrics": {
+                        "compiled_in": cfg!(feature = "metrics"),
+                        "enabled": cfg.surfaces.enable_metrics,
+                        "effective": cfg!(feature = "metrics") && cfg.surfaces.enable_metrics,
+                    },
+                    "mutations": {
+                        "compiled_in": cfg!(feature = "mutations"),
+                        "enabled": cfg.surfaces.enable_mutations,
+                        // mutations is triple-gated (Cargo + surfaces + policy)
+                        "effective": cfg!(feature = "mutations")
+                            && cfg.surfaces.enable_mutations
+                            && cfg.policy.allow_mutations,
+                    },
+                    "history": {
+                        "compiled_in": cfg!(feature = "history"),
+                        "enabled": cfg.surfaces.enable_history,
+                        "effective": cfg!(feature = "history") && cfg.surfaces.enable_history,
+                    },
+                    "artifacts": {
+                        "compiled_in": cfg!(feature = "artifacts"),
+                        "enabled": cfg.surfaces.enable_artifacts,
+                        "effective": cfg!(feature = "artifacts") && cfg.surfaces.enable_artifacts,
+                    },
+                    "worktrees": {
+                        "compiled_in": cfg!(feature = "worktrees"),
+                        "enabled": cfg.surfaces.enable_worktrees,
+                        "effective": cfg!(feature = "worktrees") && cfg.surfaces.enable_worktrees,
+                    },
+                    "jobs": {
+                        "compiled_in": cfg!(feature = "jobs"),
+                        "enabled": cfg.surfaces.enable_jobs,
+                        "effective": cfg!(feature = "jobs") && cfg.surfaces.enable_jobs,
+                    },
+                });
+
                 let body = json!({
                     "claude": {
                         "binary": cfg.claude.binary,
@@ -213,6 +263,7 @@ fn resource_config(state: &ServerState) -> Resource {
                     "auth": auth_summary,
                     "cli_version": cli_version_block,
                     "policy": policy_block,
+                    "surfaces": surfaces_block,
                 });
                 let text = serde_json::to_string_pretty(&body).unwrap_or_default();
                 Ok(ReadResourceResult::text("claude://config", text))

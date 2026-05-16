@@ -82,10 +82,20 @@ jobs = []
 # "agent sits waiting" failure mode becomes structurally impossible.
 sync-agent-turns = []
 
+# Build the polished `claude-server` binary. Pulls in clap and
+# anyhow which aren't needed by library embedders. Implied by
+# `full` so `cargo install claude-server --features full` does
+# the right thing.
+bin = ["dep:clap", "dep:anyhow"]
+
+# Enable structured JSON tracing output via `--log-format json`.
+# Implied by `bin`; library embedders wire their own logging.
+tracing-json = ["tracing-subscriber/json"]
+
 # Convenience profile: the kitchen sink for Finestra-class
 # deployments that want the full surface including mutations
-# and historical session reads.
-full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts", "worktrees", "jobs"]
+# and historical session reads. Includes the polished binary.
+full = ["bin", "chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts", "worktrees", "jobs", "tracing-json"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }
@@ -99,6 +109,18 @@ axum = "0.8"
 tower = "0.5"
 schemars = "1"
 toml = "0.9"
+
+# Bin-only deps; pulled in by the `bin` feature.
+clap = { version = "4", features = ["derive"], optional = true }
+anyhow = { version = "1", optional = true }
+
+# The polished bin. Requires the `bin` feature (which pulls clap +
+# anyhow) and `full` (which turns on every surface). Library
+# consumers who only want the lib don't pay for clap.
+[[bin]]
+name = "claude-server"
+path = "src/bin/claude-server.rs"
+required-features = ["bin", "full"]
 
 [dev-dependencies]
 tempfile = "3"
