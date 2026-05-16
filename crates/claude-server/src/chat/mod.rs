@@ -654,6 +654,4 @@ fn tool_chat_close(state: &ServerState) -> Tool {
 
 // -- helpers --------------------------------------------------------
 
-fn super_internal(e: impl std::fmt::Display) -> tower_mcp::Error {
-    tower_mcp::Error::internal(e.to_string())
-}
+use crate::errors::from_wrapper as super_internal;

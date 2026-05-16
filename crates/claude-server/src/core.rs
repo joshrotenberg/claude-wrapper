@@ -93,7 +93,7 @@ fn tool_cli_version(state: &ServerState) -> Tool {
         .handler(move |_input: NoArgs| {
             let claude = claude.clone();
             async move {
-                let v = claude.cli_version().await.map_err(internal)?;
+                let v = claude.cli_version().await.map_err(from_wrapper)?;
                 Ok(CallToolResult::json(json!({
                     "major": v.major,
                     "minor": v.minor,
@@ -237,7 +237,7 @@ fn tool_query_sync(state: &ServerState) -> Tool {
             let claude = Arc::clone(&claude);
             async move {
                 let q = build_query(&input);
-                let out = q.execute(&claude).await.map_err(internal)?;
+                let out = q.execute(&claude).await.map_err(from_wrapper)?;
                 let env = parse_query_envelope(&out.stdout)?;
                 Ok(CallToolResult::json(env))
             }
@@ -258,7 +258,7 @@ fn tool_agents(state: &ServerState) -> Tool {
                 let out = AgentsCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -278,7 +278,7 @@ fn tool_auth_status(state: &ServerState) -> Tool {
                 let parsed = AuthStatusCommand::new()
                     .execute_json(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(CallToolResult::json(
                     serde_json::to_value(parsed).unwrap_or(json!(null)),
                 ))
@@ -324,7 +324,7 @@ fn tool_mcp_list(state: &ServerState) -> Tool {
                 let out = McpListCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -350,7 +350,7 @@ fn tool_mcp_get(state: &ServerState) -> Tool {
                 let out = McpGetCommand::new(input.name)
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -370,7 +370,7 @@ fn tool_plugin_list(state: &ServerState) -> Tool {
                 let out = PluginListCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -396,7 +396,7 @@ fn tool_plugin_validate(state: &ServerState) -> Tool {
                 let out = PluginValidateCommand::new(input.path)
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -416,7 +416,7 @@ fn tool_marketplace_list(state: &ServerState) -> Tool {
                 let out = MarketplaceListCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -436,7 +436,7 @@ fn tool_auto_mode_config(state: &ServerState) -> Tool {
                 let out = AutoModeConfigCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -454,7 +454,7 @@ fn tool_auto_mode_defaults(state: &ServerState) -> Tool {
                 let out = AutoModeDefaultsCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -538,7 +538,7 @@ fn tool_doctor(state: &ServerState) -> Tool {
                 let out = DoctorCommand::new()
                     .execute(&claude)
                     .await
-                    .map_err(internal)?;
+                    .map_err(from_wrapper)?;
                 Ok(command_output_json(&out))
             }
         })
@@ -547,9 +547,7 @@ fn tool_doctor(state: &ServerState) -> Tool {
 
 // -- helpers --------------------------------------------------------
 
-fn internal(e: impl std::fmt::Display) -> tower_mcp::Error {
-    tower_mcp::Error::internal(e.to_string())
-}
+use crate::errors::{from_wrapper, internal};
 
 /// Wrap a [`CommandOutput`] as the standard tool JSON envelope.
 /// ANSI escape sequences are stripped from stdout/stderr.

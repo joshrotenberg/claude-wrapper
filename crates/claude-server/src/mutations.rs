@@ -68,9 +68,7 @@ fn cmd_output_json(out: &claude_wrapper::exec::CommandOutput) -> CallToolResult 
     }))
 }
 
-fn internal(e: impl std::fmt::Display) -> tower_mcp::Error {
-    tower_mcp::Error::internal(e.to_string())
-}
+use crate::errors::{from_wrapper, internal};
 
 // -- claude_mcp_add --------------------------------------------------
 
@@ -124,7 +122,7 @@ async fn run_mcp_add(
     if !input.server_args.is_empty() {
         cmd = cmd.server_args(input.server_args);
     }
-    let out = cmd.execute(&claude).await.map_err(internal)?;
+    let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
     Ok(cmd_output_json(&out))
 }
 
@@ -151,7 +149,7 @@ fn tool_mcp_add_json(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -178,7 +176,7 @@ fn tool_mcp_remove(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -205,7 +203,7 @@ fn tool_plugin_install(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -223,7 +221,7 @@ fn tool_plugin_uninstall(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -241,7 +239,7 @@ fn tool_plugin_enable(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -259,7 +257,7 @@ fn tool_plugin_disable(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -277,7 +275,7 @@ fn tool_plugin_update(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -305,7 +303,7 @@ fn tool_marketplace_add(state: &ServerState) -> Tool {
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
                 }
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -325,7 +323,7 @@ fn tool_marketplace_remove(state: &ServerState) -> Tool {
             let claude = Arc::clone(&claude);
             async move {
                 let cmd = MarketplaceRemoveCommand::new(input.name);
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })
@@ -340,7 +338,7 @@ fn tool_marketplace_update(state: &ServerState) -> Tool {
             let claude = Arc::clone(&claude);
             async move {
                 let cmd = MarketplaceUpdateCommand::new(input.name);
-                let out = cmd.execute(&claude).await.map_err(internal)?;
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))
             }
         })

@@ -68,6 +68,7 @@ mod chat;
 pub mod config;
 #[cfg(feature = "core")]
 mod core;
+mod errors;
 #[cfg(feature = "history")]
 mod history;
 #[cfg(feature = "mutations")]

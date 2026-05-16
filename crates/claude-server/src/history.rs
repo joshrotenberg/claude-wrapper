@@ -252,9 +252,7 @@ fn history_root(state: &ServerState) -> claude_wrapper::error::Result<HistoryRoo
     }
 }
 
-fn internal(e: impl std::fmt::Display) -> tower_mcp::Error {
-    tower_mcp::Error::internal(e.to_string())
-}
+use crate::errors::from_wrapper as internal;
 
 fn project_summary_to_json(p: &claude_wrapper::history::ProjectSummary) -> serde_json::Value {
     json!({
