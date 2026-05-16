@@ -157,7 +157,11 @@ within a single chat queue.
   failed / cancelled, in_flight, total_cost_usd. Same shape as \
   `metrics_summary`.
 - `claude://config` -- sanitized server config (env values redacted \
-  on KEY/TOKEN/SECRET/PASSWORD).
+  on KEY/TOKEN/SECRET/PASSWORD). Includes an `auth` block with the \
+  active strategy (`bedrock | vertex | api_key | oauth_token | \
+  subscription`) -- same shape as the `claude_auth_strategy` tool. \
+  `subscription` means no env auth pin; for liveness call \
+  `claude_auth_status`.
 - `claude://tools` -- the registered tool surface; useful for \
   programmatic introspection.
 - `claude://projects` (history feature) -- every project under \

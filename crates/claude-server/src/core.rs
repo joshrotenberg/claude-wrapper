@@ -22,6 +22,7 @@ use tracing::Instrument;
 use claude_wrapper::ClaudeCommand;
 use claude_wrapper::OutputFormat;
 use claude_wrapper::QueryCommand;
+use claude_wrapper::auth;
 use claude_wrapper::command::agents::AgentsCommand;
 use claude_wrapper::command::auth::AuthStatusCommand;
 use claude_wrapper::command::auto_mode::{
@@ -44,6 +45,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_query(state),
         tool_agents(state),
         tool_auth_status(state),
+        tool_auth_strategy(),
         tool_mcp_list(state),
         tool_mcp_get(state),
         tool_plugin_list(state),
@@ -281,6 +283,30 @@ fn tool_auth_status(state: &ServerState) -> Tool {
                     serde_json::to_value(parsed).unwrap_or(json!(null)),
                 ))
             }
+        })
+        .build()
+}
+
+// -- claude_auth_strategy --------------------------------------------
+
+fn tool_auth_strategy() -> Tool {
+    ToolBuilder::new("claude_auth_strategy")
+        .description(
+            "Report which auth strategy the embedded `claude` CLI will use \
+             given the current process environment. Cheap; no subprocess. \
+             Returns `{ strategy, has_anthropic_api_key, has_oauth_token, \
+             bedrock_enabled, vertex_enabled }`. `strategy` is one of \
+             `bedrock | vertex | api_key | oauth_token | subscription`. \
+             `subscription` means no env auth set -- the CLI will fall back \
+             to credentials stored under `~/.claude/`; for liveness use \
+             `claude_auth_status`.",
+        )
+        .read_only()
+        .handler(|_input: NoArgs| async move {
+            let summary = auth::detect();
+            Ok(CallToolResult::json(
+                serde_json::to_value(&summary).unwrap_or(json!(null)),
+            ))
         })
         .build()
 }

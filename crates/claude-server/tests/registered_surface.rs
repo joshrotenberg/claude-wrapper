@@ -27,6 +27,7 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_query",
         "claude_agents",
         "claude_auth_status",
+        "claude_auth_strategy",
         "claude_mcp_list",
         "claude_mcp_get",
         "claude_plugin_list",
@@ -117,6 +118,59 @@ async fn router_tools_list_matches_registered_tools() {
     registered_names.sort();
 
     assert_eq!(listed_names, registered_names);
+}
+
+#[tokio::test]
+async fn claude_auth_strategy_returns_summary_shape() {
+    // Doesn't assert a specific strategy -- the test environment may
+    // have any of them set. Just shape: the keys exist and `strategy`
+    // is one of the documented values.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool("claude_auth_strategy", serde_json::json!({}))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&result.all_text()).expect("json body");
+    let strat = v["strategy"].as_str().expect("strategy string");
+    assert!(
+        matches!(
+            strat,
+            "bedrock" | "vertex" | "api_key" | "oauth_token" | "subscription"
+        ),
+        "unknown strategy {strat:?}"
+    );
+    for key in [
+        "has_anthropic_api_key",
+        "has_oauth_token",
+        "bedrock_enabled",
+        "vertex_enabled",
+    ] {
+        assert!(v[key].is_boolean(), "missing/non-bool {key}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn config_resource_includes_auth_strategy() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let body = client.read_resource("claude://config").await;
+    let text = body
+        .contents
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .filter_map(|v| {
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect::<String>();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("config json");
+    assert!(v["auth"].is_object(), "auth block missing: {v}");
+    assert!(v["auth"]["strategy"].is_string());
 }
 
 #[tokio::test]

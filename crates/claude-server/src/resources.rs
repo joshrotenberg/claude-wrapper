@@ -170,6 +170,7 @@ fn resource_config(state: &ServerState) -> Resource {
                     .iter()
                     .map(|(k, v)| (k.clone(), json!(redact(k, v))))
                     .collect();
+                let auth_summary = claude_wrapper::auth::detect();
                 let body = json!({
                     "claude": {
                         "binary": cfg.claude.binary,
@@ -177,7 +178,8 @@ fn resource_config(state: &ServerState) -> Resource {
                         "timeout_secs": cfg.claude.timeout_secs,
                         "env": env,
                         "global_args": cfg.claude.global_args,
-                    }
+                    },
+                    "auth": auth_summary,
                 });
                 let text = serde_json::to_string_pretty(&body).unwrap_or_default();
                 Ok(ReadResourceResult::text("claude://config", text))
