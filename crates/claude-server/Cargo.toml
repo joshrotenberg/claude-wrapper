@@ -41,7 +41,9 @@ metrics = []
 # feature must be on AND `policy.allow_mutations = true` at
 # runtime. Compile-time gate strips the code entirely;
 # runtime gate hides the tools from `tools/list`.
-mutations = []
+# Implies `core` because mutations.rs reuses `core::strip_ansi` for
+# command-output JSON envelopes -- the two surfaces share helpers.
+mutations = ["core"]
 
 # Read-only access to historical sessions on disk
 # (`~/.claude/projects/<slug>/<session_id>.jsonl`). Tools:

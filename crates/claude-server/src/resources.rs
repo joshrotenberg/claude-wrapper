@@ -161,8 +161,9 @@ fn resource_config(state: &ServerState) -> Resource {
         .name("Server config")
         .description(
             "Sanitized view of the active ServerConfig (env values redacted). \
-             Includes an `auth` block (env-derived strategy) and a `cli_version` \
-             block (declared tested-against range plus best-effort live status).",
+             Includes an `auth` block (env-derived strategy), a `cli_version` \
+             block (declared tested-against range plus best-effort live status), \
+             and a `policy` block (effective mutation gate).",
         )
         .mime_type("application/json")
         .handler(move || {
@@ -191,6 +192,16 @@ fn resource_config(state: &ServerState) -> Resource {
                     "status": live_status,
                 });
 
+                // Compile-time vs runtime mutation gate. Surfaced so
+                // operators can answer "is this server allowed to
+                // mutate?" from the config resource alone.
+                let mutations_compiled_in = cfg!(feature = "mutations");
+                let policy_block = json!({
+                    "allow_mutations": cfg.policy.allow_mutations,
+                    "mutations_feature_compiled_in": mutations_compiled_in,
+                    "mutations_effective": mutations_compiled_in && cfg.policy.allow_mutations,
+                });
+
                 let body = json!({
                     "claude": {
                         "binary": cfg.claude.binary,
@@ -201,6 +212,7 @@ fn resource_config(state: &ServerState) -> Resource {
                     },
                     "auth": auth_summary,
                     "cli_version": cli_version_block,
+                    "policy": policy_block,
                 });
                 let text = serde_json::to_string_pretty(&body).unwrap_or_default();
                 Ok(ReadResourceResult::text("claude://config", text))
