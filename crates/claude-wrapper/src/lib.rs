@@ -363,7 +363,7 @@ pub use retry::{BackoffStrategy, RetryPolicy};
 pub use session::Session;
 pub use tool_pattern::{PatternError, ToolPattern};
 pub use types::*;
-pub use version::{CliVersion, VersionParseError};
+pub use version::{CliVersion, CliVersionStatus, VersionParseError};
 
 /// The Claude CLI client. Holds shared configuration applied to all commands.
 ///
@@ -376,6 +376,7 @@ pub struct Claude {
     pub(crate) global_args: Vec<String>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) retry_policy: Option<RetryPolicy>,
+    pub(crate) tested_cli_version_range: Option<(CliVersion, CliVersion)>,
 }
 
 impl Claude {
@@ -485,6 +486,70 @@ impl Claude {
             })
         }
     }
+
+    /// The tested-against `[min, max]` range declared at build time
+    /// via [`ClaudeBuilder::tested_cli_version_range`], if any.
+    #[must_use]
+    pub fn tested_cli_version_range(&self) -> Option<(CliVersion, CliVersion)> {
+        self.tested_cli_version_range
+    }
+
+    /// Classify the installed CLI against the declared
+    /// tested-against range. Logs a `tracing::warn!` when outside
+    /// the range; returns the typed status either way. If no range
+    /// was declared via [`ClaudeBuilder::tested_cli_version_range`],
+    /// returns [`CliVersionStatus::Tested`] -- callers that didn't
+    /// opt in get the silent-success path.
+    ///
+    /// Intended for one-shot use at startup, not on every command.
+    #[cfg(feature = "async")]
+    pub async fn cli_version_status(&self) -> Result<CliVersionStatus> {
+        let Some((min, max)) = self.tested_cli_version_range else {
+            return Ok(CliVersionStatus::Tested);
+        };
+        let found = self.cli_version().await?;
+        let status = found.status_within(&min, &max);
+        warn_on_drift(&status);
+        Ok(status)
+    }
+
+    /// Blocking mirror of [`Claude::cli_version_status`]. Requires
+    /// the `sync` feature.
+    #[cfg(feature = "sync")]
+    pub fn cli_version_status_sync(&self) -> Result<CliVersionStatus> {
+        let Some((min, max)) = self.tested_cli_version_range else {
+            return Ok(CliVersionStatus::Tested);
+        };
+        let found = self.cli_version_sync()?;
+        let status = found.status_within(&min, &max);
+        warn_on_drift(&status);
+        Ok(status)
+    }
+}
+
+#[allow(dead_code)] // unused with neither `async` nor `sync` feature
+fn warn_on_drift(status: &CliVersionStatus) {
+    match status {
+        CliVersionStatus::Tested => {}
+        CliVersionStatus::NewerUntested {
+            found, tested_max, ..
+        } => {
+            tracing::warn!(
+                found = %found,
+                tested_max = %tested_max,
+                "claude CLI is newer than the wrapper's tested-against range; \
+                 semantics may have drifted -- proceed with caution"
+            );
+        }
+        CliVersionStatus::OlderThanMinimum { found, minimum, .. } => {
+            tracing::warn!(
+                found = %found,
+                minimum = %minimum,
+                "claude CLI is older than the wrapper's declared minimum; \
+                 incorrect behavior is likely (missing flags, different shapes)"
+            );
+        }
+    }
 }
 
 /// Builder for creating a [`Claude`] client.
@@ -510,6 +575,7 @@ pub struct ClaudeBuilder {
     global_args: Vec<String>,
     timeout: Option<Duration>,
     retry_policy: Option<RetryPolicy>,
+    tested_cli_version_range: Option<(CliVersion, CliVersion)>,
 }
 
 impl ClaudeBuilder {
@@ -614,6 +680,44 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Declare the inclusive `[min, max]` range of `claude` CLI
+    /// versions this client has been tested against.
+    ///
+    /// The wrapper does not enforce the range -- nothing errors when
+    /// it's set wrong. Use [`Claude::cli_version_status`] (or its
+    /// sync mirror) at startup to classify the actually-installed CLI
+    /// against this declaration; that call returns a typed
+    /// [`CliVersionStatus`] AND emits a `tracing::warn!` when
+    /// outside the range. Hosts (claude-server, application code)
+    /// can additionally surface the status to operators.
+    ///
+    /// # Why this exists
+    ///
+    /// CLI semantics drift across minor / patch releases (e.g.
+    /// `claude agents` was repurposed in 2.1.143). The min floor
+    /// lets us say "we know it's broken below this"; the max ceiling
+    /// lets us say "we haven't verified above this -- proceed but
+    /// expect surprises."
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, CliVersion};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder()
+    ///     .tested_cli_version_range(CliVersion::new(2, 1, 0), CliVersion::new(2, 1, 999))
+    ///     .build()?;
+    /// // Run once at startup to log a warning if the CLI is out of range.
+    /// let _status = claude.cli_version_status().await?;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn tested_cli_version_range(mut self, min: CliVersion, max: CliVersion) -> Self {
+        self.tested_cli_version_range = Some((min, max));
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -628,6 +732,7 @@ impl ClaudeBuilder {
             global_args: self.global_args,
             timeout: self.timeout,
             retry_policy: self.retry_policy,
+            tested_cli_version_range: self.tested_cli_version_range,
         })
     }
 }
