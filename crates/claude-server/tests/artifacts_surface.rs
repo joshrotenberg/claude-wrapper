@@ -198,6 +198,207 @@ async fn agent_detail_template_returns_full_record() {
 }
 
 // ---------------------------------------------------------------
+// Mutating tools -- gated by the `mutations` Cargo feature AND
+// `policy.allow_mutations` at runtime. Test both gates.
+// ---------------------------------------------------------------
+
+#[cfg(feature = "mutations")]
+fn cfg_with_mutations(root: &Path) -> ServerConfig {
+    use claude_server::ServerPolicy;
+    ServerConfig {
+        agents_root: Some(root.to_path_buf()),
+        policy: ServerPolicy {
+            allow_mutations: true,
+        },
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "mutations")]
+#[test]
+fn mutating_tools_registered_when_both_gates_open() {
+    let tmp = fixture_root();
+    let tools = registered_tools(cfg_with_mutations(tmp.path())).expect("config built");
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    for expected in ["agent_write", "agent_delete"] {
+        assert!(
+            names.contains(&expected),
+            "missing mutating tool {expected} in {names:?}"
+        );
+    }
+}
+
+#[cfg(feature = "mutations")]
+#[test]
+fn mutating_tools_omitted_when_policy_off() {
+    let tmp = fixture_root();
+    // Default policy.allow_mutations = false.
+    let tools = registered_tools(cfg_with(tmp.path())).expect("config built");
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    for forbidden in ["agent_write", "agent_delete"] {
+        assert!(
+            !names.contains(&forbidden),
+            "mutating tool {forbidden} leaked through with policy off; got {names:?}"
+        );
+    }
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_write_creates_new_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool(
+            "agent_write",
+            serde_json::json!({
+                "file_stem": "fresh",
+                "description": "a new agent",
+                "tools": ["Read", "Bash"],
+                "model": "haiku",
+                "body": "You are fresh.",
+            }),
+        )
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&result.all_text()).expect("json");
+    assert_eq!(v["file_stem"].as_str().unwrap(), "fresh");
+    assert_eq!(v["status"].as_str().unwrap(), "written");
+
+    // Round-trip via the read tool.
+    let got = client
+        .call_tool("agent_get", serde_json::json!({"file_stem": "fresh"}))
+        .await;
+    let g: serde_json::Value = serde_json::from_str(&got.all_text()).expect("json");
+    assert_eq!(g["body"].as_str().unwrap(), "You are fresh.");
+    assert_eq!(g["model"].as_str().unwrap(), "haiku");
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_write_overwrites_by_default() {
+    let tmp = fixture_root();
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool(
+            "agent_write",
+            serde_json::json!({
+                "file_stem": "rust-qa",
+                "body": "rewritten body",
+            }),
+        )
+        .await;
+    assert!(!result.is_error, "overwrite failed: {}", result.all_text());
+
+    let got = client
+        .call_tool("agent_get", serde_json::json!({"file_stem": "rust-qa"}))
+        .await;
+    let g: serde_json::Value = serde_json::from_str(&got.all_text()).expect("json");
+    assert_eq!(g["body"].as_str().unwrap(), "rewritten body");
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_write_if_not_exists_blocks_overwrite() {
+    let tmp = fixture_root();
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool(
+            "agent_write",
+            serde_json::json!({
+                "file_stem": "rust-qa",
+                "body": "shouldn't land",
+                "if_not_exists": true,
+            }),
+        )
+        .await;
+    assert!(
+        result.is_error,
+        "expected write_new conflict error; got {}",
+        result.all_text()
+    );
+    assert!(
+        result.all_text().to_lowercase().contains("already exists"),
+        "expected 'already exists' message; got {}",
+        result.all_text()
+    );
+
+    // Original body should still be there.
+    let got = client
+        .call_tool("agent_get", serde_json::json!({"file_stem": "rust-qa"}))
+        .await;
+    let g: serde_json::Value = serde_json::from_str(&got.all_text()).expect("json");
+    assert_eq!(g["body"].as_str().unwrap(), "You are a Rust quality gate.");
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_write_rejects_path_traversal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool(
+            "agent_write",
+            serde_json::json!({
+                "file_stem": "../escape",
+                "body": "nope",
+            }),
+        )
+        .await;
+    assert!(result.is_error);
+    assert!(
+        result.all_text().to_lowercase().contains("file_stem"),
+        "expected file_stem rejection; got {}",
+        result.all_text()
+    );
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_delete_removes_file() {
+    let tmp = fixture_root();
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool("agent_delete", serde_json::json!({"file_stem": "rust-qa"}))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&result.all_text()).expect("json");
+    assert_eq!(v["status"].as_str().unwrap(), "deleted");
+
+    let got = client
+        .call_tool("agent_get", serde_json::json!({"file_stem": "rust-qa"}))
+        .await;
+    assert!(got.is_error, "agent_get should fail after delete");
+}
+
+#[cfg(feature = "mutations")]
+#[tokio::test]
+async fn agent_delete_unknown_stem_errors() {
+    let tmp = fixture_root();
+    let router = build_router(cfg_with_mutations(tmp.path())).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool("agent_delete", serde_json::json!({"file_stem": "nope"}))
+        .await;
+    assert!(result.is_error);
+}
+
+// ---------------------------------------------------------------
 // Live #[ignore] test -- reads the user's real ~/.claude/agents/.
 // Run with: cargo test -p claude-server --features artifacts -- --ignored
 // ---------------------------------------------------------------

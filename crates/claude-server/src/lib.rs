@@ -230,6 +230,13 @@ fn build_router_inner(
             router = router.resource_template(template);
         }
     }
+    #[cfg(all(feature = "artifacts", feature = "mutations"))]
+    if state.config.policy.allow_mutations {
+        for tool in artifacts::mutating_tools(&state) {
+            router = router.tool(tool);
+        }
+        tracing::info!("artifacts mutating tools registered (policy.allow_mutations = true)");
+    }
     for resource in resources::resources(&state) {
         router = router.resource(resource);
     }
@@ -290,6 +297,15 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     #[cfg(not(feature = "artifacts"))]
     let artifacts_tools: Vec<tower_mcp::Tool> = Vec::new();
 
+    #[cfg(all(feature = "artifacts", feature = "mutations"))]
+    let artifacts_mut_tools: Vec<tower_mcp::Tool> = if state.config.policy.allow_mutations {
+        artifacts::mutating_tools(&state)
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(all(feature = "artifacts", feature = "mutations")))]
+    let artifacts_mut_tools: Vec<tower_mcp::Tool> = Vec::new();
+
     #[cfg(feature = "core")]
     let core_tools = core::tools(&state);
     #[cfg(not(feature = "core"))]
@@ -310,6 +326,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
         .chain(muts)
         .chain(history_tools)
         .chain(artifacts_tools)
+        .chain(artifacts_mut_tools)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

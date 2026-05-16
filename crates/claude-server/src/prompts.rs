@@ -173,8 +173,11 @@ within a single chat queue.
 - `claude://agents` (artifacts feature) -- user-level agent \
   definitions read from `~/.claude/agents/<stem>.md`. Pair with \
   `claude://agents/{file_stem}` for one agent's full record. Same \
-  shape as the `agent_list` / `agent_get` tools. Read-only -- \
-  write/delete will arrive later under `mutations`.
+  shape as the `agent_list` / `agent_get` tools. Mutating tools \
+  `agent_write` and `agent_delete` are gated by both the `mutations` \
+  Cargo feature AND `policy.allow_mutations = true` at runtime; \
+  when on, `agent_write` is upsert by default (`if_not_exists: true` \
+  for create-only).
 
 Before firing an expensive turn, `metrics_summary` lets you check \
 cumulative spend. Open chats with `max_cost_usd` to enforce a hard \
