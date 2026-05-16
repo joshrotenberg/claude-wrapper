@@ -301,6 +301,8 @@ pub mod error;
 pub mod exec;
 #[cfg(feature = "json")]
 pub mod history;
+#[cfg(feature = "json")]
+pub mod jobs;
 pub mod mcp_config;
 pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
