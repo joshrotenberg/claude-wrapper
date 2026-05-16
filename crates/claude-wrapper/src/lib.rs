@@ -288,6 +288,7 @@
 //! # }
 //! ```
 
+pub mod artifacts;
 pub mod budget;
 pub mod command;
 #[cfg(all(feature = "json", feature = "async"))]

@@ -95,6 +95,16 @@ pub enum Error {
         /// Human-readable description of what went wrong.
         message: String,
     },
+
+    /// An artifacts-module operation (parsing or locating files
+    /// under `~/.claude/agents/` and friends) failed in a way that
+    /// doesn't fit the I/O variant -- e.g. unknown agent name,
+    /// missing user home directory.
+    #[error("artifacts error: {message}")]
+    Artifacts {
+        /// Human-readable description of what went wrong.
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for Error {
