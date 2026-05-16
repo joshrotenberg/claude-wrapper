@@ -25,6 +25,12 @@ pub struct ServerConfig {
     /// installs. Only consulted when the `history` Cargo feature
     /// is enabled.
     pub history_root: Option<PathBuf>,
+    /// Override the on-disk agents root that the `artifacts` feature
+    /// reads from. Defaults to `~/.claude/agents`. Same semantics
+    /// as [`Self::history_root`] -- intended for tests and
+    /// non-default Claude Code installs. Only consulted when the
+    /// `artifacts` Cargo feature is enabled.
+    pub agents_root: Option<PathBuf>,
 }
 
 /// Server-level policy flags. Mutating tools (mcp_add, plugin_install,

@@ -166,6 +166,11 @@ within a single chat queue.
   `claude://sessions/{id}` for the full parsed entry log. Same \
   shape as the `claude_project_list` / `claude_session_list` / \
   `claude_session_get` tools.
+- `claude://agents` (artifacts feature) -- user-level agent \
+  definitions read from `~/.claude/agents/<stem>.md`. Pair with \
+  `claude://agents/{file_stem}` for one agent's full record. Same \
+  shape as the `agent_list` / `agent_get` tools. Read-only -- \
+  write/delete will arrive later under `mutations`.
 
 Before firing an expensive turn, `metrics_summary` lets you check \
 cumulative spend. Open chats with `max_cost_usd` to enforce a hard \
@@ -190,7 +195,8 @@ the budget is exhausted.
 ## What this server does NOT cover
 
 - Skills CRUD (`~/.claude/skills/`) -- planned, not yet wired
-- Agents CRUD (`~/.claude/agents/`) -- planned
+- Agent write/delete (`~/.claude/agents/<stem>.md`) -- planned \
+  under `mutations`. Reads are live as of the artifacts feature.
 - Worktree introspection / removal -- planned
 
 For now, those surfaces live elsewhere or require direct filesystem access.

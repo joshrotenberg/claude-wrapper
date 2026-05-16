@@ -55,10 +55,14 @@
 //!    `claude_project_list`, `claude_session_list`,
 //!    `claude_session_get`. Resources: `claude://projects`,
 //!    `claude://projects/{slug}`, `claude://sessions/{id}`.
-//! 4. **Artifacts** (planned) -- CRUD over `~/.claude/skills/`,
-//!    `~/.claude/agents/`, plugin manifests, MCP server configs.
-//!    Not yet wired.
+//! 4. **Artifacts** (`artifacts` feature) -- read-only access to
+//!    `~/.claude/agents/<stem>.md`. Tools: `agent_list`, `agent_get`.
+//!    Resources: `claude://agents`, `claude://agents/{file_stem}`.
+//!    Skills CRUD and write/delete on agents are planned but not
+//!    yet wired.
 
+#[cfg(feature = "artifacts")]
+mod artifacts;
 #[cfg(feature = "chat")]
 mod chat;
 pub mod config;
@@ -176,6 +180,8 @@ fn build_router_inner(
                - claude://metrics       -- process counters; check spend mid-run\n\
                - claude://projects      -- on-disk project history (history feature)\n\
                - claude://sessions/{id} -- full parsed JSONL log for a session\n\
+               - claude://agents        -- user-level agents (artifacts feature)\n\
+               - claude://agents/{stem} -- one agent's full record + body\n\
              \n\
              For a longer walkthrough call `prompts/get usage_guide`.",
         );
@@ -208,6 +214,18 @@ fn build_router_inner(
             router = router.resource(resource);
         }
         for template in history::templates(&state) {
+            router = router.resource_template(template);
+        }
+    }
+    #[cfg(feature = "artifacts")]
+    {
+        for tool in artifacts::tools(&state) {
+            router = router.tool(tool);
+        }
+        for resource in artifacts::resources(&state) {
+            router = router.resource(resource);
+        }
+        for template in artifacts::templates(&state) {
             router = router.resource_template(template);
         }
     }
@@ -245,7 +263,8 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
             feature = "core",
             feature = "chat",
             feature = "mutations",
-            feature = "history"
+            feature = "history",
+            feature = "artifacts"
         )),
         allow(unused_variables)
     )]
@@ -264,6 +283,11 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
     let history_tools = history::tools(&state);
     #[cfg(not(feature = "history"))]
     let history_tools: Vec<tower_mcp::Tool> = Vec::new();
+
+    #[cfg(feature = "artifacts")]
+    let artifacts_tools = artifacts::tools(&state);
+    #[cfg(not(feature = "artifacts"))]
+    let artifacts_tools: Vec<tower_mcp::Tool> = Vec::new();
 
     #[cfg(feature = "core")]
     let core_tools = core::tools(&state);
@@ -284,6 +308,7 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
         .chain(turn_tool_list)
         .chain(muts)
         .chain(history_tools)
+        .chain(artifacts_tools)
         .map(|t| ToolInfo {
             name: t.name.clone(),
             description: t.description.clone(),

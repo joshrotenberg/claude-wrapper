@@ -50,6 +50,13 @@ mutations = []
 # claude_wrapper::history; no new deps.
 history = []
 
+# Read-only access to user-level agent definitions on disk
+# (`~/.claude/agents/<name>.md`). Tools: agent_list, agent_get.
+# Resources: claude://agents, claude://agents/{name}. Built on
+# claude_wrapper::artifacts; no new deps. Mutations (write/delete)
+# come in a follow-up under the existing `mutations` feature.
+artifacts = []
+
 # Sync (blocking) variants of agent-turn tools: chat_send_sync,
 # chat_send_stream_sync, claude_query_sync. On by default for
 # ergonomic builds. `default-features = false` drops them entirely
@@ -60,7 +67,7 @@ sync-agent-turns = []
 # Convenience profile: the kitchen sink for Finestra-class
 # deployments that want the full surface including mutations
 # and historical session reads.
-full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history"]
+full = ["chat", "core", "metrics", "sync-agent-turns", "mutations", "history", "artifacts"]
 
 [dependencies]
 claude-wrapper = { path = "../claude-wrapper", default-features = false, features = ["async", "json"] }
