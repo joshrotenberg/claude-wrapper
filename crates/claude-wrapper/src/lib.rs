@@ -343,6 +343,7 @@ pub use command::plugin::{
     PluginListCommand, PluginPruneCommand, PluginTagCommand, PluginUninstallCommand,
     PluginUpdateCommand, PluginValidateCommand,
 };
+pub use command::project::ProjectPurgeCommand;
 pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
 pub use command::update::UpdateCommand;
