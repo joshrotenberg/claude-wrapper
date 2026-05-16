@@ -313,16 +313,36 @@ impl QueryCommand {
         self
     }
 
-    /// Set the agent for the session.
+    /// Pin the session to a named subagent (`--agent <name>`).
+    ///
+    /// `name` is resolved by the CLI in this order: inline
+    /// definitions from [`Self::agents_json`], then user-level
+    /// `~/.claude/agents/<name>.md` files, then project-level dirs
+    /// loaded by the active `--setting-sources`.
+    ///
+    /// **Caveat**: as of Claude Code 2.1.143, the CLI silently
+    /// ignores an unknown `name` and falls back to the default
+    /// behavior -- no warning, no error. Callers that want a hard
+    /// "agent must exist" semantics should validate the name out of
+    /// band (e.g. via [`crate::artifacts::AgentsRoot::get`]) before
+    /// passing it here.
     #[must_use]
     pub fn agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
         self
     }
 
-    /// Set custom agents as a JSON object.
+    /// Inline subagent definitions for this session
+    /// (`--agents <json>`).
     ///
-    /// Example: `{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}`
+    /// `json` is a JSON object keyed by agent name, with each value
+    /// carrying at least `description` and `prompt`. Inline
+    /// definitions take precedence over on-disk
+    /// `~/.claude/agents/*.md` of the same name. Pass [`Self::agent`]
+    /// to select which one to use as the session's persona.
+    ///
+    /// Example: `{"reviewer": {"description": "Reviews code",
+    /// "prompt": "You are a code reviewer"}}`.
     #[must_use]
     pub fn agents_json(mut self, json: impl Into<String>) -> Self {
         self.agents_json = Some(json.into());

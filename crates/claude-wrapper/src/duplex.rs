@@ -309,6 +309,8 @@ pub struct DuplexOptions {
     continue_session: bool,
     worktree: bool,
     worktree_name: Option<String>,
+    agent: Option<String>,
+    agents_json: Option<String>,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
@@ -389,6 +391,42 @@ impl DuplexOptions {
         self
     }
 
+    /// Pin the session to a named subagent (`--agent <name>`).
+    ///
+    /// `name` is resolved by the CLI in this order: inline
+    /// definitions from [`Self::agents_json`], then user-level
+    /// `~/.claude/agents/<name>.md` files, then project-level dirs
+    /// loaded by the active `--setting-sources`.
+    ///
+    /// **Caveat**: as of Claude Code 2.1.143, the CLI silently
+    /// ignores an unknown `name` and falls back to the default
+    /// behavior -- no warning, no error. Callers that want a hard
+    /// "agent must exist" semantics should validate the name out of
+    /// band (e.g. via [`crate::artifacts::AgentsRoot::get`]) before
+    /// passing it here.
+    #[must_use]
+    pub fn agent(mut self, name: impl Into<String>) -> Self {
+        self.agent = Some(name.into());
+        self
+    }
+
+    /// Inline subagent definitions for this session
+    /// (`--agents <json>`).
+    ///
+    /// `json` is a JSON object keyed by agent name, with each value
+    /// carrying at least `description` and `prompt`. Inline
+    /// definitions take precedence over on-disk
+    /// `~/.claude/agents/*.md` of the same name. Pass [`Self::agent`]
+    /// to select which one to use as the session's persona.
+    ///
+    /// Example: `{"reviewer": {"description": "Reviews code",
+    /// "prompt": "You are a code reviewer"}}`.
+    #[must_use]
+    pub fn agents_json(mut self, json: impl Into<String>) -> Self {
+        self.agents_json = Some(json.into());
+        self
+    }
+
     /// Add a raw argument to the spawn command line.
     ///
     /// Escape hatch for flags not covered by the dedicated builder
@@ -463,6 +501,14 @@ impl DuplexOptions {
             if let Some(n) = self.worktree_name {
                 args.push(n);
             }
+        }
+        if let Some(json) = self.agents_json {
+            args.push("--agents".to_string());
+            args.push(json);
+        }
+        if let Some(name) = self.agent {
+            args.push("--agent".to_string());
+            args.push(name);
         }
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
@@ -1425,6 +1471,80 @@ mod tests {
         assert!(
             wt_pos < dash_dash_pos,
             "--worktree must precede `--` separator; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_includes_agent_when_set() {
+        let args = DuplexOptions::default().agent("rust-qa").into_args();
+        assert!(
+            args.windows(2).any(|w| w == ["--agent", "rust-qa"]),
+            "missing --agent rust-qa in {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_omits_agent_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(
+            !args.iter().any(|a| a == "--agent"),
+            "--agent should not appear without an explicit agent(...) call; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_includes_agents_json_when_set() {
+        let json = r#"{"reviewer":{"description":"r","prompt":"p"}}"#;
+        let args = DuplexOptions::default().agents_json(json).into_args();
+        let pos = args.iter().position(|a| a == "--agents").unwrap();
+        assert_eq!(args.get(pos + 1).map(String::as_str), Some(json));
+    }
+
+    #[test]
+    fn into_args_omits_agents_json_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--agents"));
+    }
+
+    #[test]
+    fn agent_and_agents_json_compose() {
+        let json = r#"{"reviewer":{"description":"r","prompt":"p"}}"#;
+        let args = DuplexOptions::default()
+            .agents_json(json)
+            .agent("reviewer")
+            .into_args();
+        // Both flags present.
+        assert!(args.iter().any(|a| a == "--agents"));
+        assert!(args.iter().any(|a| a == "--agent"));
+    }
+
+    #[test]
+    fn agent_lands_before_additional_args() {
+        let args = DuplexOptions::default()
+            .agent("rust-qa")
+            .arg("--")
+            .arg("trailing")
+            .into_args();
+        let agent_pos = args.iter().position(|a| a == "--agent").unwrap();
+        let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            agent_pos < dash_dash_pos,
+            "--agent must precede `--` separator; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn agents_json_lands_before_additional_args() {
+        let args = DuplexOptions::default()
+            .agents_json("{}")
+            .arg("--")
+            .arg("trailing")
+            .into_args();
+        let agents_pos = args.iter().position(|a| a == "--agents").unwrap();
+        let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            agents_pos < dash_dash_pos,
+            "--agents must precede `--` separator; got {args:?}"
         );
     }
 
