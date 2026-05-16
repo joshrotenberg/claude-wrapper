@@ -161,7 +161,11 @@ within a single chat queue.
   active strategy (`bedrock | vertex | api_key | oauth_token | \
   subscription`) -- same shape as the `claude_auth_strategy` tool. \
   `subscription` means no env auth pin; for liveness call \
-  `claude_auth_status`.
+  `claude_auth_status`. Also includes a `cli_version` block: \
+  `tested_range` (the [min, max] this server build was verified \
+  against) and `status` (`tested | newer_untested | \
+  older_than_minimum`). `claude_doctor` returns the same \
+  `cli_version_status` field.
 - `claude://tools` -- the registered tool surface; useful for \
   programmatic introspection.
 - `claude://projects` (history feature) -- every project under \

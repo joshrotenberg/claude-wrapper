@@ -173,6 +173,93 @@ async fn config_resource_includes_auth_strategy() {
 }
 
 #[tokio::test]
+async fn config_resource_includes_cli_version_block() {
+    // The server bakes in a tested_cli_version_range; the
+    // claude://config resource exposes it under cli_version.
+    // Status is best-effort -- absent if the binary fetch fails
+    // (e.g., no `claude` on PATH in CI). Range should always be
+    // present.
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let body = client.read_resource("claude://config").await;
+    let text = body
+        .contents
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .filter_map(|v| {
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect::<String>();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("config json");
+    assert!(
+        v["cli_version"].is_object(),
+        "cli_version block missing: {v}"
+    );
+    let range = &v["cli_version"]["tested_range"];
+    assert!(range.is_object(), "tested_range missing: {v}");
+    assert!(range["min"]["major"].is_number());
+    assert!(range["max"]["major"].is_number());
+}
+
+// ---------------------------------------------------------------
+// Live #[ignore] tests for the tested-cli-range surface.
+// Run with: cargo test -p claude-server -- --ignored
+// ---------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "spawns real claude --version"]
+async fn live_config_resource_status_classifies_real_cli() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let body = client.read_resource("claude://config").await;
+    let text = body
+        .contents
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .filter_map(|v| {
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect::<String>();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("config json");
+    let status = &v["cli_version"]["status"];
+    assert!(status.is_object(), "live status missing: {v}");
+    let kind = status["status"].as_str().unwrap_or("");
+    assert!(
+        matches!(kind, "tested" | "newer_untested" | "older_than_minimum"),
+        "unknown status kind {kind:?}: {v}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "spawns real claude doctor; can be slow (3+ minutes)"]
+async fn live_doctor_includes_cli_version_status_field() {
+    let router = build_router(cfg()).expect("router built");
+    let mut client = TestClient::from_router(router);
+    client.initialize().await;
+
+    let result = client
+        .call_tool("claude_doctor", serde_json::json!({}))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&result.all_text()).expect("json");
+    assert!(
+        v["cli_version_status"].is_object(),
+        "doctor missing cli_version_status: {v}"
+    );
+    assert!(
+        v["tested_cli_version_range"].is_object(),
+        "doctor missing tested_cli_version_range: {v}"
+    );
+}
+
+#[tokio::test]
 async fn claude_version_returns_crate_metadata() {
     let router = build_router(cfg()).expect("router built");
     let mut client = TestClient::from_router(router);

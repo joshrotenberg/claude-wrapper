@@ -368,8 +368,31 @@ pub fn registered_tools(config: ServerConfig) -> claude_wrapper::error::Result<V
 /// bounding pathological hangs.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+/// Minimum `claude` CLI version this server has been verified
+/// against. Below this we know flags / argument shapes are missing
+/// or different. See [`claude_wrapper::Claude::cli_version_status`]
+/// for the runtime classifier.
+const TESTED_CLI_MIN: claude_wrapper::CliVersion = claude_wrapper::CliVersion {
+    major: 2,
+    minor: 1,
+    patch: 0,
+};
+
+/// Maximum `claude` CLI version this server has been verified
+/// against. Above this is "untested" -- the wrapper will warn
+/// (via tracing) and the typed status surfaces on
+/// `claude_doctor` + `claude://config`. Bump as we verify against
+/// later releases. Notable past breakage: 2.1.143 repurposed
+/// `claude agents` from a list-agents subcommand to a background-
+/// session TUI, which we caught and worked around.
+const TESTED_CLI_MAX: claude_wrapper::CliVersion = claude_wrapper::CliVersion {
+    major: 2,
+    minor: 1,
+    patch: 143,
+};
+
 fn build_claude(cfg: &ClaudeConfig) -> claude_wrapper::error::Result<Claude> {
-    let mut builder = Claude::builder();
+    let mut builder = Claude::builder().tested_cli_version_range(TESTED_CLI_MIN, TESTED_CLI_MAX);
     if let Some(ref bin) = cfg.binary {
         builder = builder.binary(bin);
     }

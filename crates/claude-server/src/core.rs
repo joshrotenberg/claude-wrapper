@@ -508,7 +508,13 @@ fn tool_auto_mode_critique(state: &ServerState) -> Tool {
 fn tool_doctor(state: &ServerState) -> Tool {
     let claude = state.claude.clone();
     ToolBuilder::new("claude_doctor")
-        .description("Run `claude doctor` for a CLI health check. Can be slow (3+ minutes).")
+        .description(
+            "Run `claude doctor` for a CLI health check. Can be slow (3+ minutes). \
+             Output also includes `cli_version_status` (tested | newer_untested | \
+             older_than_minimum) classifying the installed CLI against the server's \
+             tested-against range, plus `tested_cli_version_range` for the range \
+             itself.",
+        )
         .read_only()
         .handler(move |_input: NoArgs| {
             let claude = claude.clone();
@@ -517,7 +523,24 @@ fn tool_doctor(state: &ServerState) -> Tool {
                     .execute(&claude)
                     .await
                     .map_err(from_wrapper)?;
-                Ok(command_output_json(&out))
+                // Best-effort classification; fall back to omitting
+                // the field if cli_version fetch fails (e.g., binary
+                // missing). Doctor itself is the more authoritative
+                // health check; we just augment.
+                let status = claude.cli_version_status().await.ok();
+                let range = claude.tested_cli_version_range();
+                let mut body = command_output_json_value(&out);
+                if let Some(s) = status {
+                    body["cli_version_status"] =
+                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null);
+                }
+                if let Some((min, max)) = range {
+                    body["tested_cli_version_range"] = json!({
+                        "min": min,
+                        "max": max,
+                    });
+                }
+                Ok(CallToolResult::json(body))
             }
         })
         .build()
@@ -530,12 +553,18 @@ use crate::errors::{from_wrapper, internal};
 /// Wrap a [`CommandOutput`] as the standard tool JSON envelope.
 /// ANSI escape sequences are stripped from stdout/stderr.
 fn command_output_json(out: &CommandOutput) -> CallToolResult {
-    CallToolResult::json(json!({
+    CallToolResult::json(command_output_json_value(out))
+}
+
+/// Same as [`command_output_json`] but returns a raw `serde_json::Value`
+/// so callers can extend it with extra fields before wrapping.
+fn command_output_json_value(out: &CommandOutput) -> serde_json::Value {
+    json!({
         "stdout": strip_ansi(&out.stdout),
         "stderr": strip_ansi(&out.stderr),
         "exit_code": out.exit_code,
         "success": out.success,
-    }))
+    })
 }
 
 /// Strip ANSI/VT escape sequences from a string.

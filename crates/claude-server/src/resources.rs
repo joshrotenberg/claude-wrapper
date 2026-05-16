@@ -156,14 +156,19 @@ fn resource_chats(state: &ServerState) -> Resource {
 }
 
 fn resource_config(state: &ServerState) -> Resource {
-    let cfg = state.config.clone();
+    let state = state.clone();
     ResourceBuilder::new("claude://config")
         .name("Server config")
-        .description("Sanitized view of the active ServerConfig (env values redacted).")
+        .description(
+            "Sanitized view of the active ServerConfig (env values redacted). \
+             Includes an `auth` block (env-derived strategy) and a `cli_version` \
+             block (declared tested-against range plus best-effort live status).",
+        )
         .mime_type("application/json")
         .handler(move || {
-            let cfg = cfg.clone();
+            let state = state.clone();
             async move {
+                let cfg = &state.config;
                 let env: serde_json::Map<String, serde_json::Value> = cfg
                     .claude
                     .env
@@ -171,6 +176,21 @@ fn resource_config(state: &ServerState) -> Resource {
                     .map(|(k, v)| (k.clone(), json!(redact(k, v))))
                     .collect();
                 let auth_summary = claude_wrapper::auth::detect();
+
+                // Best-effort: fetching the live CLI version spawns
+                // a subprocess. If it fails (binary missing, etc.)
+                // we still emit the declared range so callers know
+                // what we WOULD compare against.
+                let live_status = state.claude.cli_version_status().await.ok();
+                let range = state.claude.tested_cli_version_range();
+                let cli_version_block = json!({
+                    "tested_range": range.map(|(min, max)| json!({
+                        "min": min,
+                        "max": max,
+                    })),
+                    "status": live_status,
+                });
+
                 let body = json!({
                     "claude": {
                         "binary": cfg.claude.binary,
@@ -180,6 +200,7 @@ fn resource_config(state: &ServerState) -> Resource {
                         "global_args": cfg.claude.global_args,
                     },
                     "auth": auth_summary,
+                    "cli_version": cli_version_block,
                 });
                 let text = serde_json::to_string_pretty(&body).unwrap_or_default();
                 Ok(ReadResourceResult::text("claude://config", text))
