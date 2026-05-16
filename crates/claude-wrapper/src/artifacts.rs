@@ -145,6 +145,139 @@ impl AgentsRoot {
         }
         parse_agent_file(&path, file_stem)
     }
+
+    /// Write (create or overwrite) an agent at `<file_stem>.md`.
+    ///
+    /// Atomic: writes to a temp file in the same directory and
+    /// renames into place, so a crash mid-write can't leave a
+    /// partially-written file. Creates the agents root directory
+    /// if it doesn't exist.
+    ///
+    /// `file_stem` is validated for path traversal and reserved
+    /// names (empty, `.`, `..`, embedded slashes / NUL bytes).
+    /// To fail when the agent already exists instead of overwriting,
+    /// use [`Self::write_new`].
+    pub fn write(&self, file_stem: &str, input: AgentWriteInput) -> Result<()> {
+        self.write_inner(file_stem, input, true)
+    }
+
+    /// Like [`Self::write`] but errors if the agent already exists.
+    /// Useful for "create only" flows where overwriting an existing
+    /// agent would be a bug.
+    pub fn write_new(&self, file_stem: &str, input: AgentWriteInput) -> Result<()> {
+        self.write_inner(file_stem, input, false)
+    }
+
+    fn write_inner(
+        &self,
+        file_stem: &str,
+        input: AgentWriteInput,
+        allow_overwrite: bool,
+    ) -> Result<()> {
+        validate_stem(file_stem)?;
+        fs::create_dir_all(&self.path)?;
+        let path = self.path.join(format!("{file_stem}.md"));
+        if !allow_overwrite && path.exists() {
+            return Err(Error::Artifacts {
+                message: format!("agent already exists at {}", path.display()),
+            });
+        }
+
+        let markdown = render_agent_markdown(file_stem, &input);
+
+        // Atomic write: tempfile in same dir, then rename. Same-dir
+        // tempfile keeps the rename a single inode operation on most
+        // filesystems.
+        let tmp = self.path.join(format!(".{file_stem}.md.tmp"));
+        fs::write(&tmp, markdown)?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            // Best-effort cleanup; the rename failure is the real error.
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Remove the `<file_stem>.md` agent. Errors if no such file
+    /// exists.
+    pub fn delete(&self, file_stem: &str) -> Result<()> {
+        validate_stem(file_stem)?;
+        let path = self.path.join(format!("{file_stem}.md"));
+        if !path.exists() {
+            return Err(Error::Artifacts {
+                message: format!("no agent at {}", path.display()),
+            });
+        }
+        fs::remove_file(&path)?;
+        Ok(())
+    }
+}
+
+/// Input to [`AgentsRoot::write`] / [`AgentsRoot::write_new`].
+///
+/// Mirrors the parsed [`Agent`] minus the derived bits
+/// (`file_stem` and `file_path` are determined by where the agent
+/// is being written). `body` is required; everything else is
+/// optional and omitted from the rendered frontmatter when empty.
+#[derive(Debug, Clone, Default)]
+pub struct AgentWriteInput {
+    /// Frontmatter `name`. Defaults to the `file_stem` argument
+    /// when absent.
+    pub name: Option<String>,
+    /// Frontmatter `description`. Omitted when None.
+    pub description: Option<String>,
+    /// Frontmatter `tools` as a list; rendered comma-joined.
+    /// Empty list omits the key entirely.
+    pub tools: Vec<String>,
+    /// Frontmatter `model`. Omitted when None.
+    pub model: Option<String>,
+    /// Body of the agent prompt. Trimmed of surrounding whitespace
+    /// before write.
+    pub body: String,
+    /// Additional frontmatter key/value pairs preserved verbatim.
+    /// Iterated in sorted order for deterministic output.
+    pub extra: BTreeMap<String, String>,
+}
+
+fn render_agent_markdown(file_stem: &str, input: &AgentWriteInput) -> String {
+    let name = input.name.as_deref().unwrap_or(file_stem);
+    let mut out = String::from("---\n");
+    out.push_str(&format!("name: {name}\n"));
+    if let Some(desc) = &input.description {
+        out.push_str(&format!("description: {desc}\n"));
+    }
+    if !input.tools.is_empty() {
+        out.push_str(&format!("tools: {}\n", input.tools.join(", ")));
+    }
+    if let Some(model) = &input.model {
+        out.push_str(&format!("model: {model}\n"));
+    }
+    for (k, v) in &input.extra {
+        out.push_str(&format!("{k}: {v}\n"));
+    }
+    out.push_str("---\n\n");
+    out.push_str(input.body.trim());
+    out.push('\n');
+    out
+}
+
+fn validate_stem(stem: &str) -> Result<()> {
+    if stem.is_empty() {
+        return Err(Error::Artifacts {
+            message: "file_stem cannot be empty".into(),
+        });
+    }
+    if stem == "." || stem == ".." {
+        return Err(Error::Artifacts {
+            message: format!("file_stem cannot be {stem:?}"),
+        });
+    }
+    if stem.contains('/') || stem.contains('\\') || stem.contains('\0') {
+        return Err(Error::Artifacts {
+            message: format!("file_stem contains invalid characters: {stem:?}"),
+        });
+    }
+    Ok(())
 }
 
 /// Lightweight metadata for one agent, returned by
@@ -464,5 +597,196 @@ mod tests {
         let root = AgentsRoot::at(tmp.path());
         let agent = root.get("empty-name").expect("get");
         assert_eq!(agent.name, "empty-name");
+    }
+
+    // -- write / write_new / delete -----------------------------------
+
+    fn input_with_body(body: &str) -> AgentWriteInput {
+        AgentWriteInput {
+            body: body.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn write_creates_new_agent_round_trips_via_get() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        let input = AgentWriteInput {
+            name: Some("my-agent".into()),
+            description: Some("does the thing".into()),
+            tools: vec!["Read".into(), "Bash".into()],
+            model: Some("sonnet".into()),
+            body: "You are an agent.".into(),
+            extra: BTreeMap::new(),
+        };
+        root.write("my-agent", input).expect("write");
+
+        let agent = root.get("my-agent").expect("get");
+        assert_eq!(agent.name, "my-agent");
+        assert_eq!(agent.description.as_deref(), Some("does the thing"));
+        assert_eq!(agent.tools, vec!["Read", "Bash"]);
+        assert_eq!(agent.model.as_deref(), Some("sonnet"));
+        assert_eq!(agent.body, "You are an agent.");
+    }
+
+    #[test]
+    fn write_overwrites_existing_agent() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        // rust-qa exists in the fixture.
+        let input = AgentWriteInput {
+            description: Some("rewritten".into()),
+            body: "new body".into(),
+            ..Default::default()
+        };
+        root.write("rust-qa", input).expect("overwrite");
+        let agent = root.get("rust-qa").expect("get");
+        assert_eq!(agent.description.as_deref(), Some("rewritten"));
+        assert_eq!(agent.body, "new body");
+        // tools/model from the original should be gone -- write
+        // replaces the whole file.
+        assert!(agent.tools.is_empty(), "tools: {:?}", agent.tools);
+        assert!(agent.model.is_none());
+    }
+
+    #[test]
+    fn write_new_errors_when_already_exists() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        let err = root
+            .write_new("rust-qa", input_with_body("body"))
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "err: {err}");
+    }
+
+    #[test]
+    fn write_new_succeeds_for_fresh_stem() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        root.write_new("brand-new", input_with_body("hello"))
+            .expect("write_new");
+        let agent = root.get("brand-new").expect("get");
+        assert_eq!(agent.body, "hello");
+    }
+
+    #[test]
+    fn write_creates_root_directory_if_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path().join("does-not-exist-yet"));
+        root.write("foo", input_with_body("body")).expect("write");
+        let agent = root.get("foo").expect("get");
+        assert_eq!(agent.body, "body");
+    }
+
+    #[test]
+    fn write_defaults_name_to_file_stem_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        root.write("my-stem", input_with_body("b")).expect("write");
+        let agent = root.get("my-stem").expect("get");
+        assert_eq!(agent.name, "my-stem");
+    }
+
+    #[test]
+    fn write_preserves_extra_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        let mut extra = BTreeMap::new();
+        extra.insert("custom_key".into(), "custom_value".into());
+        let input = AgentWriteInput {
+            body: "b".into(),
+            extra,
+            ..Default::default()
+        };
+        root.write("ex", input).expect("write");
+        let agent = root.get("ex").expect("get");
+        assert_eq!(
+            agent.extra.get("custom_key").map(String::as_str),
+            Some("custom_value")
+        );
+    }
+
+    #[test]
+    fn write_omits_optional_keys_when_unset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        root.write("min", input_with_body("body only"))
+            .expect("write");
+        let raw = std::fs::read_to_string(tmp.path().join("min.md")).unwrap();
+        assert!(!raw.contains("description:"), "raw: {raw}");
+        assert!(!raw.contains("tools:"), "raw: {raw}");
+        assert!(!raw.contains("model:"), "raw: {raw}");
+    }
+
+    #[test]
+    fn write_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        for bad in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+            let err = root.write(bad, input_with_body("b")).unwrap_err();
+            assert!(
+                err.to_string().to_lowercase().contains("file_stem"),
+                "bad stem {bad:?} not rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_removes_file() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        assert!(root.get("rust-qa").is_ok());
+        root.delete("rust-qa").expect("delete");
+        let err = root.get("rust-qa").unwrap_err();
+        assert!(err.to_string().contains("no agent"), "err: {err}");
+    }
+
+    #[test]
+    fn delete_unknown_stem_errors() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        let err = root.delete("nope").unwrap_err();
+        assert!(err.to_string().contains("no agent"), "err: {err}");
+    }
+
+    #[test]
+    fn delete_rejects_path_traversal() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        for bad in ["", ".", "..", "a/b", "a\\b"] {
+            let err = root.delete(bad).unwrap_err();
+            assert!(
+                err.to_string().to_lowercase().contains("file_stem"),
+                "bad stem {bad:?} not rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_orders_canonical_keys_before_extras() {
+        let mut extra = BTreeMap::new();
+        extra.insert("zzz_last".into(), "v".into());
+        extra.insert("aaa_first".into(), "v".into());
+        let input = AgentWriteInput {
+            name: Some("n".into()),
+            description: Some("d".into()),
+            tools: vec!["t1".into(), "t2".into()],
+            model: Some("haiku".into()),
+            body: "body".into(),
+            extra,
+        };
+        let md = render_agent_markdown("stem", &input);
+        let lines: Vec<&str> = md.lines().collect();
+        // Header
+        assert_eq!(lines[0], "---");
+        // Canonical order: name, description, tools, model, then sorted extras.
+        assert_eq!(lines[1], "name: n");
+        assert_eq!(lines[2], "description: d");
+        assert_eq!(lines[3], "tools: t1, t2");
+        assert_eq!(lines[4], "model: haiku");
+        assert_eq!(lines[5], "aaa_first: v");
+        assert_eq!(lines[6], "zzz_last: v");
+        assert_eq!(lines[7], "---");
     }
 }
