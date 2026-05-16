@@ -3,9 +3,9 @@
 //! Currently exposes [`ProjectPurgeCommand`] for `claude project
 //! purge`, which deletes all Claude Code state for a project --
 //! transcripts, tasks, file history, and config entry. Destructive;
-//! callers running headless should always pass [`Self::yes`] to
-//! skip the confirmation prompt (the CLI hangs on the prompt when
-//! stdin / stdout is not a TTY).
+//! callers running headless should always pass
+//! [`ProjectPurgeCommand::yes`] to skip the confirmation prompt
+//! (the CLI hangs on the prompt when stdin / stdout is not a TTY).
 
 #[cfg(feature = "async")]
 use crate::Claude;
