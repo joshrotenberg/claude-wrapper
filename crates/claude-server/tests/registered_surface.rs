@@ -25,7 +25,6 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_version",
         "claude_cli_version",
         "claude_query",
-        "claude_agents",
         "claude_auth_status",
         "claude_auth_strategy",
         "claude_mcp_list",

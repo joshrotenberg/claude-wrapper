@@ -23,7 +23,6 @@ use claude_wrapper::ClaudeCommand;
 use claude_wrapper::OutputFormat;
 use claude_wrapper::QueryCommand;
 use claude_wrapper::auth;
-use claude_wrapper::command::agents::AgentsCommand;
 use claude_wrapper::command::auth::AuthStatusCommand;
 use claude_wrapper::command::auto_mode::{
     AutoModeConfigCommand, AutoModeCritiqueCommand, AutoModeDefaultsCommand,
@@ -43,7 +42,6 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_version(),
         tool_cli_version(state),
         tool_query(state),
-        tool_agents(state),
         tool_auth_status(state),
         tool_auth_strategy(),
         tool_mcp_list(state),
@@ -240,26 +238,6 @@ fn tool_query_sync(state: &ServerState) -> Tool {
                 let out = q.execute(&claude).await.map_err(from_wrapper)?;
                 let env = parse_query_envelope(&out.stdout)?;
                 Ok(CallToolResult::json(env))
-            }
-        })
-        .build()
-}
-
-// -- claude_agents ---------------------------------------------------
-
-fn tool_agents(state: &ServerState) -> Tool {
-    let claude = state.claude.clone();
-    ToolBuilder::new("claude_agents")
-        .description("Run `claude agents` to list configured agents.")
-        .read_only()
-        .handler(move |_input: NoArgs| {
-            let claude = claude.clone();
-            async move {
-                let out = AgentsCommand::new()
-                    .execute(&claude)
-                    .await
-                    .map_err(from_wrapper)?;
-                Ok(command_output_json(&out))
             }
         })
         .build()
