@@ -339,8 +339,9 @@ pub use command::mcp::{
     McpRemoveCommand, McpResetProjectChoicesCommand, McpServeCommand,
 };
 pub use command::plugin::{
-    PluginDisableCommand, PluginEnableCommand, PluginInstallCommand, PluginListCommand,
-    PluginTagCommand, PluginUninstallCommand, PluginUpdateCommand, PluginValidateCommand,
+    PluginDetailsCommand, PluginDisableCommand, PluginEnableCommand, PluginInstallCommand,
+    PluginListCommand, PluginPruneCommand, PluginTagCommand, PluginUninstallCommand,
+    PluginUpdateCommand, PluginValidateCommand,
 };
 pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
