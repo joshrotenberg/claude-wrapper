@@ -139,10 +139,7 @@ fn tool_chat_open(state: &ServerState) -> Tool {
                 let want_worktree =
                     input.worktree_name.is_some() || input.worktree.unwrap_or(false);
                 if want_worktree {
-                    opts = opts.arg("--worktree");
-                    if let Some(name) = input.worktree_name {
-                        opts = opts.arg(name);
-                    }
+                    opts = opts.worktree(input.worktree_name.as_deref());
                 }
 
                 // Per-chat working_dir override clones the Claude

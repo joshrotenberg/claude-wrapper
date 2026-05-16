@@ -22,6 +22,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_mcp::{CallToolResult, Tool, ToolBuilder};
 
+use claude_wrapper::slash;
+
 use crate::state::ServerState;
 
 /// Build the slash-command tool list.
@@ -57,19 +59,12 @@ fn tool_chat_compact(state: &ServerState) -> Tool {
                 fire_slash(
                     &state,
                     &input.chat_id,
-                    build_compact_prompt(input.instructions),
+                    slash::compact(input.instructions.as_deref()),
                 )
                 .await
             }
         })
         .build()
-}
-
-fn build_compact_prompt(instructions: Option<String>) -> String {
-    match instructions {
-        Some(s) if !s.trim().is_empty() => format!("/compact {}", s.trim()),
-        _ => "/compact".to_string(),
-    }
 }
 
 /// Common fire-a-slash-command machinery. Same shape as the async
@@ -140,28 +135,4 @@ async fn fire_slash(
         "turn_id": turn_id,
         "chat_id": chat_id,
     })))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build_compact_prompt;
-
-    #[test]
-    fn compact_prompt_without_instructions() {
-        assert_eq!(build_compact_prompt(None), "/compact");
-        assert_eq!(build_compact_prompt(Some(String::new())), "/compact");
-        assert_eq!(build_compact_prompt(Some("   ".into())), "/compact");
-    }
-
-    #[test]
-    fn compact_prompt_with_instructions() {
-        assert_eq!(
-            build_compact_prompt(Some("focus on auth".into())),
-            "/compact focus on auth"
-        );
-        assert_eq!(
-            build_compact_prompt(Some("  trim whitespace  ".into())),
-            "/compact trim whitespace"
-        );
-    }
 }
