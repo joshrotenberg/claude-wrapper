@@ -25,8 +25,8 @@ use claude_wrapper::command::marketplace::{
 };
 use claude_wrapper::command::mcp::{McpAddCommand, McpAddJsonCommand, McpRemoveCommand};
 use claude_wrapper::command::plugin::{
-    PluginDisableCommand, PluginEnableCommand, PluginInstallCommand, PluginUninstallCommand,
-    PluginUpdateCommand,
+    PluginDisableCommand, PluginEnableCommand, PluginInstallCommand, PluginPruneCommand,
+    PluginUninstallCommand, PluginUpdateCommand,
 };
 use claude_wrapper::types::Scope;
 
@@ -39,6 +39,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_mcp_remove(state),
         tool_plugin_install(state),
         tool_plugin_uninstall(state),
+        tool_plugin_prune(state),
         tool_plugin_enable(state),
         tool_plugin_disable(state),
         tool_plugin_update(state),
@@ -53,8 +54,9 @@ fn parse_scope(s: &str) -> Result<Scope, tower_mcp::Error> {
         "user" => Ok(Scope::User),
         "project" => Ok(Scope::Project),
         "local" => Ok(Scope::Local),
+        "managed" => Ok(Scope::Managed),
         other => Err(tower_mcp::Error::internal(format!(
-            "invalid scope `{other}` (expected user / project / local)"
+            "invalid scope `{other}` (expected user / project / local / managed)"
         ))),
     }
 }
@@ -210,16 +212,103 @@ fn tool_plugin_install(state: &ServerState) -> Tool {
         .build()
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PluginUninstallInput {
+    plugin: String,
+    /// Scope: user / project / local / managed.
+    #[serde(default)]
+    scope: Option<String>,
+    /// Preserve the plugin's persistent data directory
+    /// (`~/.claude/plugins/data/{id}/`) on uninstall (`--keep-data`).
+    /// Default: data is removed alongside the plugin.
+    #[serde(default)]
+    keep_data: bool,
+    /// Also remove auto-installed dependencies that are no longer
+    /// needed (`--prune`). Requires `yes: true` in non-interactive
+    /// contexts -- which the server always is.
+    #[serde(default)]
+    prune: bool,
+    /// Skip the confirmation prompt (`-y`). **The server is always
+    /// non-TTY**, so leaving this off will hang the underlying CLI
+    /// on its prompt. Default true here so the common case doesn't
+    /// trip; pass `false` if you want the CLI to prompt (only useful
+    /// for testing).
+    #[serde(default = "default_true")]
+    yes: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn tool_plugin_uninstall(state: &ServerState) -> Tool {
     let claude = state.claude.clone();
     ToolBuilder::new("claude_plugin_uninstall")
-        .description("Run `claude plugin uninstall <plugin>`.")
-        .handler(move |input: PluginScopedInput| {
+        .description(
+            "Run `claude plugin uninstall <plugin>`. Defaults `yes: true` \
+             since the server is always non-TTY and the underlying CLI \
+             would otherwise hang on its confirmation prompt. Optional \
+             flags: `keep_data` (preserve data dir), `prune` (remove \
+             auto-installed deps), `scope` (user|project|local|managed).",
+        )
+        .handler(move |input: PluginUninstallInput| {
             let claude = Arc::clone(&claude);
             async move {
                 let mut cmd = PluginUninstallCommand::new(input.plugin);
                 if let Some(s) = input.scope {
                     cmd = cmd.scope(parse_scope(&s)?);
+                }
+                if input.keep_data {
+                    cmd = cmd.keep_data();
+                }
+                if input.prune {
+                    cmd = cmd.prune();
+                }
+                if input.yes {
+                    cmd = cmd.yes();
+                }
+                let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
+                Ok(cmd_output_json(&out))
+            }
+        })
+        .build()
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct PluginPruneInput {
+    /// Print what would be removed without removing anything.
+    #[serde(default)]
+    dry_run: bool,
+    /// Scope: user / project / local / managed.
+    #[serde(default)]
+    scope: Option<String>,
+    /// Skip confirmation (`-y`). Defaults true for non-TTY safety;
+    /// pass `false` to let the CLI prompt (only useful for testing).
+    #[serde(default = "default_true")]
+    yes: bool,
+}
+
+fn tool_plugin_prune(state: &ServerState) -> Tool {
+    let claude = state.claude.clone();
+    ToolBuilder::new("claude_plugin_prune")
+        .description(
+            "Run `claude plugin prune` (alias `autoremove`) to remove \
+             auto-installed dependencies that are no longer needed. \
+             Defaults `yes: true` since the server is always non-TTY. \
+             Optional `dry_run` previews without removing.",
+        )
+        .handler(move |input: PluginPruneInput| {
+            let claude = Arc::clone(&claude);
+            async move {
+                let mut cmd = PluginPruneCommand::new();
+                if input.dry_run {
+                    cmd = cmd.dry_run();
+                }
+                if let Some(s) = input.scope {
+                    cmd = cmd.scope(parse_scope(&s)?);
+                }
+                if input.yes {
+                    cmd = cmd.yes();
                 }
                 let out = cmd.execute(&claude).await.map_err(from_wrapper)?;
                 Ok(cmd_output_json(&out))

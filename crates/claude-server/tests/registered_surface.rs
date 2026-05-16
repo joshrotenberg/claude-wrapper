@@ -30,6 +30,7 @@ fn registered_tools_includes_core_l2_surface() {
         "claude_mcp_list",
         "claude_mcp_get",
         "claude_plugin_list",
+        "claude_plugin_details",
         "claude_plugin_validate",
         "claude_marketplace_list",
         "claude_auto_mode_config",

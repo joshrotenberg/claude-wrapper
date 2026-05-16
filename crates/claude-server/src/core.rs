@@ -30,7 +30,9 @@ use claude_wrapper::command::auto_mode::{
 use claude_wrapper::command::doctor::DoctorCommand;
 use claude_wrapper::command::marketplace::MarketplaceListCommand;
 use claude_wrapper::command::mcp::{McpGetCommand, McpListCommand};
-use claude_wrapper::command::plugin::{PluginListCommand, PluginValidateCommand};
+use claude_wrapper::command::plugin::{
+    PluginDetailsCommand, PluginListCommand, PluginValidateCommand,
+};
 use claude_wrapper::exec::CommandOutput;
 
 use crate::state::ServerState;
@@ -47,6 +49,7 @@ pub(crate) fn tools(state: &ServerState) -> Vec<Tool> {
         tool_mcp_list(state),
         tool_mcp_get(state),
         tool_plugin_list(state),
+        tool_plugin_details(state),
         tool_plugin_validate(state),
         tool_marketplace_list(state),
         tool_auto_mode_config(state),
@@ -346,6 +349,35 @@ fn tool_plugin_list(state: &ServerState) -> Tool {
             let claude = claude.clone();
             async move {
                 let out = PluginListCommand::new()
+                    .execute(&claude)
+                    .await
+                    .map_err(from_wrapper)?;
+                Ok(command_output_json(&out))
+            }
+        })
+        .build()
+}
+
+// -- claude_plugin_details ------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PluginDetailsInput {
+    /// Plugin name to look up.
+    plugin: String,
+}
+
+fn tool_plugin_details(state: &ServerState) -> Tool {
+    let claude = state.claude.clone();
+    ToolBuilder::new("claude_plugin_details")
+        .description(
+            "Run `claude plugin details <name>` to show a plugin's \
+             component inventory and projected token cost. Read-only.",
+        )
+        .read_only()
+        .handler(move |input: PluginDetailsInput| {
+            let claude = claude.clone();
+            async move {
+                let out = PluginDetailsCommand::new(input.plugin)
                     .execute(&claude)
                     .await
                     .map_err(from_wrapper)?;

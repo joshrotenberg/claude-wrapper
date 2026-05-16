@@ -28,6 +28,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "claude_mcp_remove",
     "claude_plugin_install",
     "claude_plugin_uninstall",
+    "claude_plugin_prune",
     "claude_plugin_enable",
     "claude_plugin_disable",
     "claude_plugin_update",
