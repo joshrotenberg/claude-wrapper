@@ -307,6 +307,8 @@ pub struct DuplexOptions {
     append_system_prompt: Option<String>,
     resume: Option<String>,
     continue_session: bool,
+    worktree: bool,
+    worktree_name: Option<String>,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
@@ -365,6 +367,25 @@ impl DuplexOptions {
     #[must_use]
     pub fn continue_session(mut self) -> Self {
         self.continue_session = true;
+        self
+    }
+
+    /// Run this session in a fresh git worktree (`--worktree [name]`).
+    ///
+    /// `name` is the optional worktree name (the CLI auto-generates
+    /// one if omitted). Calling this method always enables the
+    /// worktree flag, with or without a name.
+    ///
+    /// Use case: an agent host wants the chat's writes isolated from
+    /// the current working tree -- the chat opens with a fresh
+    /// worktree, mutations land there, and the host can inspect or
+    /// merge later.
+    #[must_use]
+    pub fn worktree(mut self, name: Option<impl Into<String>>) -> Self {
+        self.worktree = true;
+        if let Some(n) = name {
+            self.worktree_name = Some(n.into());
+        }
         self
     }
 
@@ -436,6 +457,12 @@ impl DuplexOptions {
         }
         if self.continue_session {
             args.push("--continue".to_string());
+        }
+        if self.worktree {
+            args.push("--worktree".to_string());
+            if let Some(n) = self.worktree_name {
+                args.push(n);
+            }
         }
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
@@ -1353,6 +1380,52 @@ mod tests {
     fn into_args_omits_continue_by_default() {
         let args = DuplexOptions::default().into_args();
         assert!(!args.iter().any(|a| a == "--continue"));
+    }
+
+    #[test]
+    fn into_args_includes_worktree_flag_without_name() {
+        let args = DuplexOptions::default().worktree(None::<&str>).into_args();
+        assert!(args.iter().any(|a| a == "--worktree"));
+        // No name means no positional follows --worktree.
+        let pos = args.iter().position(|a| a == "--worktree").unwrap();
+        assert!(
+            args.get(pos + 1).is_none_or(|a| a.starts_with("--")),
+            "--worktree without a name should not be followed by a positional; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_includes_worktree_flag_with_name() {
+        let args = DuplexOptions::default()
+            .worktree(Some("agent-xyz"))
+            .into_args();
+        let pos = args.iter().position(|a| a == "--worktree").unwrap();
+        assert_eq!(args.get(pos + 1).map(String::as_str), Some("agent-xyz"));
+    }
+
+    #[test]
+    fn into_args_omits_worktree_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(
+            !args.iter().any(|a| a == "--worktree"),
+            "--worktree should not appear without an explicit worktree(...) call; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_lands_before_additional_args() {
+        // Same `--` ordering bug class as resume.
+        let args = DuplexOptions::default()
+            .worktree(Some("foo"))
+            .arg("--")
+            .arg("trailing")
+            .into_args();
+        let wt_pos = args.iter().position(|a| a == "--worktree").unwrap();
+        let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            wt_pos < dash_dash_pos,
+            "--worktree must precede `--` separator; got {args:?}"
+        );
     }
 
     #[test]

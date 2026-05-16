@@ -304,6 +304,7 @@ pub mod mcp_config;
 pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
+pub mod slash;
 pub mod streaming;
 pub mod tool_pattern;
 pub mod types;
