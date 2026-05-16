@@ -93,6 +93,141 @@ pub struct AuthSummary {
     pub vertex_enabled: bool,
 }
 
+/// Best-effort classification of an auth-related CLI failure.
+///
+/// Returned by [`classify_failure`]. Hosts can use it to surface a
+/// cleaner message ("run `claude login`") instead of dumping CLI
+/// stderr, or to skip retry policies on errors that won't resolve
+/// on their own.
+///
+/// Conservative on purpose: false positives turn legitimate non-auth
+/// failures into "auth error" surprises, so the classifier prefers
+/// to miss an auth error than to misclassify a non-auth one. Use
+/// [`AuthErrorKind::Other`] only when stronger signals (HTTP status
+/// strings, the literal word "auth") fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthErrorKind {
+    /// No credentials at all -- the user has not run `claude login`
+    /// and has no env auth set. Fix: run `claude login` or set one
+    /// of the env vars listed in [`AuthStrategy`].
+    NotAuthenticated,
+    /// Stored OAuth/session credentials existed but are expired.
+    /// Fix: re-run `claude login`.
+    Expired,
+    /// Credentials were presented but rejected. Most often a wrong
+    /// or revoked `ANTHROPIC_API_KEY`, or an `CLAUDE_CODE_OAUTH_TOKEN`
+    /// that no longer maps to a valid session.
+    InvalidCredentials,
+    /// Authenticated but the request was rejected for rate limit /
+    /// quota / billing reasons. Different remediation: wait, top up,
+    /// or switch keys -- not "log in again."
+    RateLimit,
+    /// Bedrock or Vertex provider error (cloud creds missing or
+    /// rejected). Distinct because the fix lives in the cloud
+    /// provider's auth, not in `claude login`.
+    ProviderError,
+    /// Looked auth-shaped (HTTP 401/403, the word "auth", etc.) but
+    /// didn't match any of the more specific patterns. Useful for
+    /// callers that want "is this an auth thing?" without needing
+    /// to know the exact subcategory.
+    Other,
+}
+
+impl AuthErrorKind {
+    /// Stable string label, useful for logs and protocol payloads.
+    /// Matches the `serde_json` representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAuthenticated => "not_authenticated",
+            Self::Expired => "expired",
+            Self::InvalidCredentials => "invalid_credentials",
+            Self::RateLimit => "rate_limit",
+            Self::ProviderError => "provider_error",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Inspect a failed `claude` invocation and decide whether it looks
+/// auth-shaped. Returns `Some(kind)` only when the patterns are
+/// confident enough to risk relabeling.
+///
+/// `exit_code`, `stdout`, and `stderr` come from the CLI's exit; the
+/// classifier matches against the lowercased concatenation. The
+/// patterns are intentionally narrow:
+///
+/// - "not authenticated" / "claude login" / "no credentials" / "no auth"
+///   -> [`AuthErrorKind::NotAuthenticated`]
+/// - "expired" / "session has expired" / "token expired" -> [`AuthErrorKind::Expired`]
+/// - "invalid api key" / "invalid token" / "401" / "unauthorized" / "403"
+///   / "forbidden" -> [`AuthErrorKind::InvalidCredentials`]
+/// - "rate limit" / "quota" / "too many requests" / "429" -> [`AuthErrorKind::RateLimit`]
+/// - "bedrock" or "vertex" present alongside an auth signal -> [`AuthErrorKind::ProviderError`]
+/// - bare "auth" / "credential" hit with nothing more specific -> [`AuthErrorKind::Other`]
+pub fn classify_failure(_exit_code: i32, stdout: &str, stderr: &str) -> Option<AuthErrorKind> {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+
+    // Provider hits (Bedrock / Vertex) take precedence when the
+    // failure mentions them alongside an auth signal -- the fix is
+    // different (cloud creds, not `claude login`).
+    let mentions_provider = combined.contains("bedrock") || combined.contains("vertex");
+    let mentions_auth_signal = combined.contains("auth")
+        || combined.contains("credential")
+        || combined.contains("401")
+        || combined.contains("403")
+        || combined.contains("forbidden")
+        || combined.contains("unauthorized");
+    if mentions_provider && mentions_auth_signal {
+        return Some(AuthErrorKind::ProviderError);
+    }
+
+    if combined.contains("rate limit")
+        || combined.contains("too many requests")
+        || combined.contains("429")
+        || combined.contains("quota")
+    {
+        return Some(AuthErrorKind::RateLimit);
+    }
+
+    if combined.contains("expired")
+        || combined.contains("session has expired")
+        || combined.contains("token expired")
+    {
+        return Some(AuthErrorKind::Expired);
+    }
+
+    if combined.contains("invalid api key")
+        || combined.contains("invalid token")
+        || combined.contains("401")
+        || combined.contains("unauthorized")
+        || combined.contains("403")
+        || combined.contains("forbidden")
+    {
+        return Some(AuthErrorKind::InvalidCredentials);
+    }
+
+    if combined.contains("not authenticated")
+        || combined.contains("claude login")
+        || combined.contains("no credentials")
+        || combined.contains("no auth")
+    {
+        return Some(AuthErrorKind::NotAuthenticated);
+    }
+
+    // Last-resort bucket: a bare "auth" or "credential" mention
+    // without specifics. Conservative: only fires when the word is
+    // present in stderr (where these errors typically land) so we
+    // don't catch `--allowed-tools auth_helper` or similar.
+    if stderr.to_ascii_lowercase().contains("auth")
+        || stderr.to_ascii_lowercase().contains("credential")
+    {
+        return Some(AuthErrorKind::Other);
+    }
+
+    None
+}
+
 /// Detect the active auth strategy from the current process
 /// environment. Cheap; no subprocess, no filesystem reads.
 pub fn detect() -> AuthSummary {
@@ -257,6 +392,139 @@ mod tests {
             let s = detect_from(&env(&[("CLAUDE_CODE_USE_BEDROCK", v)]));
             assert_eq!(s.strategy, AuthStrategy::Subscription, "value {v:?}");
             assert!(!s.bedrock_enabled, "value {v:?}");
+        }
+    }
+
+    // -- classify_failure ---------------------------------------------
+
+    #[test]
+    fn classify_returns_none_for_unrelated_failure() {
+        assert_eq!(classify_failure(1, "no match found", ""), None);
+        assert_eq!(
+            classify_failure(2, "", "syntax error near unexpected token"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_not_authenticated_from_stderr_hint() {
+        assert_eq!(
+            classify_failure(1, "", "Not authenticated. Run `claude login` to sign in."),
+            Some(AuthErrorKind::NotAuthenticated)
+        );
+        assert_eq!(
+            classify_failure(1, "", "no credentials configured"),
+            Some(AuthErrorKind::NotAuthenticated)
+        );
+    }
+
+    #[test]
+    fn classify_expired_session() {
+        assert_eq!(
+            classify_failure(1, "", "Your session has expired. Please log in again."),
+            Some(AuthErrorKind::Expired)
+        );
+        assert_eq!(
+            classify_failure(1, "", "token expired at 2025-01-01T00:00:00Z"),
+            Some(AuthErrorKind::Expired)
+        );
+    }
+
+    #[test]
+    fn classify_invalid_api_key() {
+        assert_eq!(
+            classify_failure(1, "", "Invalid API key. Check ANTHROPIC_API_KEY."),
+            Some(AuthErrorKind::InvalidCredentials)
+        );
+        assert_eq!(
+            classify_failure(1, "", "HTTP 401 Unauthorized"),
+            Some(AuthErrorKind::InvalidCredentials)
+        );
+        assert_eq!(
+            classify_failure(1, "", "403 Forbidden"),
+            Some(AuthErrorKind::InvalidCredentials)
+        );
+    }
+
+    #[test]
+    fn classify_rate_limit_takes_precedence_over_invalid_creds() {
+        // Some API responses include "401-like" wording in their rate
+        // limit messages; rate_limit should win.
+        assert_eq!(
+            classify_failure(1, "", "Rate limit exceeded. Please wait."),
+            Some(AuthErrorKind::RateLimit)
+        );
+        assert_eq!(
+            classify_failure(1, "", "HTTP 429 Too Many Requests"),
+            Some(AuthErrorKind::RateLimit)
+        );
+        assert_eq!(
+            classify_failure(1, "", "quota exceeded for this account"),
+            Some(AuthErrorKind::RateLimit)
+        );
+    }
+
+    #[test]
+    fn classify_provider_error_when_bedrock_plus_auth_signal() {
+        assert_eq!(
+            classify_failure(
+                1,
+                "",
+                "Bedrock auth failed: AWS credentials not found in chain"
+            ),
+            Some(AuthErrorKind::ProviderError)
+        );
+        assert_eq!(
+            classify_failure(
+                1,
+                "",
+                "Vertex unauthorized -- check GOOGLE_APPLICATION_CREDENTIALS"
+            ),
+            Some(AuthErrorKind::ProviderError)
+        );
+    }
+
+    #[test]
+    fn classify_falls_back_to_other_for_bare_auth_mention() {
+        assert_eq!(
+            classify_failure(1, "", "auth subsystem returned an unexpected error"),
+            Some(AuthErrorKind::Other)
+        );
+    }
+
+    #[test]
+    fn classify_does_not_match_auth_in_stdout_only() {
+        // The fallback "Other" bucket only fires on stderr -- otherwise
+        // a CLI that just happened to print "--allowed-tools auth_helper"
+        // would be misclassified.
+        assert_eq!(
+            classify_failure(0, "auth_helper enabled, all clear", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_examines_stdout_for_specific_patterns() {
+        // Specific patterns work in either stream -- some CLIs print
+        // their auth diagnostics to stdout.
+        assert_eq!(
+            classify_failure(1, "Invalid API key", ""),
+            Some(AuthErrorKind::InvalidCredentials)
+        );
+    }
+
+    #[test]
+    fn auth_error_kind_as_str_matches_serde_repr() {
+        for k in [
+            AuthErrorKind::NotAuthenticated,
+            AuthErrorKind::Expired,
+            AuthErrorKind::InvalidCredentials,
+            AuthErrorKind::RateLimit,
+            AuthErrorKind::ProviderError,
+            AuthErrorKind::Other,
+        ] {
+            let json = serde_json::to_string(&k).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
         }
     }
 

@@ -140,13 +140,13 @@ async fn run_internal(
     let exit_code = output.status.code().unwrap_or(-1);
 
     if !output.status.success() {
-        return Err(Error::CommandFailed {
-            command: format!("{} {}", binary.display(), args.join(" ")),
+        return Err(Error::from_command_failure(
+            format!("{} {}", binary.display(), args.join(" ")),
             exit_code,
             stdout,
             stderr,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        });
+            working_dir.map(|p| p.to_path_buf()),
+        ));
     }
 
     Ok(CommandOutput {
@@ -216,13 +216,13 @@ async fn run_with_timeout(
             let exit_code = status.code().unwrap_or(-1);
 
             if !status.success() {
-                return Err(Error::CommandFailed {
-                    command: format!("{} {}", binary.display(), args.join(" ")),
+                return Err(Error::from_command_failure(
+                    format!("{} {}", binary.display(), args.join(" ")),
                     exit_code,
                     stdout,
                     stderr,
-                    working_dir: working_dir.map(|p| p.to_path_buf()),
-                });
+                    working_dir.map(|p| p.to_path_buf()),
+                ));
             }
 
             Ok(CommandOutput {
@@ -380,13 +380,13 @@ fn run_internal_sync(
     let exit_code = output.status.code().unwrap_or(-1);
 
     if !output.status.success() {
-        return Err(Error::CommandFailed {
-            command: format!("{} {}", binary.display(), args.join(" ")),
+        return Err(Error::from_command_failure(
+            format!("{} {}", binary.display(), args.join(" ")),
             exit_code,
             stdout,
             stderr,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        });
+            working_dir.map(|p| p.to_path_buf()),
+        ));
     }
 
     Ok(CommandOutput {
@@ -458,13 +458,13 @@ fn run_with_timeout_sync(
             let exit_code = status.code().unwrap_or(-1);
 
             if !status.success() {
-                return Err(Error::CommandFailed {
-                    command: format!("{} {}", binary.display(), args.join(" ")),
+                return Err(Error::from_command_failure(
+                    format!("{} {}", binary.display(), args.join(" ")),
                     exit_code,
                     stdout,
                     stderr,
-                    working_dir: working_dir.map(|p| p.to_path_buf()),
-                });
+                    working_dir.map(|p| p.to_path_buf()),
+                ));
             }
 
             Ok(CommandOutput {
