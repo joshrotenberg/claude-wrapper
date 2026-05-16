@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::auth::AuthErrorKind;
+
 /// Errors returned by claude-wrapper operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -105,6 +107,96 @@ pub enum Error {
         /// Human-readable description of what went wrong.
         message: String,
     },
+
+    /// A `claude` invocation failed and looked auth-shaped to the
+    /// classifier. Hosts can match on this variant to trigger a
+    /// re-auth flow, surface a clean message, or skip retries.
+    /// `kind` carries the best-effort subcategory; `message` is the
+    /// stderr (or stdout fallback) the classifier matched against.
+    ///
+    /// Raised at exec time when [`crate::auth::classify_failure`]
+    /// returns `Some(_)` for a CLI failure that would otherwise
+    /// have been [`Error::CommandFailed`]. Cases the classifier
+    /// missed remain `CommandFailed`; call
+    /// [`Error::auth_kind`] for opt-in inspection of those.
+    #[error("auth error ({kind:?}): {command} (exit code {exit_code}): {message}")]
+    Auth {
+        /// Best-effort classification.
+        kind: AuthErrorKind,
+        /// The full command line that failed.
+        command: String,
+        /// Process exit code.
+        exit_code: i32,
+        /// Human-readable message extracted from stderr (or stdout).
+        message: String,
+    },
+}
+
+impl Error {
+    /// Construct an [`Error`] from a CLI failure. Runs the
+    /// auth-error classifier; if it matches, returns
+    /// [`Error::Auth`]. Otherwise returns [`Error::CommandFailed`]
+    /// unchanged.
+    ///
+    /// This is the canonical entry point for raising failures from
+    /// `exec.rs`-shaped sites -- replacing direct construction of
+    /// `CommandFailed` ensures every consumer benefits from typed
+    /// auth errors automatically.
+    pub fn from_command_failure(
+        command: String,
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+        working_dir: Option<PathBuf>,
+    ) -> Self {
+        if let Some(kind) = crate::auth::classify_failure(exit_code, &stdout, &stderr) {
+            // Prefer stderr for the human-facing message; fall back
+            // to stdout when stderr is empty (some CLIs send all
+            // diagnostics to stdout).
+            let message = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            Self::Auth {
+                kind,
+                command,
+                exit_code,
+                message,
+            }
+        } else {
+            Self::CommandFailed {
+                command,
+                exit_code,
+                stdout,
+                stderr,
+                working_dir,
+            }
+        }
+    }
+
+    /// Inspect whether this error is auth-shaped. Returns
+    /// `Some(kind)` for [`Error::Auth`] (the auto-typed path) and
+    /// also re-runs [`crate::auth::classify_failure`] on
+    /// [`Error::CommandFailed`] for cases the constructor missed.
+    /// Returns `None` for everything else (`Io`, `Timeout`, etc.).
+    ///
+    /// Most consumers should match on [`Error::Auth`] directly --
+    /// this method is the escape hatch for low-confidence
+    /// classifier patterns the constructor was too conservative
+    /// about.
+    pub fn auth_kind(&self) -> Option<AuthErrorKind> {
+        match self {
+            Self::Auth { kind, .. } => Some(*kind),
+            Self::CommandFailed {
+                exit_code,
+                stdout,
+                stderr,
+                ..
+            } => crate::auth::classify_failure(*exit_code, stdout, stderr),
+            _ => None,
+        }
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -199,5 +291,78 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("spawn failed"));
         assert!(s.contains("/work"));
+    }
+
+    // -- from_command_failure / auth_kind ---------------------------
+
+    #[test]
+    fn from_command_failure_unrelated_stderr_yields_command_failed() {
+        let e = Error::from_command_failure(
+            "claude --print".into(),
+            1,
+            String::new(),
+            "syntax error".into(),
+            None,
+        );
+        assert!(matches!(e, Error::CommandFailed { .. }));
+        assert_eq!(e.auth_kind(), None);
+    }
+
+    #[test]
+    fn from_command_failure_auth_stderr_yields_auth_variant() {
+        let e = Error::from_command_failure(
+            "claude --print".into(),
+            1,
+            String::new(),
+            "Not authenticated. Run `claude login`.".into(),
+            None,
+        );
+        match &e {
+            Error::Auth { kind, message, .. } => {
+                assert_eq!(*kind, AuthErrorKind::NotAuthenticated);
+                assert!(message.contains("Not authenticated"));
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+        assert_eq!(e.auth_kind(), Some(AuthErrorKind::NotAuthenticated));
+    }
+
+    #[test]
+    fn from_command_failure_uses_stdout_message_when_stderr_empty() {
+        let e = Error::from_command_failure(
+            "claude --print".into(),
+            1,
+            "Invalid API key".into(),
+            String::new(),
+            None,
+        );
+        match &e {
+            Error::Auth { message, kind, .. } => {
+                assert_eq!(*kind, AuthErrorKind::InvalidCredentials);
+                assert_eq!(message, "Invalid API key");
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_kind_inspects_command_failed_for_missed_classifications() {
+        // The constructor would have caught this, but a hand-built
+        // CommandFailed (e.g. constructed by older code or by a
+        // caller not going through the helper) is still inspectable.
+        let e = Error::CommandFailed {
+            command: "claude --print".into(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "401 Unauthorized".into(),
+            working_dir: None,
+        };
+        assert_eq!(e.auth_kind(), Some(AuthErrorKind::InvalidCredentials));
+    }
+
+    #[test]
+    fn auth_kind_returns_none_for_non_command_errors() {
+        assert_eq!(Error::NotFound.auth_kind(), None);
+        assert_eq!(Error::Timeout { timeout_seconds: 5 }.auth_kind(), None);
     }
 }
