@@ -59,8 +59,10 @@ impl ClaudeCommand for AutoModeConfigCommand {
     }
 }
 
-/// Print the default auto-mode environment, allow, and deny rules as
-/// JSON. Useful as a reference when writing custom rules.
+/// Print the default auto-mode environment, allow, soft_deny, and
+/// hard_deny rules as JSON. Useful as a reference when writing
+/// custom rules. The soft/hard deny split distinguishes "warn but
+/// allow when explicitly overridden" from "always block."
 #[derive(Debug, Clone, Default)]
 pub struct AutoModeDefaultsCommand;
 

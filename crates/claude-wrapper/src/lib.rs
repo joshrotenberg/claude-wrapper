@@ -323,7 +323,7 @@ pub use command::ClaudeCommandSyncExt;
 #[allow(deprecated)]
 pub use command::agents::AgentsCommand;
 pub use command::auth::{
-    AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, SetupTokenCommand,
+    AuthLoginCommand, AuthLogoutCommand, AuthStatusCommand, LoginMode, SetupTokenCommand,
 };
 pub use command::auto_mode::{
     AutoModeConfigCommand, AutoModeCritiqueCommand, AutoModeDefaultsCommand,
