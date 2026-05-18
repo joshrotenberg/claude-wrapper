@@ -239,6 +239,21 @@ pub struct SessionSummary {
     /// Auto-generated title if Claude Code emitted an `ai-title`
     /// entry; None otherwise.
     pub title: Option<String>,
+    /// First ~160 chars of the first user message's text content,
+    /// flattened to a single line. Useful as a fallback display name
+    /// when `title` is None (which is most sessions today since
+    /// claude-code only writes ai-titles intermittently). None when
+    /// the session has no readable user message.
+    pub first_user_preview: Option<String>,
+    /// Sum of `message.usage.total_cost_usd` across every assistant
+    /// entry. Always None on current claude-code (the field is written
+    /// as `null`); kept in the shape so we can plumb it through if the
+    /// upstream behavior changes. Use `total_tokens` for a usage proxy.
+    pub total_cost_usd: Option<f64>,
+    /// Sum of input + output + cache tokens across every assistant
+    /// entry. None when the session has no assistant entries. Cheap to
+    /// derive from `message.usage`, which claude-code DOES write.
+    pub total_tokens: Option<u64>,
     /// File size in bytes.
     pub size_bytes: u64,
 }
@@ -328,6 +343,9 @@ fn summarize_session(
     let mut first_timestamp = None;
     let mut last_timestamp = None;
     let mut title = None;
+    let mut first_user_preview: Option<String> = None;
+    let mut total_cost_usd: Option<f64> = None;
+    let mut total_tokens: Option<u64> = None;
 
     for line in reader.lines().map_while(std::io::Result::ok) {
         let trimmed = line.trim();
@@ -340,7 +358,42 @@ fn summarize_session(
         };
         let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
         match ty {
-            "user" | "assistant" => message_count += 1,
+            "user" => {
+                message_count += 1;
+                if first_user_preview.is_none()
+                    && let Some(p) = extract_user_text_preview(&v, 160)
+                {
+                    first_user_preview = Some(p);
+                }
+            }
+            "assistant" => {
+                message_count += 1;
+                if let Some(c) = v
+                    .get("message")
+                    .and_then(|m| m.get("usage"))
+                    .and_then(|u| u.get("total_cost_usd"))
+                    .and_then(Value::as_f64)
+                {
+                    *total_cost_usd.get_or_insert(0.0) += c;
+                }
+                if let Some(usage) = v.get("message").and_then(|m| m.get("usage")) {
+                    // Sum every token bucket so cache + non-cache both count.
+                    let mut t = 0u64;
+                    for k in [
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                    ] {
+                        if let Some(n) = usage.get(k).and_then(Value::as_u64) {
+                            t += n;
+                        }
+                    }
+                    if t > 0 {
+                        *total_tokens.get_or_insert(0) += t;
+                    }
+                }
+            }
             "ai-title" => {
                 if let Some(t) = v.get("title").and_then(Value::as_str) {
                     title = Some(t.to_string());
@@ -363,8 +416,54 @@ fn summarize_session(
         first_timestamp,
         last_timestamp,
         title,
+        first_user_preview,
+        total_cost_usd,
+        total_tokens,
         size_bytes,
     })
+}
+
+/// Pull a single-line, truncated preview out of a user-entry JSON.
+/// Accepts both `message.content: "string"` and the structured form
+/// `message.content: [{type:"text", text:"..."}, ...]`. Skips entries
+/// where the first user "message" is actually a tool_result (those
+/// happen when claude-code resumes a session that was mid-tool).
+fn extract_user_text_preview(entry: &Value, max_chars: usize) -> Option<String> {
+    let content = entry.get("message")?.get("content")?;
+    let raw = if let Some(s) = content.as_str() {
+        s.to_string()
+    } else if let Some(arr) = content.as_array() {
+        let mut buf = String::new();
+        for block in arr {
+            let ty = block.get("type").and_then(Value::as_str).unwrap_or("");
+            if ty == "text"
+                && let Some(t) = block.get("text").and_then(Value::as_str)
+            {
+                if !buf.is_empty() {
+                    buf.push(' ');
+                }
+                buf.push_str(t);
+            }
+        }
+        buf
+    } else {
+        return None;
+    };
+    let one_line = raw
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one_line.is_empty() {
+        return None;
+    }
+    let truncated: String = one_line.chars().take(max_chars).collect();
+    if truncated.len() < one_line.len() {
+        Some(format!("{truncated}..."))
+    } else {
+        Some(truncated)
+    }
 }
 
 fn parse_session(path: &Path, session_id: String, project_slug: String) -> Result<SessionLog> {
