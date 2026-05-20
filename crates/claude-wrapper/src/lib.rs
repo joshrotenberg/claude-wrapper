@@ -308,6 +308,8 @@ pub mod mcp_config;
 pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
+#[cfg(feature = "json")]
+pub mod settings;
 pub mod skills;
 pub mod slash;
 pub mod streaming;
