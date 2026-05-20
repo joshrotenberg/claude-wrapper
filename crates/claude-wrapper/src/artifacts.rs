@@ -396,7 +396,7 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
 /// after the frontmatter). Frontmatter is delimited by a leading
 /// `---` line and a closing `---` line. Anything else returns
 /// `(None, full_text)`.
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
     let mut lines = raw.split_inclusive('\n');
     let Some(first) = lines.next() else {
         return (None, raw);
