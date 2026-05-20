@@ -182,6 +182,7 @@ use tracing::{debug, warn};
 
 use crate::Claude;
 use crate::error::{Error, Result};
+use crate::types::PermissionMode;
 
 /// Default capacity of the per-session [`broadcast::Sender`] backing
 /// [`DuplexSession::subscribe`].
@@ -311,6 +312,8 @@ pub struct DuplexOptions {
     worktree_name: Option<String>,
     agent: Option<String>,
     agents_json: Option<String>,
+    permission_mode: Option<PermissionMode>,
+    dangerously_skip_permissions: bool,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
@@ -427,6 +430,40 @@ impl DuplexOptions {
         self
     }
 
+    /// Set the permission mode for this session
+    /// (`--permission-mode <mode>`).
+    ///
+    /// Mirrors [`QueryCommand::permission_mode`](crate::QueryCommand::permission_mode)
+    /// for the duplex path. The default mode (when this method isn't
+    /// called) drops to the CLI's interactive prompt for every
+    /// tool-use approval, which is broken for non-interactive duplex
+    /// sessions -- nothing answers the prompts and the session stalls
+    /// or fails. Call this with [`PermissionMode::AcceptEdits`] for
+    /// the "edit files autonomously" pattern, [`PermissionMode::Plan`]
+    /// for read-only planning, etc.
+    ///
+    /// Bypass mode is a footgun; reach for [`Self::dangerously_skip_permissions`]
+    /// (or, for stricter discipline, [`crate::dangerous::DangerousClient`])
+    /// when you really need it.
+    #[must_use]
+    pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = Some(mode);
+        self
+    }
+
+    /// Pass `--dangerously-skip-permissions` to the spawned session.
+    ///
+    /// Bypasses ALL permission checks -- file edits, bash, network,
+    /// the lot. Use only when you know the session runs in a trusted
+    /// sandbox (a fresh worktree, a container, etc.). For most "run
+    /// autonomously" cases you want [`Self::permission_mode`] with
+    /// [`PermissionMode::AcceptEdits`] instead.
+    #[must_use]
+    pub fn dangerously_skip_permissions(mut self) -> Self {
+        self.dangerously_skip_permissions = true;
+        self
+    }
+
     /// Add a raw argument to the spawn command line.
     ///
     /// Escape hatch for flags not covered by the dedicated builder
@@ -509,6 +546,13 @@ impl DuplexOptions {
         if let Some(name) = self.agent {
             args.push("--agent".to_string());
             args.push(name);
+        }
+        if let Some(mode) = self.permission_mode {
+            args.push("--permission-mode".to_string());
+            args.push(mode.as_arg().to_string());
+        }
+        if self.dangerously_skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
         }
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
@@ -1761,6 +1805,46 @@ mod tests {
     fn into_args_omits_permission_prompt_tool_without_handler() {
         let args = DuplexOptions::default().into_args();
         assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
+    }
+
+    #[test]
+    fn into_args_emits_permission_mode_flag() {
+        let args = DuplexOptions::default()
+            .permission_mode(PermissionMode::AcceptEdits)
+            .into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--permission-mode", "acceptEdits"]),
+            "missing --permission-mode acceptEdits in {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_emits_plan_mode() {
+        let args = DuplexOptions::default()
+            .permission_mode(PermissionMode::Plan)
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn into_args_omits_permission_mode_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--permission-mode"));
+    }
+
+    #[test]
+    fn into_args_emits_dangerously_skip_permissions_flag() {
+        let args = DuplexOptions::default()
+            .dangerously_skip_permissions()
+            .into_args();
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn into_args_omits_dangerously_skip_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
     #[test]
