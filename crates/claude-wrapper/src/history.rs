@@ -72,6 +72,65 @@ pub struct HistoryRoot {
     path: PathBuf,
 }
 
+/// Sort order for [`HistoryRoot::list_projects_with`] /
+/// [`HistoryRoot::list_sessions_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListSort {
+    /// Sort by the on-disk identifier alphabetically: slug for
+    /// projects, session id for sessions. This is the default for
+    /// the zero-arg [`HistoryRoot::list_projects`] /
+    /// [`HistoryRoot::list_sessions`] methods to preserve the
+    /// historical behavior of the pre-pagination API.
+    #[default]
+    NameAsc,
+    /// Sort by most-recent activity, descending. For projects this
+    /// is `last_modified` (filesystem mtime). For sessions this is
+    /// `last_timestamp` (the last JSONL entry's `timestamp` field,
+    /// compared lexicographically -- which matches chronological
+    /// order for the ISO-8601 UTC strings Claude Code writes).
+    /// Items with `None` last-time end up at the tail.
+    RecencyDesc,
+}
+
+/// Filter + sort + paginate options for the listing methods.
+///
+/// `Default::default()` preserves the historical zero-arg behavior:
+/// no limit, no offset, name-ascending sort, and **`include_empty
+/// = true`** (everything is returned). Callers wanting paginated
+/// or filtered output -- the typical case for the new `_with`
+/// methods -- override the relevant fields explicitly.
+#[derive(Debug, Clone)]
+pub struct ListOptions {
+    /// Max items to return after sorting + offset. `None` = no cap.
+    pub limit: Option<usize>,
+    /// Skip the first N items after sorting. Used with `limit` for
+    /// pagination. `0` means "start from the first item."
+    pub offset: usize,
+    /// When `false`, drop entries with no real activity -- for
+    /// projects, `session_count == 0`; for sessions, `message_count
+    /// == 0` (the orphan stub files Claude Code sometimes leaves
+    /// behind when a session never produced a turn). Default `true`
+    /// so the zero-arg [`HistoryRoot::list_projects`] /
+    /// [`HistoryRoot::list_sessions`] methods preserve their
+    /// pre-pagination "include everything" behavior. New paginated
+    /// callers (e.g. an MCP tool layer) should set this to `false`
+    /// to hide orphan stub sessions and empty project directories.
+    pub include_empty: bool,
+    /// Sort order. See [`ListSort`].
+    pub sort: ListSort,
+}
+
+impl Default for ListOptions {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            offset: 0,
+            include_empty: true,
+            sort: ListSort::default(),
+        }
+    }
+}
+
 impl HistoryRoot {
     /// Resolve the default `~/.claude/projects`. Errors if `$HOME`
     /// (or the platform-specific user home) cannot be determined.
@@ -95,12 +154,33 @@ impl HistoryRoot {
         &self.path
     }
 
-    /// List every project directory at the root.
+    /// List every project directory at the root, sorted by slug.
     ///
-    /// Returns an empty vec if the root directory doesn't exist
-    /// (a fresh Claude Code install hasn't created `~/.claude/projects`
-    /// yet). Errors only on filesystem failures other than "not found."
+    /// Convenience wrapper around [`Self::list_projects_with`] with
+    /// [`ListOptions::default`] (no limit, no offset, name-ascending
+    /// sort, includes empty projects). Existing callers keep their
+    /// behavior; new callers wanting pagination or recency sort
+    /// should use [`Self::list_projects_with`].
+    ///
+    /// Returns an empty vec if the root directory doesn't exist.
     pub fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
+        self.list_projects_with(&ListOptions::default())
+    }
+
+    /// List project directories with filter / sort / pagination.
+    ///
+    /// Reads every direct child directory of the root, summarizes
+    /// each, then applies (in order):
+    ///
+    /// 1. Filter out empty projects (`session_count == 0`) when
+    ///    `opts.include_empty` is `false`.
+    /// 2. Sort by `opts.sort` ([`ListSort::NameAsc`] by default,
+    ///    [`ListSort::RecencyDesc`] for "most recent first").
+    /// 3. Skip the first `opts.offset` items.
+    /// 4. Truncate to `opts.limit` items.
+    ///
+    /// Returns an empty vec if the root directory doesn't exist.
+    pub fn list_projects_with(&self, opts: &ListOptions) -> Result<Vec<ProjectSummary>> {
         let entries = match fs::read_dir(&self.path) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -118,21 +198,58 @@ impl HistoryRoot {
             }
             let slug = entry.file_name().to_string_lossy().into_owned();
             let summary = summarize_project(&entry.path(), slug);
+            if !opts.include_empty && summary.session_count == 0 {
+                continue;
+            }
             out.push(summary);
         }
-        out.sort_by(|a, b| a.slug.cmp(&b.slug));
+        match opts.sort {
+            ListSort::NameAsc => out.sort_by(|a, b| a.slug.cmp(&b.slug)),
+            ListSort::RecencyDesc => out.sort_by(|a, b| {
+                // None at the tail.
+                match (a.last_modified, b.last_modified) {
+                    (Some(am), Some(bm)) => bm.cmp(&am),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.slug.cmp(&b.slug),
+                }
+            }),
+        }
+        apply_offset_limit(&mut out, opts);
         Ok(out)
     }
 
-    /// List sessions, optionally filtered to one project's `slug`.
+    /// List sessions, optionally filtered to one project's `slug`,
+    /// sorted by session id.
     ///
-    /// When `slug` is `None`, walks every project directory and
-    /// returns the union, sorted by session id.
+    /// Convenience wrapper around [`Self::list_sessions_with`] with
+    /// [`ListOptions::default`].
     pub fn list_sessions(&self, slug: Option<&str>) -> Result<Vec<SessionSummary>> {
+        self.list_sessions_with(slug, &ListOptions::default())
+    }
+
+    /// List sessions with filter / sort / pagination.
+    ///
+    /// When `slug` is `Some`, only that project is walked. When
+    /// `None`, every project directory is unioned. The options
+    /// pipeline is the same as [`Self::list_projects_with`]:
+    /// filter empty (`message_count == 0`) sessions unless
+    /// `opts.include_empty`, sort, then offset + limit.
+    pub fn list_sessions_with(
+        &self,
+        slug: Option<&str>,
+        opts: &ListOptions,
+    ) -> Result<Vec<SessionSummary>> {
+        // Project enumeration here always wants every project (no
+        // pagination), because we'll paginate the merged sessions.
+        let enumerate_opts = ListOptions {
+            include_empty: true,
+            ..ListOptions::default()
+        };
         let project_dirs = match slug {
             Some(s) => vec![self.path.join(s)],
             None => self
-                .list_projects()?
+                .list_projects_with(&enumerate_opts)?
                 .into_iter()
                 .map(|p| self.path.join(&p.slug))
                 .collect(),
@@ -162,11 +279,27 @@ impl HistoryRoot {
                     continue;
                 };
                 if let Some(summary) = summarize_session(&path, session_id, project_slug.clone()) {
+                    if !opts.include_empty && summary.message_count == 0 {
+                        continue;
+                    }
                     out.push(summary);
                 }
             }
         }
-        out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        match opts.sort {
+            ListSort::NameAsc => out.sort_by(|a, b| a.session_id.cmp(&b.session_id)),
+            ListSort::RecencyDesc => out.sort_by(|a, b| {
+                // ISO 8601 UTC strings sort lexicographically by time.
+                // None at the tail.
+                match (a.last_timestamp.as_deref(), b.last_timestamp.as_deref()) {
+                    (Some(at), Some(bt)) => bt.cmp(at),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.session_id.cmp(&b.session_id),
+                }
+            }),
+        }
+        apply_offset_limit(&mut out, opts);
         Ok(out)
     }
 
@@ -301,6 +434,23 @@ pub enum HistoryEntry {
 
 // -- helpers --------------------------------------------------------
 
+/// Apply offset + limit in-place to a sorted vec. Pulled out so the
+/// project and session list paths share the same pagination logic.
+fn apply_offset_limit<T>(items: &mut Vec<T>, opts: &ListOptions) {
+    if opts.offset >= items.len() {
+        items.clear();
+        return;
+    }
+    if opts.offset > 0 {
+        items.drain(..opts.offset);
+    }
+    if let Some(lim) = opts.limit
+        && items.len() > lim
+    {
+        items.truncate(lim);
+    }
+}
+
 fn summarize_project(dir: &Path, slug: String) -> ProjectSummary {
     let mut session_count = 0usize;
     let mut last_modified: Option<SystemTime> = None;
@@ -395,7 +545,16 @@ fn summarize_session(
                 }
             }
             "ai-title" => {
-                if let Some(t) = v.get("title").and_then(Value::as_str) {
+                // Claude Code writes this field as `aiTitle` (camelCase),
+                // not `title`. Read both for resilience against future
+                // renames -- whichever is present and non-empty wins.
+                let candidate = v
+                    .get("aiTitle")
+                    .and_then(Value::as_str)
+                    .or_else(|| v.get("title").and_then(Value::as_str));
+                if let Some(t) = candidate
+                    && !t.is_empty()
+                {
                     title = Some(t.to_string());
                 }
             }
@@ -592,6 +751,19 @@ mod tests {
         path
     }
 
+    // Set the file mtime explicitly so recency-sort tests don't depend
+    // on filesystem mtime granularity (Linux ext4 ticks at 1s by
+    // default, so fixtures written back-to-back end up with identical
+    // mtimes and the sort is non-deterministic).
+    fn set_mtime(path: &Path, secs_since_epoch: u64) {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("reopen for mtime");
+        let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs_since_epoch);
+        f.set_modified(when).expect("set mtime");
+    }
+
     fn fixture_root() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Project A: two sessions
@@ -604,7 +776,7 @@ mod tests {
                 r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","cwd":"/Users/josh/Code/projA","gitBranch":"main","message":{"role":"user","content":"hello"}}"#,
                 r#"{"type":"assistant","uuid":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"hi"}}"#,
                 r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:02Z"}"#,
-                r#"{"type":"ai-title","title":"hello world"}"#,
+                r#"{"type":"ai-title","aiTitle":"hello world"}"#,
             ],
         );
         write_session(
@@ -792,5 +964,319 @@ mod tests {
             PathBuf::from("/Users/josh/Code/foo")
         );
         assert_eq!(decode_slug("-tmp-bar"), PathBuf::from("/tmp/bar"));
+    }
+
+    // -- ListOptions / pagination -----------------------------------
+
+    /// Build a fixture with five projects of varying activity so
+    /// recency sort and pagination have meaningful inputs.
+    fn paginated_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two empty projects (no .jsonl files), three with one each.
+        for stem in ["-zzz-empty1", "-aaa-empty2"] {
+            fs::create_dir_all(tmp.path().join(stem)).unwrap();
+        }
+        for (stem, ts, mtime) in [
+            ("-bbb-proj", "2026-03-01T00:00:00Z", 1_700_000_000),
+            ("-ccc-proj", "2026-04-01T00:00:00Z", 1_700_001_000),
+            ("-ddd-proj", "2026-05-01T00:00:00Z", 1_700_002_000),
+        ] {
+            let dir = tmp.path().join(stem);
+            fs::create_dir_all(&dir).unwrap();
+            let session_path = write_session(
+                &dir,
+                "s1",
+                &[&format!(
+                    r#"{{"type":"user","uuid":"u","timestamp":"{ts}","message":{{"role":"user","content":"x"}}}}"#
+                )],
+            );
+            set_mtime(&session_path, mtime);
+        }
+        tmp
+    }
+
+    #[test]
+    fn list_projects_with_include_empty_false_filters_them_out() {
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root
+            .list_projects_with(&ListOptions {
+                include_empty: false,
+                ..Default::default()
+            })
+            .expect("list");
+        let slugs: Vec<&str> = projects.iter().map(|p| p.slug.as_str()).collect();
+        // Empty projects (-zzz-empty1 / -aaa-empty2) filtered out.
+        assert_eq!(slugs, ["-bbb-proj", "-ccc-proj", "-ddd-proj"]);
+    }
+
+    #[test]
+    fn list_projects_with_default_includes_empty_for_bc() {
+        // Default::default() must preserve legacy "include everything"
+        // semantics so zero-arg list_projects() doesn't change behavior.
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root
+            .list_projects_with(&ListOptions::default())
+            .expect("list");
+        assert_eq!(projects.len(), 5);
+    }
+
+    #[test]
+    fn list_projects_zero_arg_preserves_legacy_inclusion() {
+        // The original list_projects() returned everything in slug order;
+        // we must NOT regress that contract for existing callers.
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root.list_projects().expect("list");
+        assert_eq!(projects.len(), 5);
+        let slugs: Vec<&str> = projects.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            [
+                "-aaa-empty2",
+                "-bbb-proj",
+                "-ccc-proj",
+                "-ddd-proj",
+                "-zzz-empty1",
+            ]
+        );
+    }
+
+    #[test]
+    fn list_projects_with_limit_caps_results() {
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root
+            .list_projects_with(&ListOptions {
+                limit: Some(2),
+                include_empty: true,
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(projects.len(), 2);
+    }
+
+    #[test]
+    fn list_projects_with_offset_skips() {
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root
+            .list_projects_with(&ListOptions {
+                offset: 3,
+                include_empty: true,
+                ..Default::default()
+            })
+            .expect("list");
+        // NameAsc default; skipping 3 from [aaa, bbb, ccc, ddd, zzz]
+        // leaves [ddd, zzz].
+        let slugs: Vec<&str> = projects.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(slugs, ["-ddd-proj", "-zzz-empty1"]);
+    }
+
+    #[test]
+    fn list_projects_with_offset_past_end_returns_empty() {
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        let projects = root
+            .list_projects_with(&ListOptions {
+                offset: 99,
+                include_empty: true,
+                ..Default::default()
+            })
+            .expect("list");
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn list_projects_with_recency_desc_sort() {
+        let tmp = paginated_fixture();
+        let root = HistoryRoot::at(tmp.path());
+        // -ddd-proj has the newest session (May 2026), then -ccc, then -bbb.
+        // The fixture writes them in order so filesystem mtimes also
+        // progress. Filter empties so the tail isn't a no-mtime project.
+        let projects = root
+            .list_projects_with(&ListOptions {
+                sort: ListSort::RecencyDesc,
+                include_empty: false,
+                ..Default::default()
+            })
+            .expect("list");
+        let slugs: Vec<&str> = projects.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(slugs, ["-ddd-proj", "-ccc-proj", "-bbb-proj"]);
+    }
+
+    #[test]
+    fn list_sessions_with_include_empty_false_filters_zero_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        // One real session.
+        write_session(
+            &dir,
+            "real",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-05-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+            ],
+        );
+        // One orphan: just a queue-op, no user/assistant.
+        write_session(
+            &dir,
+            "orphan",
+            &[
+                r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-01T00:00:00Z"}"#,
+            ],
+        );
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root
+            .list_sessions_with(
+                Some("-proj"),
+                &ListOptions {
+                    include_empty: false,
+                    ..Default::default()
+                },
+            )
+            .expect("list");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["real"]);
+    }
+
+    #[test]
+    fn list_sessions_with_default_returns_orphans_for_bc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        write_session(
+            &dir,
+            "orphan",
+            &[
+                r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-01T00:00:00Z"}"#,
+            ],
+        );
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root
+            .list_sessions_with(Some("-proj"), &ListOptions::default())
+            .expect("list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].message_count, 0);
+    }
+
+    #[test]
+    fn list_sessions_with_recency_desc_sort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        let old_p = write_session(
+            &dir,
+            "old",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+            ],
+        );
+        let new_p = write_session(
+            &dir,
+            "new",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-12-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+            ],
+        );
+        let mid_p = write_session(
+            &dir,
+            "mid",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-06-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+            ],
+        );
+        set_mtime(&old_p, 1_700_000_000);
+        set_mtime(&mid_p, 1_700_001_000);
+        set_mtime(&new_p, 1_700_002_000);
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root
+            .list_sessions_with(
+                Some("-proj"),
+                &ListOptions {
+                    sort: ListSort::RecencyDesc,
+                    ..Default::default()
+                },
+            )
+            .expect("list");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["new", "mid", "old"]);
+    }
+
+    #[test]
+    fn list_sessions_with_limit_and_offset_combine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..5 {
+            write_session(
+                &dir,
+                &format!("s{i}"),
+                &[&format!(
+                    r#"{{"type":"user","uuid":"u","timestamp":"2026-01-0{i}T00:00:00Z","message":{{"role":"user","content":"x"}}}}"#
+                )],
+            );
+        }
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root
+            .list_sessions_with(
+                Some("-proj"),
+                &ListOptions {
+                    offset: 1,
+                    limit: Some(2),
+                    ..Default::default()
+                },
+            )
+            .expect("list");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        // NameAsc default: ids are s0..s4; skip 1, take 2 → ["s1","s2"].
+        assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    // -- aiTitle parsing bug fix ---------------------------------------
+
+    #[test]
+    fn session_summary_parses_ai_title_camelcase() {
+        // Real claude-code writes the title under `aiTitle`, not
+        // `title`. Regression test for the field-name bug.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        write_session(
+            &dir,
+            "real-shape",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-05-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+                r#"{"type":"ai-title","aiTitle":"My Session","sessionId":"real-shape"}"#,
+            ],
+        );
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root.list_sessions(Some("-proj")).expect("list");
+        let s = sessions
+            .iter()
+            .find(|s| s.session_id == "real-shape")
+            .unwrap();
+        assert_eq!(s.title.as_deref(), Some("My Session"));
+    }
+
+    #[test]
+    fn session_summary_legacy_title_field_still_works() {
+        // Older fixtures used `title`; we still accept it as a fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("-proj");
+        fs::create_dir_all(&dir).unwrap();
+        write_session(
+            &dir,
+            "legacy",
+            &[
+                r#"{"type":"user","uuid":"u","timestamp":"2026-05-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
+                r#"{"type":"ai-title","title":"Legacy Form"}"#,
+            ],
+        );
+        let root = HistoryRoot::at(tmp.path());
+        let sessions = root.list_sessions(Some("-proj")).expect("list");
+        let s = sessions.iter().find(|s| s.session_id == "legacy").unwrap();
+        assert_eq!(s.title.as_deref(), Some("Legacy Form"));
     }
 }
