@@ -652,6 +652,19 @@ mod tests {
         path
     }
 
+    // Set the file mtime explicitly so recency-sort tests don't depend
+    // on filesystem mtime granularity (Linux ext4 ticks at 1s by
+    // default, so fixtures written back-to-back end up with identical
+    // mtimes and the sort is non-deterministic).
+    fn set_mtime(path: &Path, secs_since_epoch: u64) {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("reopen for mtime");
+        let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs_since_epoch);
+        f.set_modified(when).expect("set mtime");
+    }
+
     fn fixture_root() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Project A: two sessions
@@ -864,20 +877,21 @@ mod tests {
         for stem in ["-zzz-empty1", "-aaa-empty2"] {
             fs::create_dir_all(tmp.path().join(stem)).unwrap();
         }
-        for (stem, ts) in [
-            ("-bbb-proj", "2026-03-01T00:00:00Z"),
-            ("-ccc-proj", "2026-04-01T00:00:00Z"),
-            ("-ddd-proj", "2026-05-01T00:00:00Z"),
+        for (stem, ts, mtime) in [
+            ("-bbb-proj", "2026-03-01T00:00:00Z", 1_700_000_000),
+            ("-ccc-proj", "2026-04-01T00:00:00Z", 1_700_001_000),
+            ("-ddd-proj", "2026-05-01T00:00:00Z", 1_700_002_000),
         ] {
             let dir = tmp.path().join(stem);
             fs::create_dir_all(&dir).unwrap();
-            write_session(
+            let session_path = write_session(
                 &dir,
                 "s1",
                 &[&format!(
                     r#"{{"type":"user","uuid":"u","timestamp":"{ts}","message":{{"role":"user","content":"x"}}}}"#
                 )],
             );
+            set_mtime(&session_path, mtime);
         }
         tmp
     }
@@ -1053,27 +1067,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("-proj");
         fs::create_dir_all(&dir).unwrap();
-        write_session(
+        let old_p = write_session(
             &dir,
             "old",
             &[
                 r#"{"type":"user","uuid":"u","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
             ],
         );
-        write_session(
+        let new_p = write_session(
             &dir,
             "new",
             &[
                 r#"{"type":"user","uuid":"u","timestamp":"2026-12-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
             ],
         );
-        write_session(
+        let mid_p = write_session(
             &dir,
             "mid",
             &[
                 r#"{"type":"user","uuid":"u","timestamp":"2026-06-01T00:00:00Z","message":{"role":"user","content":"x"}}"#,
             ],
         );
+        set_mtime(&old_p, 1_700_000_000);
+        set_mtime(&mid_p, 1_700_001_000);
+        set_mtime(&new_p, 1_700_002_000);
         let root = HistoryRoot::at(tmp.path());
         let sessions = root
             .list_sessions_with(
