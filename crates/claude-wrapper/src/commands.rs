@@ -22,10 +22,10 @@
 //!
 //! **Skills** also surface as slash commands (`/recall`,
 //! `/draft-pr-first`, etc.) but they're a separate on-disk artifact
-//! type. Use [`crate::skills::SkillsRoot`] for those. A consumer
-//! that wants "the full slash command universe at this moment"
-//! combines the two lists itself (and accepts that built-ins
-//! aren't represented).
+//! type and are not loaded by this module. A consumer that wants
+//! "the full slash command universe at this moment" combines this
+//! list with a separate skills enumeration (and accepts that
+//! built-ins aren't represented).
 //!
 //! # Two levels of granularity
 //!
