@@ -292,6 +292,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod budget;
 pub mod command;
+pub mod commands;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod conversation;
 pub mod dangerous;
