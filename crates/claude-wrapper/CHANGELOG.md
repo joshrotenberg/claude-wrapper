@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.9.0...v0.10.0) - 2026-05-20
+
+### Added
+
+- settings -- read on-disk settings layers ([#612](https://github.com/joshrotenberg/claude-wrapper/pull/612))
+- commands -- read custom slash command files ([#613](https://github.com/joshrotenberg/claude-wrapper/pull/613))
+- *(history)* paginate list tools + fix aiTitle field name ([#610](https://github.com/joshrotenberg/claude-wrapper/pull/610))
+- *(duplex)* permission_mode + dangerously_skip_permissions builders ([#614](https://github.com/joshrotenberg/claude-wrapper/pull/614))
+- skills -- read-side ~/.claude/skills/<stem>/SKILL.md ([#611](https://github.com/joshrotenberg/claude-wrapper/pull/611))
+- *(history)* expand SessionSummary with preview, cost, tokens ([#609](https://github.com/joshrotenberg/claude-wrapper/pull/609))
+- jobs -- read-side background-job state introspection ([#606](https://github.com/joshrotenberg/claude-wrapper/pull/606))
+- ProjectPurgeCommand for `claude project purge` ([#604](https://github.com/joshrotenberg/claude-wrapper/pull/604))
+- auth login modes + sso fix + auto_mode docstring ([#605](https://github.com/joshrotenberg/claude-wrapper/pull/605))
+- plugin lifecycle parity with claude 2.1.143 ([#603](https://github.com/joshrotenberg/claude-wrapper/pull/603))
+- declare tested-against CLI range + runtime drift warning ([#596](https://github.com/joshrotenberg/claude-wrapper/pull/596))
+- --agent / --agents typed builders on DuplexOptions ([#595](https://github.com/joshrotenberg/claude-wrapper/pull/595))
+- worktrees -- read-side git worktree introspection ([#594](https://github.com/joshrotenberg/claude-wrapper/pull/594))
+- AgentsRoot write / write_new / delete ([#592](https://github.com/joshrotenberg/claude-wrapper/pull/592))
+- typed auth errors -- classify CLI failures at exec time ([#591](https://github.com/joshrotenberg/claude-wrapper/pull/591))
+- auth strategy detection from environment ([#590](https://github.com/joshrotenberg/claude-wrapper/pull/590))
+- typed worktree builder + slash command helpers ([#589](https://github.com/joshrotenberg/claude-wrapper/pull/589))
+- artifacts module -- read agent definitions ([#588](https://github.com/joshrotenberg/claude-wrapper/pull/588))
+- *(history)* claude_wrapper::history JSONL session parser ([#587](https://github.com/joshrotenberg/claude-wrapper/pull/587))
+- *(duplex)* DuplexOptions::resume + continue_session ([#586](https://github.com/joshrotenberg/claude-wrapper/pull/586))
+
+### Other
+
+- *(agents)* claude agents is now a TUI; AgentsCommand can't list ([#593](https://github.com/joshrotenberg/claude-wrapper/pull/593))
+- *(workspace)* move claude-wrapper crate into crates/ ([#581](https://github.com/joshrotenberg/claude-wrapper/pull/581))
+
 ## [0.9.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.8.0...v0.9.0) - 2026-05-08
 
 ### Added
