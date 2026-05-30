@@ -60,6 +60,7 @@ pub struct QueryCommand {
     fork_session: bool,
     retry_policy: Option<crate::retry::RetryPolicy>,
     worktree: bool,
+    worktree_name: Option<String>,
     brief: bool,
     debug_filter: Option<String>,
     debug_file: Option<String>,
@@ -111,6 +112,7 @@ impl QueryCommand {
             fork_session: false,
             retry_policy: None,
             worktree: false,
+            worktree_name: None,
             brief: false,
             debug_filter: None,
             debug_file: None,
@@ -410,6 +412,35 @@ impl QueryCommand {
     #[must_use]
     pub fn worktree(mut self) -> Self {
         self.worktree = true;
+        self
+    }
+
+    /// Create a new git worktree with an explicit name, providing an
+    /// isolated working directory.
+    ///
+    /// Equivalent to [`Self::worktree`] but emits `--worktree NAME`,
+    /// pinning the worktree's directory/branch name rather than
+    /// letting the CLI auto-generate one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
+    ///
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    ///
+    /// let output = QueryCommand::new("refactor the parser")
+    ///     .worktree_named("parser-refactor")
+    ///     .execute(&claude)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn worktree_named(mut self, name: impl Into<String>) -> Self {
+        self.worktree = true;
+        self.worktree_name = Some(name.into());
         self
     }
 
@@ -785,6 +816,9 @@ impl QueryCommand {
 
         if self.worktree {
             args.push("--worktree".to_string());
+            if let Some(ref name) = self.worktree_name {
+                args.push(name.clone());
+            }
         }
 
         if self.brief {
@@ -1166,6 +1200,16 @@ mod tests {
         let cmd = QueryCommand::new("test").worktree();
         let args = cmd.args();
         assert!(args.contains(&"--worktree".to_string()));
+    }
+
+    #[test]
+    fn test_worktree_named() {
+        let cmd = QueryCommand::new("test").worktree_named("feature-x");
+        let args = cmd.args();
+        assert!(
+            args.windows(2).any(|w| w == ["--worktree", "feature-x"]),
+            "missing --worktree feature-x in {args:?}"
+        );
     }
 
     #[test]
