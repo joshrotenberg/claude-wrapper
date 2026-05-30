@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.10.0...v0.10.1) - 2026-05-30
+
+### Added
+
+- typed partial-message accessor on StreamEvent (closes #617) ([#620](https://github.com/joshrotenberg/claude-wrapper/pull/620))
+- add QueryCommand::worktree_named for explicit name (closes #616) ([#618](https://github.com/joshrotenberg/claude-wrapper/pull/618))
+
 ## [0.10.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.9.0...v0.10.0) - 2026-05-20
 
 ### Added
