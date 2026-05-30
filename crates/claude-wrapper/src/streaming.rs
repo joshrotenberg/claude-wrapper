@@ -64,6 +64,199 @@ impl StreamEvent {
             .or_else(|| self.data.get("cost_usd"))
             .and_then(|v| v.as_f64())
     }
+
+    /// Decode a partial-message event into a typed view.
+    ///
+    /// Returns `Some` when the event is one of the content-block lifecycle
+    /// events surfaced by [`QueryCommand::include_partial_messages`] -- start,
+    /// delta, or stop. Returns `None` for any other event (system, assistant,
+    /// result, message-level stream events, etc).
+    ///
+    /// The CLI wraps each raw streaming event as
+    /// `{"type":"stream_event","event":{...}}`; this accessor unwraps that
+    /// envelope. Unknown block types and unknown delta types fall through to
+    /// [`BlockType::Other`] / [`BlockDelta::Other`] rather than erroring, so
+    /// future content-block kinds remain accessible (just untyped).
+    ///
+    /// # Example
+    ///
+    /// Pull incremental thinking text out of a partial-message event:
+    ///
+    /// ```
+    /// use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, StreamEvent};
+    /// use serde_json::json;
+    ///
+    /// let event: StreamEvent = serde_json::from_value(json!({
+    ///     "type": "stream_event",
+    ///     "event": {
+    ///         "type": "content_block_delta",
+    ///         "index": 0,
+    ///         "delta": { "type": "thinking_delta", "thinking": "Let me think..." }
+    ///     },
+    ///     "session_id": "abc"
+    /// })).unwrap();
+    ///
+    /// match event.partial_message() {
+    ///     Some(PartialMessageEvent::BlockDelta { delta: BlockDelta::Thinking(t), .. }) => {
+    ///         assert_eq!(t, "Let me think...");
+    ///     }
+    ///     _ => unreachable!(),
+    /// }
+    /// ```
+    ///
+    /// [`QueryCommand::include_partial_messages`]: crate::QueryCommand::include_partial_messages
+    pub fn partial_message(&self) -> Option<PartialMessageEvent> {
+        let event = if self.event_type() == Some("stream_event") {
+            self.data.get("event")?
+        } else {
+            &self.data
+        };
+
+        let inner_type = event.get("type")?.as_str()?;
+        let index = event.get("index").and_then(serde_json::Value::as_u64)?;
+        let index = u32::try_from(index).ok()?;
+
+        match inner_type {
+            "content_block_start" => {
+                let block_type = parse_block_type(event.get("content_block")?);
+                Some(PartialMessageEvent::BlockStart { index, block_type })
+            }
+            "content_block_delta" => {
+                let delta = parse_block_delta(event.get("delta")?);
+                Some(PartialMessageEvent::BlockDelta { index, delta })
+            }
+            "content_block_stop" => Some(PartialMessageEvent::BlockStop { index }),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded partial-message event from a streaming `claude` call.
+///
+/// Surfaced by [`StreamEvent::partial_message`] when `--include-partial-messages`
+/// is set. The three variants correspond to the Anthropic streaming content-block
+/// lifecycle: a block starts, gets one or more deltas, then stops.
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartialMessageEvent {
+    /// A new content block is starting. `block_type` says what kind.
+    BlockStart {
+        /// Position of this block within the assistant message.
+        index: u32,
+        /// What kind of block is starting (text, thinking, tool use, ...).
+        block_type: BlockType,
+    },
+    /// Incremental content for an in-progress block.
+    BlockDelta {
+        /// Index of the block this delta applies to (matches a prior [`BlockStart`]).
+        ///
+        /// [`BlockStart`]: PartialMessageEvent::BlockStart
+        index: u32,
+        /// The incremental payload.
+        delta: BlockDelta,
+    },
+    /// The block at `index` is complete.
+    BlockStop {
+        /// Index of the block that just finished.
+        index: u32,
+    },
+}
+
+/// The kind of content block reported by a [`PartialMessageEvent::BlockStart`].
+///
+/// Mirrors the `content_block.type` field from the Anthropic streaming API.
+/// New block kinds added upstream surface as [`BlockType::Other`] -- callers
+/// can still recover the type name from the carried string.
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockType {
+    /// Regular assistant text -- followed by `text_delta` deltas.
+    Text,
+    /// Extended-thinking block -- followed by `thinking_delta` deltas.
+    Thinking,
+    /// A tool invocation -- followed by `input_json_delta` deltas streaming the JSON input.
+    ToolUse {
+        /// Tool-call id, used to correlate the eventual tool result.
+        id: String,
+        /// Name of the tool being called.
+        name: String,
+    },
+    /// Any block type not yet modelled. Carries the raw `type` string.
+    Other(String),
+}
+
+/// The incremental payload carried by a [`PartialMessageEvent::BlockDelta`].
+///
+/// Mirrors the `delta.type` field from the Anthropic streaming API.
+/// Less-common delta kinds (signature, citations, compaction, ...) collapse to
+/// [`BlockDelta::Other`]; callers that need them can fall back to
+/// [`StreamEvent::data`].
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockDelta {
+    /// Chunk of assistant text.
+    Text(String),
+    /// Chunk of extended-thinking text.
+    Thinking(String),
+    /// Chunk of streaming tool-input JSON. Concatenate across deltas to
+    /// reconstruct the full input -- individual chunks are not standalone JSON.
+    InputJson(String),
+    /// Any delta type not modelled above (e.g. `signature_delta`,
+    /// `citations_delta`). Read from [`StreamEvent::data`] for the raw payload.
+    Other,
+}
+
+#[cfg(feature = "json")]
+fn parse_block_type(content_block: &serde_json::Value) -> BlockType {
+    let Some(ty) = content_block
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return BlockType::Other(String::new());
+    };
+    match ty {
+        "text" => BlockType::Text,
+        "thinking" => BlockType::Thinking,
+        "tool_use" => {
+            let id = content_block
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = content_block
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            BlockType::ToolUse { id, name }
+        }
+        other => BlockType::Other(other.to_string()),
+    }
+}
+
+#[cfg(feature = "json")]
+fn parse_block_delta(delta: &serde_json::Value) -> BlockDelta {
+    let Some(ty) = delta.get("type").and_then(serde_json::Value::as_str) else {
+        return BlockDelta::Other;
+    };
+    match ty {
+        "text_delta" => delta
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| BlockDelta::Text(s.to_string()))
+            .unwrap_or(BlockDelta::Other),
+        "thinking_delta" => delta
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| BlockDelta::Thinking(s.to_string()))
+            .unwrap_or(BlockDelta::Other),
+        "input_json_delta" => delta
+            .get("partial_json")
+            .and_then(serde_json::Value::as_str)
+            .map(|s| BlockDelta::InputJson(s.to_string()))
+            .unwrap_or(BlockDelta::Other),
+        _ => BlockDelta::Other,
+    }
 }
 
 /// Execute a command with streaming output, calling a handler for each NDJSON line.
@@ -496,4 +689,200 @@ fn join_with_budget<T: Send + 'static>(
         }
     });
     rx.recv_timeout(budget).ok()
+}
+
+#[cfg(all(test, feature = "json"))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse(v: serde_json::Value) -> StreamEvent {
+        serde_json::from_value(v).expect("valid StreamEvent")
+    }
+
+    fn wrap(inner: serde_json::Value) -> StreamEvent {
+        parse(json!({
+            "type": "stream_event",
+            "event": inner,
+            "session_id": "sess-1",
+            "parent_tool_use_id": null,
+            "uuid": "11111111-1111-1111-1111-111111111111"
+        }))
+    }
+
+    #[test]
+    fn partial_message_text_block_lifecycle() {
+        let start = wrap(json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }));
+        assert_eq!(
+            start.partial_message(),
+            Some(PartialMessageEvent::BlockStart {
+                index: 0,
+                block_type: BlockType::Text,
+            })
+        );
+
+        let delta = wrap(json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "Hello" }
+        }));
+        assert_eq!(
+            delta.partial_message(),
+            Some(PartialMessageEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Text("Hello".into()),
+            })
+        );
+
+        let stop = wrap(json!({ "type": "content_block_stop", "index": 0 }));
+        assert_eq!(
+            stop.partial_message(),
+            Some(PartialMessageEvent::BlockStop { index: 0 })
+        );
+    }
+
+    #[test]
+    fn partial_message_thinking_block_lifecycle() {
+        let start = wrap(json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": { "type": "thinking", "thinking": "", "signature": "" }
+        }));
+        assert_eq!(
+            start.partial_message(),
+            Some(PartialMessageEvent::BlockStart {
+                index: 1,
+                block_type: BlockType::Thinking,
+            })
+        );
+
+        let delta = wrap(json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": { "type": "thinking_delta", "thinking": "weighing options" }
+        }));
+        assert_eq!(
+            delta.partial_message(),
+            Some(PartialMessageEvent::BlockDelta {
+                index: 1,
+                delta: BlockDelta::Thinking("weighing options".into()),
+            })
+        );
+
+        let stop = wrap(json!({ "type": "content_block_stop", "index": 1 }));
+        assert_eq!(
+            stop.partial_message(),
+            Some(PartialMessageEvent::BlockStop { index: 1 })
+        );
+    }
+
+    #[test]
+    fn partial_message_tool_use_block_carries_id_and_name() {
+        let start = wrap(json!({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_abc",
+                "name": "Bash",
+                "input": {}
+            }
+        }));
+        assert_eq!(
+            start.partial_message(),
+            Some(PartialMessageEvent::BlockStart {
+                index: 2,
+                block_type: BlockType::ToolUse {
+                    id: "toolu_abc".into(),
+                    name: "Bash".into(),
+                },
+            })
+        );
+
+        let delta = wrap(json!({
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"cmd\":" }
+        }));
+        assert_eq!(
+            delta.partial_message(),
+            Some(PartialMessageEvent::BlockDelta {
+                index: 2,
+                delta: BlockDelta::InputJson("{\"cmd\":".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn partial_message_unknown_kinds_fall_through_to_other() {
+        let unknown_block = wrap(json!({
+            "type": "content_block_start",
+            "index": 3,
+            "content_block": { "type": "redacted_thinking", "data": "..." }
+        }));
+        assert_eq!(
+            unknown_block.partial_message(),
+            Some(PartialMessageEvent::BlockStart {
+                index: 3,
+                block_type: BlockType::Other("redacted_thinking".into()),
+            })
+        );
+
+        let unknown_delta = wrap(json!({
+            "type": "content_block_delta",
+            "index": 3,
+            "delta": { "type": "signature_delta", "signature": "sig" }
+        }));
+        assert_eq!(
+            unknown_delta.partial_message(),
+            Some(PartialMessageEvent::BlockDelta {
+                index: 3,
+                delta: BlockDelta::Other,
+            })
+        );
+    }
+
+    #[test]
+    fn partial_message_returns_none_for_non_partial_events() {
+        let result = parse(json!({
+            "type": "result",
+            "result": "done",
+            "session_id": "sess-1",
+            "total_cost_usd": 0.01
+        }));
+        assert!(result.partial_message().is_none());
+
+        let assistant = parse(json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [] },
+            "session_id": "sess-1"
+        }));
+        assert!(assistant.partial_message().is_none());
+
+        let message_start = wrap(json!({
+            "type": "message_start",
+            "message": { "id": "msg_1", "role": "assistant", "content": [] }
+        }));
+        assert!(message_start.partial_message().is_none());
+    }
+
+    #[test]
+    fn partial_message_accepts_unwrapped_event() {
+        let raw = parse(json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "hi" }
+        }));
+        assert_eq!(
+            raw.partial_message(),
+            Some(PartialMessageEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Text("hi".into()),
+            })
+        );
+    }
 }
