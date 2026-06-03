@@ -74,6 +74,7 @@ pub struct QueryCommand {
     exclude_dynamic_system_prompt_sections: bool,
     name: Option<String>,
     from_pr: Option<String>,
+    prompt_via_stdin: bool,
 }
 
 impl QueryCommand {
@@ -126,6 +127,7 @@ impl QueryCommand {
             exclude_dynamic_system_prompt_sections: false,
             name: None,
             from_pr: None,
+            prompt_via_stdin: false,
         }
     }
 
@@ -625,7 +627,13 @@ impl QueryCommand {
     pub async fn execute_json(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
         let args = self.build_args_with_forced_json();
 
-        let output = exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?;
+        let output = if self.prompt_via_stdin {
+            // Retry is skipped for stdin mode: the stdin pipe is consumed
+            // after the first attempt and cannot be rewound.
+            exec::run_claude_with_stdin_prompt(claude, args, self.prompt.clone()).await?
+        } else {
+            exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?
+        };
 
         serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
             message: format!("failed to parse query result: {e}"),
@@ -641,7 +649,13 @@ impl QueryCommand {
     /// impl so retries still fire on the sync path.
     #[cfg(feature = "sync")]
     pub fn execute_sync(&self, claude: &Claude) -> Result<CommandOutput> {
-        exec::run_claude_with_retry_sync(claude, self.args(), self.retry_policy.as_ref())
+        if self.prompt_via_stdin {
+            // Retry is skipped for stdin mode: the stdin pipe is consumed
+            // after the first attempt and cannot be rewound.
+            exec::run_claude_with_stdin_prompt_sync(claude, self.build_args(), self.prompt.clone())
+        } else {
+            exec::run_claude_with_retry_sync(claude, self.args(), self.retry_policy.as_ref())
+        }
     }
 
     /// Blocking mirror of [`QueryCommand::execute_json`].
@@ -649,12 +663,49 @@ impl QueryCommand {
     pub fn execute_json_sync(&self, claude: &Claude) -> Result<crate::types::QueryResult> {
         let args = self.build_args_with_forced_json();
 
-        let output = exec::run_claude_with_retry_sync(claude, args, self.retry_policy.as_ref())?;
+        let output = if self.prompt_via_stdin {
+            // Retry is skipped for stdin mode: the stdin pipe is consumed
+            // after the first attempt and cannot be rewound.
+            exec::run_claude_with_stdin_prompt_sync(claude, args, self.prompt.clone())?
+        } else {
+            exec::run_claude_with_retry_sync(claude, args, self.retry_policy.as_ref())?
+        };
 
         serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
             message: format!("failed to parse query result: {e}"),
             source: e,
         })
+    }
+
+    /// Route the prompt through stdin rather than argv.
+    ///
+    /// When set, the prompt body does not appear in the spawned
+    /// process's argument list (`ps`, `/proc/PID/cmdline`, APM
+    /// agents). Use this for any prompt that contains sensitive
+    /// content: private code, internal design notes, orchestrator
+    /// dispatch specs.
+    ///
+    /// Requires that `claude --print` read from stdin when no
+    /// positional prompt is supplied (verified as of claude 2.1.x).
+    ///
+    /// Note: retry is skipped when stdin mode is active -- the stdin
+    /// pipe is consumed after the first attempt and cannot be rewound.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use claude_wrapper::{Claude, ClaudeCommand, QueryCommand};
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    /// let out = QueryCommand::new("my secret prompt")
+    ///     .prompt_via_stdin(true)
+    ///     .execute(&claude)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn prompt_via_stdin(mut self, value: bool) -> Self {
+        self.prompt_via_stdin = value;
+        self
     }
 
     /// Like [`Self::build_args`], but if `output_format` is unset on
@@ -881,8 +932,12 @@ impl QueryCommand {
         }
 
         // Separator to prevent flags like --allowed-tools from consuming the prompt.
-        args.push("--".to_string());
-        args.push(self.prompt.clone());
+        // When prompt_via_stdin is set, the prompt is sent via stdin after spawn
+        // rather than appearing in argv (avoids ps/APM/crash-dump leakage).
+        if !self.prompt_via_stdin {
+            args.push("--".to_string());
+            args.push(self.prompt.clone());
+        }
 
         args
     }
@@ -897,7 +952,14 @@ impl ClaudeCommand for QueryCommand {
 
     #[cfg(feature = "async")]
     async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
-        exec::run_claude_with_retry(claude, self.args(), self.retry_policy.as_ref()).await
+        if self.prompt_via_stdin {
+            // Retry is skipped for stdin mode: the stdin pipe is consumed
+            // after the first attempt and cannot be rewound.
+            let args = self.build_args(); // prompt not in args
+            exec::run_claude_with_stdin_prompt(claude, args, self.prompt.clone()).await
+        } else {
+            exec::run_claude_with_retry(claude, self.args(), self.retry_policy.as_ref()).await
+        }
     }
 }
 
@@ -932,6 +994,55 @@ mod tests {
         let cmd = QueryCommand::new("hello world");
         let args = cmd.args();
         assert_eq!(args, vec!["--print", "--", "hello world"]);
+    }
+
+    #[test]
+    fn prompt_via_stdin_omits_prompt_from_args() {
+        let cmd = QueryCommand::new("secret payload").prompt_via_stdin(true);
+        let args = cmd.args();
+        assert!(
+            !args.contains(&"secret payload".to_string()),
+            "prompt must not appear in args when prompt_via_stdin is set"
+        );
+        assert!(
+            !args.contains(&"--".to_string()),
+            "-- separator must be absent when prompt_via_stdin is set"
+        );
+    }
+
+    #[test]
+    fn prompt_via_stdin_false_keeps_prompt_in_args() {
+        let cmd = QueryCommand::new("visible prompt").prompt_via_stdin(false);
+        let args = cmd.args();
+        assert!(
+            args.contains(&"visible prompt".to_string()),
+            "prompt must still appear in args when prompt_via_stdin is false"
+        );
+        assert!(
+            args.contains(&"--".to_string()),
+            "-- separator must be present when prompt_via_stdin is false"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real claude binary"]
+    fn prompt_via_stdin_integration() {
+        // Verify round-trip: prompt sent via stdin produces a valid response.
+        // Run with: cargo test --lib -p claude-wrapper -- --ignored prompt_via_stdin_integration
+        use crate::{Claude, ClaudeCommand};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let claude = Claude::builder().build().unwrap();
+            let out = QueryCommand::new("reply with: STDIN_OK")
+                .prompt_via_stdin(true)
+                .execute(&claude)
+                .await
+                .unwrap();
+            assert!(
+                !out.stdout.is_empty(),
+                "expected non-empty output from stdin-mode query"
+            );
+        });
     }
 
     #[test]
