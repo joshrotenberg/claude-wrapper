@@ -45,6 +45,238 @@ pub async fn run_claude_with_retry(
     }
 }
 
+/// Run claude, writing `stdin_content` to the child's stdin rather than
+/// passing the prompt as argv.
+///
+/// stdin mode does not retry -- the stdin pipe is consumed after the first
+/// attempt and cannot be rewound for a subsequent try.
+#[cfg(feature = "async")]
+pub async fn run_claude_with_stdin_prompt(
+    claude: &Claude,
+    args: Vec<String>,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    run_claude_with_stdin_prompt_internal(claude, args, stdin_content).await
+}
+
+#[cfg(feature = "async")]
+async fn run_claude_with_stdin_prompt_internal(
+    claude: &Claude,
+    args: Vec<String>,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    let mut command_args = Vec::new();
+    command_args.extend(claude.global_args.clone());
+    command_args.extend(args);
+
+    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt)");
+
+    let binary = &claude.binary;
+    let env = &claude.env;
+    let working_dir = claude.working_dir.as_deref();
+
+    if let Some(timeout) = claude.timeout {
+        run_with_timeout_stdin(
+            binary,
+            &command_args,
+            env,
+            working_dir,
+            timeout,
+            stdin_content,
+        )
+        .await
+    } else {
+        run_internal_stdin(binary, &command_args, env, working_dir, stdin_content).await
+    }
+}
+
+#[cfg(feature = "async")]
+async fn run_internal_stdin(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    working_dir: Option<&std::path::Path>,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| Error::Io {
+        message: format!("failed to spawn claude: {e}"),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    // Write the prompt to stdin, then drop the handle so the child sees EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_content.as_bytes())
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to write to claude stdin: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })?;
+        // Drop stdin so the child sees EOF.
+    }
+
+    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
+    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
+
+    let (status, stdout_str, stderr_str) = tokio::join!(
+        child.wait(),
+        drain(&mut stdout_handle),
+        drain(&mut stderr_handle),
+    );
+
+    let status = status.map_err(|e| Error::Io {
+        message: "failed to wait for claude process".to_string(),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    let exit_code = status.code().unwrap_or(-1);
+
+    if !status.success() {
+        return Err(Error::from_command_failure(
+            format!("{} {}", binary.display(), args.join(" ")),
+            exit_code,
+            stdout_str,
+            stderr_str,
+            working_dir.map(|p| p.to_path_buf()),
+        ));
+    }
+
+    Ok(CommandOutput {
+        stdout: stdout_str,
+        stderr: stderr_str,
+        exit_code,
+        success: true,
+    })
+}
+
+#[cfg(feature = "async")]
+async fn run_with_timeout_stdin(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    working_dir: Option<&std::path::Path>,
+    timeout: Duration,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| Error::Io {
+        message: format!("failed to spawn claude: {e}"),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    // Write the prompt to stdin, then drop the handle so the child sees EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_content.as_bytes())
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to write to claude stdin: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })?;
+        // Drop stdin so the child sees EOF.
+    }
+
+    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
+    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
+
+    let wait_and_drain = async {
+        let (status, stdout_str, stderr_str) = tokio::join!(
+            child.wait(),
+            drain(&mut stdout_handle),
+            drain(&mut stderr_handle),
+        );
+        (status, stdout_str, stderr_str)
+    };
+
+    match tokio::time::timeout(timeout, wait_and_drain).await {
+        Ok((Ok(status), stdout, stderr)) => {
+            let exit_code = status.code().unwrap_or(-1);
+
+            if !status.success() {
+                return Err(Error::from_command_failure(
+                    format!("{} {}", binary.display(), args.join(" ")),
+                    exit_code,
+                    stdout,
+                    stderr,
+                    working_dir.map(|p| p.to_path_buf()),
+                ));
+            }
+
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                exit_code,
+                success: true,
+            })
+        }
+        Ok((Err(e), _stdout, _stderr)) => Err(Error::Io {
+            message: "failed to wait for claude process".to_string(),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        }),
+        Err(_) => {
+            let _ = child.kill().await;
+            let drain_budget = Duration::from_millis(200);
+            let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout_handle))
+                .await
+                .unwrap_or_default();
+            let stderr_str = tokio::time::timeout(drain_budget, drain(&mut stderr_handle))
+                .await
+                .unwrap_or_default();
+            if !stdout_str.is_empty() || !stderr_str.is_empty() {
+                warn!(
+                    stdout = %stdout_str,
+                    stderr = %stderr_str,
+                    "partial output from timed-out process",
+                );
+            }
+            Err(Error::Timeout {
+                timeout_seconds: timeout.as_secs(),
+            })
+        }
+    }
+}
+
 #[cfg(feature = "async")]
 async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     let mut command_args = Vec::new();
@@ -294,6 +526,225 @@ pub fn run_claude_with_retry_sync(
             crate::retry::with_retry_sync(policy, || run_claude_once_sync(claude, args.clone()))
         }
         None => run_claude_once_sync(claude, args),
+    }
+}
+
+/// Blocking mirror of [`run_claude_with_stdin_prompt`].
+///
+/// stdin mode does not retry -- the stdin pipe is consumed after the first
+/// attempt and cannot be rewound.
+#[cfg(feature = "sync")]
+pub fn run_claude_with_stdin_prompt_sync(
+    claude: &Claude,
+    args: Vec<String>,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    let mut command_args = Vec::new();
+    command_args.extend(claude.global_args.clone());
+    command_args.extend(args);
+
+    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt, sync)");
+
+    if let Some(timeout) = claude.timeout {
+        run_with_timeout_stdin_sync(
+            &claude.binary,
+            &command_args,
+            &claude.env,
+            claude.working_dir.as_deref(),
+            timeout,
+            stdin_content,
+        )
+    } else {
+        run_internal_stdin_sync(
+            &claude.binary,
+            &command_args,
+            &claude.env,
+            claude.working_dir.as_deref(),
+            stdin_content,
+        )
+    }
+}
+
+#[cfg(feature = "sync")]
+fn run_internal_stdin_sync(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    working_dir: Option<&std::path::Path>,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let mut cmd = StdCommand::new(binary);
+    cmd.args(args);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| Error::Io {
+        message: format!("failed to spawn claude: {e}"),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    // Write the prompt to stdin, then drop the handle so the child sees EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_content.as_bytes())
+            .map_err(|e| Error::Io {
+                message: format!("failed to write to claude stdin: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })?;
+        stdin.flush().map_err(|e| Error::Io {
+            message: format!("failed to flush claude stdin: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
+        // Drop stdin so the child sees EOF.
+    }
+
+    let output = child.wait_with_output().map_err(|e| Error::Io {
+        message: "failed to wait for claude process".to_string(),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    if !output.status.success() {
+        return Err(Error::from_command_failure(
+            format!("{} {}", binary.display(), args.join(" ")),
+            exit_code,
+            stdout,
+            stderr,
+            working_dir.map(|p| p.to_path_buf()),
+        ));
+    }
+
+    Ok(CommandOutput {
+        stdout,
+        stderr,
+        exit_code,
+        success: true,
+    })
+}
+
+#[cfg(feature = "sync")]
+fn run_with_timeout_stdin_sync(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    working_dir: Option<&std::path::Path>,
+    timeout: Duration,
+    stdin_content: String,
+) -> Result<CommandOutput> {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::thread;
+    use wait_timeout::ChildExt;
+
+    let mut cmd = StdCommand::new(binary);
+    cmd.args(args);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| Error::Io {
+        message: format!("failed to spawn claude: {e}"),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+
+    // Write the prompt to stdin, then drop the handle so the child sees EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_content.as_bytes())
+            .map_err(|e| Error::Io {
+                message: format!("failed to write to claude stdin: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })?;
+        stdin.flush().map_err(|e| Error::Io {
+            message: format!("failed to flush claude stdin: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
+        // Drop stdin so the child sees EOF.
+    }
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+
+    let stdout_thread = thread::spawn(move || drain_sync(stdout));
+    let stderr_thread = thread::spawn(move || drain_sync(stderr));
+
+    match child.wait_timeout(timeout).map_err(|e| Error::Io {
+        message: "failed to wait for claude process".to_string(),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })? {
+        Some(status) => {
+            let stdout = stdout_thread.join().unwrap_or_default();
+            let stderr = stderr_thread.join().unwrap_or_default();
+            let exit_code = status.code().unwrap_or(-1);
+
+            if !status.success() {
+                return Err(Error::from_command_failure(
+                    format!("{} {}", binary.display(), args.join(" ")),
+                    exit_code,
+                    stdout,
+                    stderr,
+                    working_dir.map(|p| p.to_path_buf()),
+                ));
+            }
+
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                exit_code,
+                success: true,
+            })
+        }
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let (stdout_str, stderr_str) =
+                join_with_deadline(stdout_thread, stderr_thread, Duration::from_millis(200));
+            if !stdout_str.is_empty() || !stderr_str.is_empty() {
+                warn!(
+                    stdout = %stdout_str,
+                    stderr = %stderr_str,
+                    "partial output from timed-out process",
+                );
+            }
+            Err(Error::Timeout {
+                timeout_seconds: timeout.as_secs(),
+            })
+        }
     }
 }
 
