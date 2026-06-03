@@ -347,6 +347,22 @@ pub struct ProjectSummary {
     /// Best-effort decode of the slug back to a filesystem path.
     /// See module docs for caveats.
     pub decoded_path: PathBuf,
+    /// Whether `decoded_path` was verified against the real filesystem.
+    ///
+    /// `true` when the slug was disambiguated by checking `path.exists()` at
+    /// each segment boundary. `false` when no filesystem path matched during
+    /// decoding and the result is a naive `-`-to-`/` replacement.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use claude_wrapper::history::ProjectSummary;
+    /// // A real project: slug round-trips via filesystem check
+    /// // is_decode_verified == true when the actual directory exists
+    /// // is_decode_verified == false when decoding a slug for a path
+    /// //   that no longer exists on disk
+    /// ```
+    pub is_decode_verified: bool,
     /// Number of `*.jsonl` files in the directory.
     pub session_count: usize,
     /// Latest filesystem modification time across the project's
@@ -470,8 +486,10 @@ fn summarize_project(dir: &Path, slug: String) -> ProjectSummary {
             }
         }
     }
+    let (decoded_path, is_decode_verified) = decode_slug_anchored(&slug);
     ProjectSummary {
-        decoded_path: decode_slug(&slug),
+        decoded_path,
+        is_decode_verified,
         slug,
         session_count,
         last_modified,
@@ -712,13 +730,55 @@ fn take_object(_value: &mut Value) -> serde_json::Map<String, Value> {
     serde_json::Map::new()
 }
 
-fn decode_slug(slug: &str) -> PathBuf {
-    // Claude Code encodes paths by replacing `/` with `-`. The
-    // decode is best-effort: drop a leading `-` and replace
-    // remaining `-` with `/`. Paths containing literal dashes in
-    // directory names won't round-trip; that's a known limitation.
+/// Decode a project slug back to a filesystem path, anchoring on the
+/// real filesystem to disambiguate literal hyphens in directory names.
+///
+/// Claude Code encodes an absolute path by replacing each `/` with `-`
+/// and prepending a leading `-`. The naive inverse (replace every `-`
+/// with `/`) is ambiguous: a directory whose name contains a literal
+/// hyphen -- like `claude-wrapper` -- is indistinguishable from a `/`
+/// boundary. This walks the slug left to right and, at each segment
+/// boundary, checks the filesystem to decide whether the boundary is a
+/// `/` (slash form) or a literal `-` (hyphen form).
+///
+/// Returns `(decoded_path, is_decode_verified)`. `is_decode_verified`
+/// is `true` when every boundary was resolved against an existing path
+/// and `false` when at least one boundary matched nothing on disk and
+/// fell back to the naive split.
+///
+/// Tiebreak: when both forms exist, the deeper hyphenated form wins.
+fn decode_slug_anchored(slug: &str) -> (PathBuf, bool) {
     let body = slug.strip_prefix('-').unwrap_or(slug);
-    PathBuf::from(format!("/{}", body.replace('-', "/")))
+    let mut segments = body.split('-');
+    let mut built_path = PathBuf::from("/");
+    let mut is_decode_verified = true;
+
+    // First segment seeds the current component. An empty slug yields
+    // an empty component and falls straight through to the final push.
+    let mut current_component = segments.next().unwrap_or("").to_string();
+
+    for next_segment in segments {
+        let hyphen_component = format!("{current_component}-{next_segment}");
+        let slash_exists = built_path.join(&current_component).exists();
+        let hyphen_exists = built_path.join(&hyphen_component).exists();
+
+        // Prefer the hyphen form whenever it exists (covers both the
+        // hyphen-only case and the both-exist tiebreak). Otherwise take
+        // the slash form, marking the decode unverified when neither
+        // form is backed by a real path.
+        if hyphen_exists {
+            current_component = hyphen_component;
+        } else {
+            if !slash_exists {
+                is_decode_verified = false;
+            }
+            built_path.push(&current_component);
+            current_component = next_segment.to_string();
+        }
+    }
+
+    built_path.push(&current_component);
+    (built_path, is_decode_verified)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -958,12 +1018,69 @@ mod tests {
     }
 
     #[test]
-    fn decode_slug_round_trips_simple_paths() {
-        assert_eq!(
-            decode_slug("-Users-josh-Code-foo"),
-            PathBuf::from("/Users/josh/Code/foo")
-        );
-        assert_eq!(decode_slug("-tmp-bar"), PathBuf::from("/tmp/bar"));
+    fn decode_slug_anchored_no_hyphens_in_components() {
+        // Path with no literal hyphens -- both forms are structurally
+        // identical at each boundary, so the algorithm picks the slash
+        // (naive) form at each step. `is_decode_verified` depends on
+        // whether /a/b/c/d exists; in CI it won't, so only assert shape.
+        let (path, _verified) = decode_slug_anchored("-a-b-c-d");
+        assert_eq!(path, PathBuf::from("/a/b/c/d"));
+    }
+
+    #[test]
+    fn decode_slug_anchored_single_hyphenated_segment() {
+        // Build a real dir: tmp/foo-bar, then construct its slug.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("foo-bar");
+        fs::create_dir_all(&dir).unwrap();
+        let tmp_str = tmp.path().to_string_lossy();
+        let tmp_encoded = tmp_str.trim_start_matches('/').replace('/', "-");
+        let slug = format!("-{tmp_encoded}-foo-bar");
+        let expected = tmp.path().join("foo-bar");
+        let (decoded, is_verified) = decode_slug_anchored(&slug);
+        assert_eq!(decoded, expected);
+        assert!(is_verified);
+    }
+
+    #[test]
+    fn decode_slug_anchored_multiple_hyphenated_segments() {
+        // Build: tmp/foo-bar/baz-qux
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("foo-bar").join("baz-qux");
+        fs::create_dir_all(&dir).unwrap();
+        let tmp_str = tmp.path().to_string_lossy();
+        let tmp_encoded = tmp_str.trim_start_matches('/').replace('/', "-");
+        let slug = format!("-{tmp_encoded}-foo-bar-baz-qux");
+        let expected = tmp.path().join("foo-bar").join("baz-qux");
+        let (decoded, is_verified) = decode_slug_anchored(&slug);
+        assert_eq!(decoded, expected);
+        assert!(is_verified);
+    }
+
+    #[test]
+    fn decode_slug_anchored_fallback_when_nothing_exists() {
+        // No filesystem paths exist for this slug -- falls back to naive.
+        let (path, verified) = decode_slug_anchored("-nonexistent-xyz-abc-def");
+        assert_eq!(path, PathBuf::from("/nonexistent/xyz/abc/def"));
+        assert!(!verified);
+    }
+
+    #[test]
+    fn decode_slug_anchored_real_world_issue_example() {
+        // The exact real-world shape from issue #607: a hyphenated leaf
+        // directory (claude-wrapper) under a non-hyphenated parent. The
+        // naive decode would split it into .../claude/wrapper; anchoring
+        // on disk keeps it whole.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("rust").join("claude-wrapper");
+        fs::create_dir_all(&dir).unwrap();
+        let tmp_str = tmp.path().to_string_lossy();
+        let tmp_encoded = tmp_str.trim_start_matches('/').replace('/', "-");
+        let slug = format!("-{tmp_encoded}-rust-claude-wrapper");
+        let expected = tmp.path().join("rust").join("claude-wrapper");
+        let (decoded, is_verified) = decode_slug_anchored(&slug);
+        assert_eq!(decoded, expected);
+        assert!(is_verified);
     }
 
     // -- ListOptions / pagination -----------------------------------
