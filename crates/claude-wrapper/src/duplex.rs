@@ -127,6 +127,15 @@
 //! from the handler, capture the [`PermissionRequest::request_id`],
 //! and answer later via [`DuplexSession::respond_to_permission`].
 //!
+//! **Known limitation:** as of claude CLI 2.1.x,
+//! `--permission-prompt-tool stdio` does not cause the CLI to emit
+//! `control_request {subtype: "can_use_tool"}` in
+//! `--print --output-format stream-json` mode. The permission handler
+//! registered here is wire-correct and unit-tested, but will not be
+//! invoked end-to-end until the upstream CLI bug is resolved. Tracked
+//! upstream at
+//! <https://github.com/anthropics/claude-agent-sdk-python/issues/469>.
+//!
 //! # Mid-turn interrupt
 //!
 //! [`DuplexSession::interrupt`] sends a clean
@@ -498,6 +507,12 @@ impl DuplexOptions {
     /// Without a handler, the session does not pass
     /// `--permission-prompt-tool` and the CLI applies its default
     /// permission policy (driven by `--permission-mode`).
+    ///
+    /// **Known limitation:** as of claude CLI 2.1.x the CLI does not
+    /// emit `control_request {subtype: "can_use_tool"}` in stream-json
+    /// print mode, so this handler will not be invoked end-to-end until
+    /// an upstream fix lands. The wire handling is correct; see
+    /// <https://github.com/anthropics/claude-agent-sdk-python/issues/469>.
     #[must_use]
     pub fn on_permission(mut self, handler: PermissionHandler) -> Self {
         self.on_permission = Some(handler);
