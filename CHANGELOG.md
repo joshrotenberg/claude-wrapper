@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.11.0...v0.11.1) - 2026-06-11
+
+### Added
+
+- add --replay-user-messages and add-json --client-secret ([#636](https://github.com/joshrotenberg/claude-wrapper/pull/636))
+- *(query)* add .verbose() and .prompt_suggestions() builders ([#635](https://github.com/joshrotenberg/claude-wrapper/pull/635))
+
+### Fixed
+
+- sync-only test build + keep local scratch out of the package ([#638](https://github.com/joshrotenberg/claude-wrapper/pull/638))
+- *(auth)* don't classify model-404 as auth; surface --bare missing key ([#633](https://github.com/joshrotenberg/claude-wrapper/pull/633))
+
+### Other
+
+- expand live integration coverage (streaming, Session, command surface) ([#639](https://github.com/joshrotenberg/claude-wrapper/pull/639))
+- flatten workspace to a single top-level crate ([#637](https://github.com/joshrotenberg/claude-wrapper/pull/637))
+- update changelog ([#627](https://github.com/joshrotenberg/claude-wrapper/pull/627))
+- bump which from 8.0.2 to 8.0.3 ([#631](https://github.com/joshrotenberg/claude-wrapper/pull/631))
+
 ## [0.11.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.10.1...v0.11.0) - 2026-06-03
 
 ### Fixed
