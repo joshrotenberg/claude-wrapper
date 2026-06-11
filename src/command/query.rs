@@ -1079,6 +1079,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "async")] // uses tokio + the async-only execute()
     #[ignore = "requires a real claude binary"]
     fn prompt_via_stdin_integration() {
         // Verify round-trip: prompt sent via stdin produces a valid response.
