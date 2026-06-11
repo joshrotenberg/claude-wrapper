@@ -157,7 +157,12 @@ impl AuthErrorKind {
 /// classifier matches against the lowercased concatenation. The
 /// patterns are intentionally narrow:
 ///
-/// - "not authenticated" / "claude login" / "no credentials" / "no auth"
+/// - "may not exist" / "may not have access" / "not_found_error" /
+///   "issue with the selected model" -> NOT auth (`None`): a
+///   model-not-found / model-access failure is a bad `--model`, not a
+///   credential problem, even when it carries a 403/404 status.
+/// - "not authenticated" / "not logged in" / "claude login" /
+///   "please run /login" / "run /login" / "no credentials" / "no auth"
 ///   -> [`AuthErrorKind::NotAuthenticated`]
 /// - "expired" / "session has expired" / "token expired" -> [`AuthErrorKind::Expired`]
 /// - "invalid api key" / "invalid token" / "401" / "unauthorized" / "403"
@@ -167,6 +172,22 @@ impl AuthErrorKind {
 /// - bare "auth" / "credential" hit with nothing more specific -> [`AuthErrorKind::Other`]
 pub fn classify_failure(_exit_code: i32, stdout: &str, stderr: &str) -> Option<AuthErrorKind> {
     let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+
+    // Model-not-found / model-access failures are NOT auth errors,
+    // even though they can carry a 403/404 HTTP status that the
+    // checks below would otherwise read as `InvalidCredentials`. A
+    // bad `--model` id is a typo, not a credential problem; relabeling
+    // it as auth makes downstream consumers (e.g. roba, which maps
+    // `Error::Auth` to a fleet-halting exit code) treat a model typo
+    // like a credential failure. Bail to `None` (generic
+    // `CommandFailed`) before any auth pattern can fire.
+    let mentions_model_problem = combined.contains("may not exist")
+        || combined.contains("may not have access")
+        || combined.contains("not_found_error")
+        || combined.contains("issue with the selected model");
+    if mentions_model_problem {
+        return None;
+    }
 
     // Provider hits (Bedrock / Vertex) take precedence when the
     // failure mentions them alongside an auth signal -- the fix is
@@ -208,7 +229,10 @@ pub fn classify_failure(_exit_code: i32, stdout: &str, stderr: &str) -> Option<A
     }
 
     if combined.contains("not authenticated")
+        || combined.contains("not logged in")
         || combined.contains("claude login")
+        || combined.contains("please run /login")
+        || combined.contains("run /login")
         || combined.contains("no credentials")
         || combined.contains("no auth")
     {
@@ -443,6 +467,45 @@ mod tests {
         assert_eq!(
             classify_failure(1, "", "403 Forbidden"),
             Some(AuthErrorKind::InvalidCredentials)
+        );
+    }
+
+    #[test]
+    fn classify_model_not_found_is_not_auth() {
+        // A bad `--model` id comes back with a 404/403 payload but is a
+        // typo, not a credential problem. It must not be relabeled as
+        // auth (regression for #632: a model typo halted roba fleets).
+        // Mirrors real claude `--output-format json` output.
+        let bad_model = r#"{"type":"result","is_error":true,"api_error_status":404,"result":"There's an issue with the selected model (totally-not-a-model-xyz). It may not exist or you may not have access to it. Run --model to pick a different model."}"#;
+        assert_eq!(classify_failure(1, bad_model, ""), None);
+    }
+
+    #[test]
+    fn classify_model_access_403_is_not_auth() {
+        // Even when a model-access failure carries a 403/forbidden
+        // status, the model guard must win over `InvalidCredentials`.
+        assert_eq!(
+            classify_failure(
+                1,
+                "",
+                "API Error: 403 Forbidden permission_error: you may not have access to model claude-x"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_failure(1, "", "404 not_found_error: model claude-x does not exist"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_not_logged_in_bare_is_not_authenticated() {
+        // `--bare` with no API key prints this to stdout with an empty
+        // stderr; it is a genuine missing-credential failure and must
+        // surface as auth (regression for #632).
+        assert_eq!(
+            classify_failure(1, "Not logged in · Please run /login", ""),
+            Some(AuthErrorKind::NotAuthenticated)
         );
     }
 
