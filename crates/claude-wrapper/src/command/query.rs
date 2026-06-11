@@ -77,6 +77,7 @@ pub struct QueryCommand {
     prompt_via_stdin: bool,
     verbose: bool,
     prompt_suggestions: bool,
+    replay_user_messages: bool,
 }
 
 impl QueryCommand {
@@ -132,6 +133,7 @@ impl QueryCommand {
             prompt_via_stdin: false,
             verbose: false,
             prompt_suggestions: false,
+            replay_user_messages: false,
         }
     }
 
@@ -591,6 +593,19 @@ impl QueryCommand {
         self
     }
 
+    /// Re-emit user messages from stdin back on stdout
+    /// (`--replay-user-messages`).
+    ///
+    /// Only meaningful for bidirectional stream-json flows: the CLI
+    /// requires both [`InputFormat::StreamJson`] and
+    /// [`OutputFormat::StreamJson`] for this to take effect. Off by
+    /// default.
+    #[must_use]
+    pub fn replay_user_messages(mut self, value: bool) -> Self {
+        self.replay_user_messages = value;
+        self
+    }
+
     /// Set a per-command retry policy, overriding the client default.
     ///
     /// # Example
@@ -954,6 +969,10 @@ impl QueryCommand {
 
         if self.prompt_suggestions {
             args.push("--prompt-suggestions".to_string());
+        }
+
+        if self.replay_user_messages {
+            args.push("--replay-user-messages".to_string());
         }
 
         if let Some(ref name) = self.name {
@@ -1338,6 +1357,27 @@ mod tests {
                 .prompt_suggestions(false)
                 .args()
                 .contains(&"--prompt-suggestions".to_string())
+        );
+    }
+
+    #[test]
+    fn replay_user_messages_flag_emitted_when_set() {
+        let args = QueryCommand::new("test").replay_user_messages(true).args();
+        assert!(args.contains(&"--replay-user-messages".to_string()));
+    }
+
+    #[test]
+    fn replay_user_messages_absent_by_default_and_when_false() {
+        assert!(
+            !QueryCommand::new("test")
+                .args()
+                .contains(&"--replay-user-messages".to_string())
+        );
+        assert!(
+            !QueryCommand::new("test")
+                .replay_user_messages(false)
+                .args()
+                .contains(&"--replay-user-messages".to_string())
         );
     }
 

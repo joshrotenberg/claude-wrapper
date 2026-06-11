@@ -252,6 +252,7 @@ pub struct McpAddJsonCommand {
     name: String,
     json: String,
     scope: Option<Scope>,
+    client_secret: bool,
 }
 
 impl McpAddJsonCommand {
@@ -262,6 +263,7 @@ impl McpAddJsonCommand {
             name: name.into(),
             json: json.into(),
             scope: None,
+            client_secret: false,
         }
     }
 
@@ -269,6 +271,16 @@ impl McpAddJsonCommand {
     #[must_use]
     pub fn scope(mut self, scope: Scope) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Prompt for the OAuth client secret (`--client-secret`; or set
+    /// it via the `MCP_CLIENT_SECRET` env var).
+    ///
+    /// Parity with [`McpAddCommand::client_secret`].
+    #[must_use]
+    pub fn client_secret(mut self) -> Self {
+        self.client_secret = true;
         self
     }
 }
@@ -282,6 +294,10 @@ impl ClaudeCommand for McpAddJsonCommand {
         if let Some(ref scope) = self.scope {
             args.push("--scope".to_string());
             args.push(scope.as_arg().to_string());
+        }
+
+        if self.client_secret {
+            args.push("--client-secret".to_string());
         }
 
         args.push(self.name.clone());
@@ -555,6 +571,38 @@ mod tests {
                 "https://example.com/mcp"
             ]
         );
+    }
+
+    #[test]
+    fn test_mcp_add_json_basic() {
+        let cmd = McpAddJsonCommand::new("srv", r#"{"command":"npx"}"#).scope(Scope::User);
+        assert_eq!(
+            cmd.args(),
+            vec![
+                "mcp",
+                "add-json",
+                "--scope",
+                "user",
+                "srv",
+                r#"{"command":"npx"}"#
+            ]
+        );
+    }
+
+    #[test]
+    fn test_mcp_add_json_client_secret() {
+        // #601 parity: add-json accepts --client-secret like add does.
+        let cmd = McpAddJsonCommand::new("srv", "{}").client_secret();
+        assert_eq!(
+            cmd.args(),
+            vec!["mcp", "add-json", "--client-secret", "srv", "{}"]
+        );
+    }
+
+    #[test]
+    fn test_mcp_add_json_no_client_secret_by_default() {
+        let cmd = McpAddJsonCommand::new("srv", "{}");
+        assert!(!cmd.args().contains(&"--client-secret".to_string()));
     }
 
     #[test]
