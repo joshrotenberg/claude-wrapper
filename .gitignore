@@ -5,3 +5,5 @@ CLAUDE.md
 .worktrees/
 NAME_IDEAS.md
 /tmp/
+mcp-spec.md
+.claude-server-*.toml
