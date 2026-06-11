@@ -177,7 +177,7 @@ There is no sync twin of `Session` yet. Sync callers compose `Session`-like stat
 
 Releases are driven by [`release-plz`](https://github.com/release-plz/release-plz):
 
-- `release-plz.toml` at the workspace root configures the release for `claude-wrapper` only
+- `release-plz.toml` at the repo root configures the release for `claude-wrapper`
 - On every push to `main`, the `release-plz` workflow updates a long-running "chore: release" PR with the pending version bump + changelog
 - Merging that PR tags `v{version}`, creates a GitHub release, and publishes to crates.io
 
