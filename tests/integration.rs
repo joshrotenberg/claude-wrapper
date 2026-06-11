@@ -577,3 +577,296 @@ async fn test_mcp_config_builder() {
         "echo"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────
+// Auth-free smoke tests: local CLI commands that make no model API
+// call (plugin list, version parse, mcp add/get/remove round-trip).
+// Fast and deterministic.
+//
+// NOTE: `claude doctor` and `claude marketplace list` are deliberately
+// NOT live-tested -- both are interactive/TUI in claude 2.1.x and hang
+// without a TTY, so a headless test can't drive them (a real caller
+// must set a client timeout). Their arg construction is unit-tested.
+// ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires claude binary"]
+async fn test_plugin_list() {
+    let claude = claude_client();
+    let output = claude_wrapper::PluginListCommand::new()
+        .execute(&claude)
+        .await
+        .unwrap();
+    assert!(output.success, "plugin list failed: {}", output.stderr);
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary"]
+async fn test_cli_version_parses() {
+    let claude = claude_client();
+    let v = claude.cli_version().await.unwrap();
+    assert!(
+        v.satisfies_minimum(&claude_wrapper::CliVersion::new(2, 0, 0)),
+        "expected claude >= 2.0.0, parsed {v}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary"]
+async fn test_mcp_add_get_remove_roundtrip() {
+    use claude_wrapper::{McpAddCommand, McpGetCommand, McpRemoveCommand, Scope};
+
+    // Isolate in a temp working dir at local scope so the round-trip
+    // never touches the caller's real MCP config.
+    let dir = tempfile::tempdir().unwrap();
+    let claude = Claude::builder()
+        .working_dir(dir.path())
+        .build()
+        .expect("claude binary not found in PATH");
+
+    let name = "claude_wrapper_itest_srv";
+
+    let add = McpAddCommand::new(name, "echo")
+        .scope(Scope::Local)
+        .server_args(["hello"])
+        .execute(&claude)
+        .await
+        .unwrap();
+    assert!(add.success, "mcp add failed: {}", add.stderr);
+
+    let get = McpGetCommand::new(name).execute(&claude).await.unwrap();
+    assert!(get.success, "mcp get failed: {}", get.stderr);
+    assert!(
+        get.stdout.contains(name),
+        "mcp get should show the added server, got: {}",
+        get.stdout
+    );
+
+    let remove = McpRemoveCommand::new(name)
+        .scope(Scope::Local)
+        .execute(&claude)
+        .await
+        .unwrap();
+    assert!(remove.success, "mcp remove failed: {}", remove.stderr);
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Streaming and the transient Session (the non-Duplex multi-turn
+// path). Both had no live coverage before.
+// ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_stream_query_emits_result_event() {
+    use claude_wrapper::OutputFormat;
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+    use std::sync::{Arc, Mutex};
+
+    let claude = claude_client();
+    let cmd = QueryCommand::new("Reply with just the number 5.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .output_format(OutputFormat::StreamJson);
+
+    let events = Arc::new(Mutex::new(Vec::<StreamEvent>::new()));
+    let sink = Arc::clone(&events);
+    stream_query(&claude, &cmd, move |event: StreamEvent| {
+        sink.lock().unwrap().push(event);
+    })
+    .await
+    .expect("stream_query");
+
+    let events = events.lock().unwrap();
+    assert!(!events.is_empty(), "expected streamed NDJSON events");
+    let result_text = events
+        .iter()
+        .find(|e| e.is_result())
+        .and_then(|e| e.result_text())
+        .expect("expected a terminal result event with text");
+    assert!(
+        result_text.contains('5'),
+        "expected '5' in streamed result {result_text:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_session_two_turns_resume_and_track() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    // No no_session_persistence(): a transient Session resumes via
+    // --resume, which needs the session persisted to disk. No Plan
+    // mode: it injects an ExitPlanMode tool turn that a tight max_turns
+    // can't absorb (the Duplex recall test likewise runs without it).
+    fn haiku(prompt: &str) -> QueryCommand {
+        QueryCommand::new(prompt).model("haiku").max_turns(2)
+    }
+
+    let claude = Arc::new(claude_client());
+    let mut session = Session::new(claude);
+
+    // Two independent single-turn prompts. We assert the transient
+    // Session's *mechanics* -- two turns dispatched (the second via
+    // --resume), with history and cost accumulated -- rather than
+    // conversational recall: in this environment a "remember this"
+    // prompt triggers agentic tool use and overruns max_turns. Recall
+    // across turns is covered by the Duplex test.
+    let first = session
+        .execute(haiku("What is 2+2? Reply with just the number."))
+        .await
+        .expect("first turn");
+    let second = session
+        .execute(haiku("What is 3+3? Reply with just the number."))
+        .await
+        .expect("second turn");
+
+    assert!(first.result.contains('4'), "got {:?}", first.result);
+    assert!(second.result.contains('6'), "got {:?}", second.result);
+    assert!(
+        !first.session_id.is_empty(),
+        "first turn should report a session id"
+    );
+    assert!(
+        !second.session_id.is_empty(),
+        "second turn (--resume) should report a session id"
+    );
+    assert_eq!(session.history().len(), 2, "two turns recorded");
+    assert!(
+        session.total_cost_usd() > 0.0,
+        "cost should accumulate, got {}",
+        session.total_cost_usd()
+    );
+    assert!(session.id().is_some());
+}
+
+// ───────────────────────────────────────────────────────────────────
+// QueryCommand option coverage: confirm flags are accepted by the
+// real CLI and take effect end-to-end.
+// ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_query_system_prompt_is_honored() {
+    let claude = claude_client();
+    // A system prompt that forces an observable, content-independent
+    // marker, so we verify the prompt actually reached the model.
+    let output = QueryCommand::new("Say hello.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .system_prompt("End every response with the exact token MARKER42.")
+        .execute(&claude)
+        .await
+        .unwrap();
+
+    assert!(output.success, "stderr: {}", output.stderr);
+    assert!(
+        output.stdout.contains("MARKER42"),
+        "system-prompt marker missing from reply: {}",
+        output.stdout
+    );
+}
+
+// NOTE: a live `--json-schema` test was intentionally dropped. In this
+// environment structured output runs a multi-turn formatting pass
+// (observed 4+ turns) that doesn't complete under a sane max_turns cap
+// and is costly/non-deterministic. The flag's arg emission is covered
+// by unit tests instead.
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_query_options_accepted_together() {
+    use claude_wrapper::ToolPattern;
+    let claude = claude_client();
+    // Several flags at once: confirm the wrapper's arg construction is
+    // accepted by the real CLI and still returns a result.
+    let output = QueryCommand::new("What is 2+2? Reply with just the number.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .append_system_prompt("Be extremely concise.")
+        .allowed_tool(ToolPattern::tool("Read"))
+        .max_budget_usd(1.0)
+        .execute(&claude)
+        .await
+        .unwrap();
+
+    assert!(output.success, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains('4'), "got: {}", output.stdout);
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_query_effort_accepted() {
+    use claude_wrapper::Effort;
+    let claude = claude_client();
+    let output = QueryCommand::new("What is 2+2? Reply with just the number.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .effort(Effort::Low)
+        .execute(&claude)
+        .await
+        .unwrap();
+
+    assert!(output.success, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains('4'), "got: {}", output.stdout);
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Flags added in the roba ergonomics batch (#629/#630/#601): confirm
+// the live CLI accepts them, with observable effect where applicable.
+// (--replay-user-messages is omitted: it needs a bidirectional
+// stream-json stdin session, impractical to drive here, and its arg
+// emission is covered by unit tests.)
+// ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_query_prompt_suggestions_accepted() {
+    use claude_wrapper::OutputFormat;
+    let claude = claude_client();
+    // Confirm --prompt-suggestions is accepted on a stream-json print
+    // query. The CLI documents a prompt_suggestion message in print/SDK
+    // mode, but it is not reliably emitted in a headless one-shot run
+    // (observed stream types: system/assistant/result only), so we
+    // assert acceptance + a successful result rather than the message.
+    let output = QueryCommand::new("Say hi.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .output_format(OutputFormat::StreamJson)
+        .prompt_suggestions(true)
+        .execute(&claude)
+        .await
+        .unwrap();
+
+    assert!(output.success, "stderr: {}", output.stderr);
+}
+
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn test_query_verbose_accepted() {
+    let claude = claude_client();
+    // --verbose overrides the verbose-mode setting; confirm the CLI
+    // accepts it on a print-mode query and still returns a result.
+    let output = QueryCommand::new("What is 2+2? Reply with just the number.")
+        .model("haiku")
+        .max_turns(1)
+        .no_session_persistence()
+        .permission_mode(claude_wrapper::PermissionMode::Plan)
+        .verbose(true)
+        .execute(&claude)
+        .await
+        .unwrap();
+
+    assert!(output.success, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains('4'), "got: {}", output.stdout);
+}
