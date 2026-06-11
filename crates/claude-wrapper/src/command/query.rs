@@ -75,6 +75,8 @@ pub struct QueryCommand {
     name: Option<String>,
     from_pr: Option<String>,
     prompt_via_stdin: bool,
+    verbose: bool,
+    prompt_suggestions: bool,
 }
 
 impl QueryCommand {
@@ -128,6 +130,8 @@ impl QueryCommand {
             name: None,
             from_pr: None,
             prompt_via_stdin: false,
+            verbose: false,
+            prompt_suggestions: false,
         }
     }
 
@@ -563,6 +567,30 @@ impl QueryCommand {
         self
     }
 
+    /// Enable verbose logging (`--verbose`), overriding the CLI's
+    /// configured verbose-mode setting.
+    ///
+    /// Note: [`OutputFormat::StreamJson`] already forces `--verbose`
+    /// on (the CLI requires it alongside `--print`), so this builder
+    /// only changes behavior for the text and JSON output formats.
+    /// Either path emits the flag at most once.
+    #[must_use]
+    pub fn verbose(mut self, value: bool) -> Self {
+        self.verbose = value;
+        self
+    }
+
+    /// Emit a predicted next-user-prompt after each turn
+    /// (`--prompt-suggestions`).
+    ///
+    /// In print/SDK mode the CLI emits a `prompt_suggestion` message
+    /// alongside the normal result. Off by default.
+    #[must_use]
+    pub fn prompt_suggestions(mut self, value: bool) -> Self {
+        self.prompt_suggestions = value;
+        self
+    }
+
     /// Set a per-command retry policy, overriding the client default.
     ///
     /// # Example
@@ -745,10 +773,13 @@ impl QueryCommand {
         if let Some(ref format) = self.output_format {
             args.push("--output-format".to_string());
             args.push(format.as_arg().to_string());
-            // CLI v2.1.72+ requires --verbose when using stream-json with --print
-            if matches!(format, OutputFormat::StreamJson) {
-                args.push("--verbose".to_string());
-            }
+        }
+
+        // --verbose: explicit opt-in via `.verbose(true)`, or forced
+        // for stream-json (CLI v2.1.72+ requires it with --print).
+        // Emitted once so the two paths can't double up the flag.
+        if self.verbose || matches!(self.output_format, Some(OutputFormat::StreamJson)) {
+            args.push("--verbose".to_string());
         }
 
         if let Some(budget) = self.max_budget_usd {
@@ -919,6 +950,10 @@ impl QueryCommand {
 
         if self.exclude_dynamic_system_prompt_sections {
             args.push("--exclude-dynamic-system-prompt-sections".to_string());
+        }
+
+        if self.prompt_suggestions {
+            args.push("--prompt-suggestions".to_string());
         }
 
         if let Some(ref name) = self.name {
@@ -1243,6 +1278,67 @@ mod tests {
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn verbose_flag_emitted_when_set() {
+        let args = QueryCommand::new("test").verbose(true).args();
+        assert!(args.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn verbose_absent_by_default_and_when_false() {
+        assert!(
+            !QueryCommand::new("test")
+                .args()
+                .contains(&"--verbose".to_string())
+        );
+        assert!(
+            !QueryCommand::new("test")
+                .verbose(false)
+                .args()
+                .contains(&"--verbose".to_string())
+        );
+    }
+
+    #[test]
+    fn verbose_not_duplicated_with_stream_json() {
+        // stream-json forces --verbose; an explicit .verbose(true) must
+        // not push a second copy.
+        let cmd = QueryCommand::new("test")
+            .verbose(true)
+            .output_format(OutputFormat::StreamJson);
+        let count = cmd.args().iter().filter(|a| *a == "--verbose").count();
+        assert_eq!(count, 1, "--verbose must appear exactly once");
+    }
+
+    #[test]
+    fn prompt_suggestions_flag_emitted_when_set() {
+        let args = QueryCommand::new("test").prompt_suggestions(true).args();
+        assert!(args.contains(&"--prompt-suggestions".to_string()));
+        // Must land before the `--` separator, not be eaten as part of
+        // the prompt.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        let flag = args
+            .iter()
+            .position(|a| a == "--prompt-suggestions")
+            .unwrap();
+        assert!(flag < sep, "--prompt-suggestions must precede `--`");
+    }
+
+    #[test]
+    fn prompt_suggestions_absent_by_default_and_when_false() {
+        assert!(
+            !QueryCommand::new("test")
+                .args()
+                .contains(&"--prompt-suggestions".to_string())
+        );
+        assert!(
+            !QueryCommand::new("test")
+                .prompt_suggestions(false)
+                .args()
+                .contains(&"--prompt-suggestions".to_string())
+        );
     }
 
     #[test]
