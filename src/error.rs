@@ -3,7 +3,14 @@ use std::path::PathBuf;
 use crate::auth::AuthErrorKind;
 
 /// Errors returned by claude-wrapper operations.
+///
+/// This enum is `#[non_exhaustive]`: new variants may be added in
+/// future releases without a major version bump, so downstream `match`
+/// expressions must include a wildcard (`_ =>`) arm. Matching on the
+/// specific variants you care about (e.g. [`Error::Auth`],
+/// [`Error::MaxTurnsExceeded`]) keeps working across upgrades.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The `claude` binary was not found in PATH.
     #[error("claude binary not found in PATH")]
