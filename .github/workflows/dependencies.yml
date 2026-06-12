@@ -26,7 +26,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-machete
-        run: cargo install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
 
       - name: Check unused dependencies
         run: cargo machete
@@ -45,7 +47,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-outdated
-        run: cargo install cargo-outdated
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-outdated
 
       - name: Check outdated
         run: cargo outdated --root-deps-only
