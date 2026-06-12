@@ -303,6 +303,50 @@ impl HistoryRoot {
         Ok(out)
     }
 
+    /// Derive claude's project-directory slug for a filesystem path,
+    /// matching the CLI exactly: the path is **canonicalized**
+    /// (resolving symlinks -- e.g. `/var` -> `/private/var` on macOS,
+    /// `/tmp` on Linux) and then every `/` and `.` is encoded as `-`.
+    ///
+    /// This is the forward complement of
+    /// [`ProjectSummary::decoded_path`] and the reliable way to locate
+    /// the project directory for a working directory -- see
+    /// [`Self::sessions_for_path`]. Without the canonicalization and
+    /// the `.`-encoding, a cwd under a symlinked root, or containing a
+    /// `.` in a path segment, derives a slug that doesn't match what
+    /// claude wrote, so enumeration finds nothing.
+    ///
+    /// Falls back to the path as given when it cannot be canonicalized
+    /// (e.g. it does not exist on disk).
+    #[must_use]
+    pub fn project_slug(path: impl AsRef<Path>) -> String {
+        let path = path.as_ref();
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        encode_path_slug(&canonical.to_string_lossy())
+    }
+
+    /// List sessions for a specific working directory, deriving its
+    /// project slug via [`Self::project_slug`].
+    ///
+    /// This is the current-project enumeration entry point: it
+    /// canonicalizes and encodes the cwd exactly as claude does, so
+    /// sessions written from symlinked roots (`/tmp`, `/var`) or dotted
+    /// path segments are found. Convenience over
+    /// `list_sessions(Some(&HistoryRoot::project_slug(cwd)))`.
+    pub fn sessions_for_path(&self, cwd: impl AsRef<Path>) -> Result<Vec<SessionSummary>> {
+        self.sessions_for_path_with(cwd, &ListOptions::default())
+    }
+
+    /// [`Self::sessions_for_path`] with explicit [`ListOptions`].
+    pub fn sessions_for_path_with(
+        &self,
+        cwd: impl AsRef<Path>,
+        opts: &ListOptions,
+    ) -> Result<Vec<SessionSummary>> {
+        let slug = Self::project_slug(cwd);
+        self.list_sessions_with(Some(&slug), opts)
+    }
+
     /// Read one session's full entry log.
     ///
     /// Walks every project directory looking for `<session_id>.jsonl`.
@@ -779,6 +823,17 @@ fn decode_slug_anchored(slug: &str) -> (PathBuf, bool) {
 
     built_path.push(&current_component);
     (built_path, is_decode_verified)
+}
+
+/// Encode an absolute filesystem path into claude's project-directory
+/// slug: every `/` and `.` becomes `-` (so `/private/var/T/tmp.X`
+/// becomes `-private-var-T-tmp-X`; the leading `/` yields the leading
+/// `-`). Does not canonicalize -- see [`HistoryRoot::project_slug`],
+/// which canonicalizes first.
+fn encode_path_slug(path: &str) -> String {
+    path.chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -1395,5 +1450,77 @@ mod tests {
         let sessions = root.list_sessions(Some("-proj")).expect("list");
         let s = sessions.iter().find(|s| s.session_id == "legacy").unwrap();
         assert_eq!(s.title.as_deref(), Some("Legacy Form"));
+    }
+
+    // -- forward slug derivation / sessions_for_path (#642) ----------
+
+    #[test]
+    fn encode_path_slug_encodes_slash_and_dot() {
+        assert_eq!(
+            encode_path_slug("/Users/josh/Code/projA"),
+            "-Users-josh-Code-projA"
+        );
+        // The #642 gap: a `.` in a path segment is encoded too.
+        assert_eq!(
+            encode_path_slug("/private/var/folders/T/tmp.AbC"),
+            "-private-var-folders-T-tmp-AbC"
+        );
+    }
+
+    #[test]
+    fn project_slug_canonicalizes_and_encodes_dot() {
+        let work = tempfile::tempdir().unwrap();
+        let cwd = work.path().join("my.proj");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let slug = HistoryRoot::project_slug(&cwd);
+        assert!(
+            slug.contains("my-proj"),
+            "dotted segment must encode '.' -> '-', got {slug}"
+        );
+        assert!(
+            !slug.contains('.'),
+            "no '.' may survive in the slug: {slug}"
+        );
+        assert!(
+            !slug.contains('/'),
+            "no '/' may survive in the slug: {slug}"
+        );
+    }
+
+    #[test]
+    fn sessions_for_path_finds_session_under_dotted_symlinked_cwd() {
+        // Repro for #642. On macOS tempdirs live under /var -> /private/var
+        // (a symlink), and the cwd here also has a '.' segment. claude
+        // writes the session under the canonicalized, dot-encoded slug;
+        // sessions_for_path must derive the same slug and find it.
+        let projects = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let cwd = work.path().join("tmp.XYZ");
+        fs::create_dir_all(&cwd).unwrap();
+
+        // Build the project dir using claude's derivation directly
+        // (canonicalize + encode), independent of the method under test,
+        // so a project_slug that skipped either step would find nothing.
+        let canonical = fs::canonicalize(&cwd).unwrap();
+        let expected_slug = encode_path_slug(&canonical.to_string_lossy());
+        let proj_dir = projects.path().join(&expected_slug);
+        fs::create_dir_all(&proj_dir).unwrap();
+        write_session(
+            &proj_dir,
+            "sess-dot",
+            &[
+                r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","cwd":"x","message":{"role":"user","content":"hi"}}"#,
+            ],
+        );
+
+        let root = HistoryRoot::at(projects.path());
+        let sessions = root.sessions_for_path(&cwd).expect("enumerate");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "should find the session for the dotted/symlinked cwd"
+        );
+        assert_eq!(sessions[0].session_id, "sess-dot");
     }
 }
