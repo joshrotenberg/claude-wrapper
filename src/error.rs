@@ -140,6 +140,32 @@ pub enum Error {
         /// Human-readable message extracted from stderr (or stdout).
         message: String,
     },
+
+    /// A `--max-turns`-capped run exhausted its turn budget. The CLI
+    /// emits a terminal `result` event with `subtype ==
+    /// "error_max_turns"` (exit 1, with the result JSON on stdout),
+    /// which would otherwise fold into [`Error::CommandFailed`].
+    ///
+    /// This is distinct from a genuine failure: the working tree may
+    /// be fine and the run simply hit the cap mid-task. Orchestrators
+    /// can match this variant to finish the lifecycle (run remaining
+    /// gates, commit) rather than treating it as broken or re-parsing
+    /// the trace for `error_max_turns`.
+    ///
+    /// Raised by [`Error::from_command_failure`] ahead of the auth
+    /// classifier. Only detected when the result event is present on
+    /// stdout (the `json` / `stream-json` output formats); text-mode
+    /// failures without it remain [`Error::CommandFailed`].
+    #[error("claude hit the --max-turns cap{}: {command} (exit code {exit_code})", max_turns.map(|n| format!(" of {n}")).unwrap_or_default())]
+    MaxTurnsExceeded {
+        /// The full command line that failed.
+        command: String,
+        /// Process exit code (1).
+        exit_code: i32,
+        /// The configured `--max-turns` cap, parsed from the result
+        /// event ("Reached maximum number of turns (N)") when present.
+        max_turns: Option<u32>,
+    },
 }
 
 impl Error {
@@ -159,6 +185,18 @@ impl Error {
         stderr: String,
         working_dir: Option<PathBuf>,
     ) -> Self {
+        // A --max-turns cap hit is a terminal `result` event with
+        // subtype "error_max_turns" on stdout. Surface it as its own
+        // typed variant -- ahead of the auth classifier, since it is
+        // never auth-shaped -- so consumers can tell "hit the cap"
+        // (recoverable) from a genuine failure.
+        if stdout.contains("\"error_max_turns\"") {
+            return Self::MaxTurnsExceeded {
+                command,
+                exit_code,
+                max_turns: parse_max_turns_cap(&stdout),
+            };
+        }
         if let Some(kind) = crate::auth::classify_failure(exit_code, &stdout, &stderr) {
             // Prefer stderr for the human-facing message; fall back
             // to stdout when stderr is empty (some CLIs send all
@@ -207,6 +245,17 @@ impl Error {
             _ => None,
         }
     }
+}
+
+/// Parse the configured `--max-turns` cap from a CLI result event's
+/// human-readable error ("Reached maximum number of turns (N)").
+/// Returns `None` when the phrase or a parseable number is absent.
+fn parse_max_turns_cap(stdout: &str) -> Option<u32> {
+    stdout
+        .split("maximum number of turns (")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|n| n.trim().parse::<u32>().ok())
 }
 
 impl From<std::io::Error> for Error {
@@ -374,5 +423,87 @@ mod tests {
     fn auth_kind_returns_none_for_non_command_errors() {
         assert_eq!(Error::NotFound.auth_kind(), None);
         assert_eq!(Error::Timeout { timeout_seconds: 5 }.auth_kind(), None);
+    }
+
+    // -- max-turns classification (#641) ----------------------------
+
+    // Exact shape of a --max-turns cap-hit result event, from the
+    // field (claude 2.1.173, --output-format json).
+    const MAX_TURNS_STDOUT: &str = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":2,"session_id":"s1","total_cost_usd":0.08,"terminal_reason":"max_turns","errors":["Reached maximum number of turns (1)"]}"#;
+
+    #[test]
+    fn from_command_failure_max_turns_yields_typed_variant() {
+        let e = Error::from_command_failure(
+            "claude --print --max-turns 1".into(),
+            1,
+            MAX_TURNS_STDOUT.into(),
+            String::new(),
+            None,
+        );
+        match e {
+            Error::MaxTurnsExceeded {
+                max_turns,
+                exit_code,
+                ..
+            } => {
+                assert_eq!(max_turns, Some(1));
+                assert_eq!(exit_code, 1);
+            }
+            other => panic!("expected MaxTurnsExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_turns_detected_without_parseable_cap() {
+        let stdout = r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
+        let e = Error::from_command_failure("c".into(), 1, stdout.into(), String::new(), None);
+        match e {
+            Error::MaxTurnsExceeded { max_turns, .. } => assert_eq!(max_turns, None),
+            other => panic!("expected MaxTurnsExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_max_turns_failure_stays_command_failed() {
+        let e =
+            Error::from_command_failure("c".into(), 1, "other output".into(), "boom".into(), None);
+        assert!(matches!(e, Error::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn max_turns_check_does_not_swallow_auth() {
+        // A genuine auth failure (no error_max_turns) still classifies
+        // as Auth -- the max-turns guard precedes but doesn't shadow it.
+        let e = Error::from_command_failure(
+            "c".into(),
+            1,
+            String::new(),
+            "Not authenticated. Run `claude login`.".into(),
+            None,
+        );
+        assert!(matches!(e, Error::Auth { .. }));
+    }
+
+    #[test]
+    fn parse_max_turns_cap_variants() {
+        assert_eq!(
+            parse_max_turns_cap("Reached maximum number of turns (3)"),
+            Some(3)
+        );
+        assert_eq!(parse_max_turns_cap(MAX_TURNS_STDOUT), Some(1));
+        assert_eq!(parse_max_turns_cap("no such phrase"), None);
+        assert_eq!(parse_max_turns_cap("maximum number of turns (nope)"), None);
+    }
+
+    #[test]
+    fn max_turns_display_includes_cap() {
+        let s = Error::MaxTurnsExceeded {
+            command: "claude --print".into(),
+            exit_code: 1,
+            max_turns: Some(5),
+        }
+        .to_string();
+        assert!(s.contains("--max-turns"), "got: {s}");
+        assert!(s.contains("of 5"), "got: {s}");
     }
 }
