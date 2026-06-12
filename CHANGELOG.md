@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.11.1...v0.12.0) - 2026-06-12
+
+### Added
+
+- *(error)* add typed Error::MaxTurnsExceeded for error_max_turns ([#643](https://github.com/joshrotenberg/claude-wrapper/pull/643))
+
+### Fixed
+
+- *(history)* derive project slug from canonicalized cwd, encode dots ([#644](https://github.com/joshrotenberg/claude-wrapper/pull/644))
+
+### Other
+
+- *(error)* [**breaking**] mark Error as #[non_exhaustive] ([#648](https://github.com/joshrotenberg/claude-wrapper/pull/648))
+- install dependency-audit tools as prebuilt binaries ([#646](https://github.com/joshrotenberg/claude-wrapper/pull/646))
+
 ## [0.11.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.11.0...v0.11.1) - 2026-06-11
 
 ### Added
