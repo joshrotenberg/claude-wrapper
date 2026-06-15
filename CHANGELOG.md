@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.0...v0.12.1) - 2026-06-15
+
+### Fixed
+
+- *(history)* encode all non-alphanumeric path chars in project slug ([#650](https://github.com/joshrotenberg/claude-wrapper/pull/650))
+
 ## [0.12.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.11.1...v0.12.0) - 2026-06-12
 
 ### Added
