@@ -777,11 +777,12 @@ fn take_object(_value: &mut Value) -> serde_json::Map<String, Value> {
 /// Decode a project slug back to a filesystem path, anchoring on the
 /// real filesystem to disambiguate literal hyphens in directory names.
 ///
-/// Claude Code encodes an absolute path by replacing each `/` with `-`
-/// and prepending a leading `-`. The naive inverse (replace every `-`
-/// with `/`) is ambiguous: a directory whose name contains a literal
-/// hyphen -- like `claude-wrapper` -- is indistinguishable from a `/`
-/// boundary. This walks the slug left to right and, at each segment
+/// Claude Code encodes an absolute path by replacing each
+/// non-alphanumeric character with `-` (see [`encode_path_slug`]). The
+/// naive inverse (replace every `-` with `/`) is ambiguous: a `-` in the
+/// slug could have been a `/`, `.`, `_`, space, or a literal hyphen in a
+/// directory name -- like `claude-wrapper` -- making it indistinguishable
+/// from a `/` boundary. This walks the slug left to right and, at each segment
 /// boundary, checks the filesystem to decide whether the boundary is a
 /// `/` (slash form) or a literal `-` (hyphen form).
 ///
@@ -826,13 +827,17 @@ fn decode_slug_anchored(slug: &str) -> (PathBuf, bool) {
 }
 
 /// Encode an absolute filesystem path into claude's project-directory
-/// slug: every `/` and `.` becomes `-` (so `/private/var/T/tmp.X`
-/// becomes `-private-var-T-tmp-X`; the leading `/` yields the leading
-/// `-`). Does not canonicalize -- see [`HistoryRoot::project_slug`],
-/// which canonicalizes first.
+/// slug: every non-alphanumeric character becomes `-` (so
+/// `/private/var/T/tmp.X` becomes `-private-var-T-tmp-X`, and
+/// `/Users/me/claude_wrapper` becomes `-Users-me-claude-wrapper`; the
+/// leading `/` yields the leading `-`). This matches the Claude Code
+/// CLI, which replaces every non-alphanumeric char -- including `_`,
+/// spaces, and other separators -- when building the project-directory
+/// name under `~/.claude/projects/`. Does not canonicalize -- see
+/// [`HistoryRoot::project_slug`], which canonicalizes first.
 fn encode_path_slug(path: &str) -> String {
     path.chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
@@ -1465,6 +1470,17 @@ mod tests {
             encode_path_slug("/private/var/folders/T/tmp.AbC"),
             "-private-var-folders-T-tmp-AbC"
         );
+        // The #649 gap: every non-alphanumeric char is encoded,
+        // including `_`, spaces, and other separators -- matching the
+        // CLI's project-dir naming.
+        assert_eq!(
+            encode_path_slug("/Users/me/genagent/claude_wrapper_ex"),
+            "-Users-me-genagent-claude-wrapper-ex"
+        );
+        assert_eq!(
+            encode_path_slug("/Users/me/My Project (v2)"),
+            "-Users-me-My-Project--v2-"
+        );
     }
 
     #[test]
@@ -1485,6 +1501,25 @@ mod tests {
         assert!(
             !slug.contains('/'),
             "no '/' may survive in the slug: {slug}"
+        );
+    }
+
+    #[test]
+    fn project_slug_canonicalizes_and_encodes_underscore() {
+        // #649: an `_` in a path segment must encode to `-`, matching
+        // the CLI's project-dir naming.
+        let work = tempfile::tempdir().unwrap();
+        let cwd = work.path().join("claude_wrapper_ex");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let slug = HistoryRoot::project_slug(&cwd);
+        assert!(
+            slug.contains("claude-wrapper-ex"),
+            "underscored segment must encode '_' -> '-', got {slug}"
+        );
+        assert!(
+            !slug.contains('_'),
+            "no '_' may survive in the slug: {slug}"
         );
     }
 
