@@ -9,6 +9,7 @@ pub mod plugin;
 pub mod project;
 pub mod query;
 pub mod raw;
+pub mod ultrareview;
 pub mod update;
 pub mod version;
 

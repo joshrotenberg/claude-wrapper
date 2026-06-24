@@ -353,6 +353,7 @@ pub use command::plugin::{
 pub use command::project::ProjectPurgeCommand;
 pub use command::query::QueryCommand;
 pub use command::raw::RawCommand;
+pub use command::ultrareview::UltrareviewCommand;
 pub use command::update::UpdateCommand;
 pub use command::version::VersionCommand;
 #[cfg(all(feature = "json", feature = "async"))]
