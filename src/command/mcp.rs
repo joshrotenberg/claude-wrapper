@@ -486,6 +486,82 @@ impl ClaudeCommand for McpResetProjectChoicesCommand {
     }
 }
 
+/// Authenticate with an MCP server (HTTP, SSE, or claude.ai connector).
+///
+/// Drives an interactive OAuth flow. By default the CLI opens a browser;
+/// use [`Self::no_browser`] for SSH/headless sessions, where the CLI
+/// prints the authorization URL and waits for the redirect URL to be
+/// pasted back.
+#[derive(Debug, Clone)]
+pub struct McpLoginCommand {
+    name: String,
+    no_browser: bool,
+}
+
+impl McpLoginCommand {
+    /// Creates a command to authenticate with a named MCP server.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            no_browser: false,
+        }
+    }
+
+    /// Print the authorization URL instead of opening a browser
+    /// (`--no-browser`), for SSH/headless sessions.
+    #[must_use]
+    pub fn no_browser(mut self) -> Self {
+        self.no_browser = true;
+        self
+    }
+}
+
+impl ClaudeCommand for McpLoginCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        let mut args = vec!["mcp".to_string(), "login".to_string()];
+        if self.no_browser {
+            args.push("--no-browser".to_string());
+        }
+        args.push(self.name.clone());
+        args
+    }
+
+    #[cfg(feature = "async")]
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
+/// Clear stored OAuth credentials for an MCP server.
+#[derive(Debug, Clone)]
+pub struct McpLogoutCommand {
+    name: String,
+}
+
+impl McpLogoutCommand {
+    /// Creates a command to clear stored credentials for a named MCP server.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl ClaudeCommand for McpLogoutCommand {
+    type Output = CommandOutput;
+
+    fn args(&self) -> Vec<String> {
+        vec!["mcp".to_string(), "logout".to_string(), self.name.clone()]
+    }
+
+    #[cfg(feature = "async")]
+    async fn execute(&self, claude: &Claude) -> Result<CommandOutput> {
+        exec::run_claude(claude, self.args()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +715,23 @@ mod tests {
     fn test_mcp_serve_with_flags() {
         let cmd = McpServeCommand::new().debug().verbose();
         assert_eq!(cmd.args(), vec!["mcp", "serve", "--debug", "--verbose"]);
+    }
+
+    #[test]
+    fn test_mcp_login_args() {
+        let cmd = McpLoginCommand::new("sentry");
+        assert_eq!(cmd.args(), vec!["mcp", "login", "sentry"]);
+    }
+
+    #[test]
+    fn test_mcp_login_no_browser() {
+        let cmd = McpLoginCommand::new("sentry").no_browser();
+        assert_eq!(cmd.args(), vec!["mcp", "login", "--no-browser", "sentry"]);
+    }
+
+    #[test]
+    fn test_mcp_logout_args() {
+        let cmd = McpLogoutCommand::new("sentry");
+        assert_eq!(cmd.args(), vec!["mcp", "logout", "sentry"]);
     }
 }

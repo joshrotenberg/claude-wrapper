@@ -342,7 +342,8 @@ pub use command::marketplace::{
 };
 pub use command::mcp::{
     McpAddCommand, McpAddFromDesktopCommand, McpAddJsonCommand, McpGetCommand, McpListCommand,
-    McpRemoveCommand, McpResetProjectChoicesCommand, McpServeCommand,
+    McpLoginCommand, McpLogoutCommand, McpRemoveCommand, McpResetProjectChoicesCommand,
+    McpServeCommand,
 };
 pub use command::plugin::{
     PluginDetailsCommand, PluginDisableCommand, PluginEnableCommand, PluginInstallCommand,
