@@ -66,9 +66,11 @@ pub struct QueryCommand {
     debug_file: Option<String>,
     betas: Option<String>,
     plugin_dirs: Vec<String>,
+    plugin_urls: Vec<String>,
     setting_sources: Option<String>,
     tmux: bool,
     bare: bool,
+    safe_mode: bool,
     disable_slash_commands: bool,
     include_hook_events: bool,
     exclude_dynamic_system_prompt_sections: bool,
@@ -122,9 +124,11 @@ impl QueryCommand {
             debug_file: None,
             betas: None,
             plugin_dirs: Vec::new(),
+            plugin_urls: Vec::new(),
             setting_sources: None,
             tmux: false,
             bare: false,
+            safe_mode: false,
             disable_slash_commands: false,
             include_hook_events: false,
             exclude_dynamic_system_prompt_sections: false,
@@ -487,6 +491,15 @@ impl QueryCommand {
         self
     }
 
+    /// Fetch a plugin `.zip` from a URL for this session only
+    /// (`--plugin-url`). Repeatable; the URL-based counterpart to
+    /// [`Self::plugin_dir`].
+    #[must_use]
+    pub fn plugin_url(mut self, url: impl Into<String>) -> Self {
+        self.plugin_urls.push(url.into());
+        self
+    }
+
     /// Comma-separated list of setting sources to load (e.g., "user,project,local").
     #[must_use]
     pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
@@ -526,6 +539,20 @@ impl QueryCommand {
     #[must_use]
     pub fn disable_slash_commands(mut self) -> Self {
         self.disable_slash_commands = true;
+        self
+    }
+
+    /// Start with all customizations disabled (`--safe-mode`).
+    ///
+    /// Disables CLAUDE.md, skills, plugins, hooks, MCP servers, custom
+    /// commands and agents, output styles, and other customizations for
+    /// troubleshooting a broken configuration. Admin-managed (policy)
+    /// settings still apply. Auth, model selection, built-in tools, and
+    /// permissions work normally. Sets `CLAUDE_CODE_SAFE_MODE=1` inside
+    /// the child.
+    #[must_use]
+    pub fn safe_mode(mut self) -> Self {
+        self.safe_mode = true;
         self
     }
 
@@ -942,6 +969,11 @@ impl QueryCommand {
             args.push(dir.clone());
         }
 
+        for url in &self.plugin_urls {
+            args.push("--plugin-url".to_string());
+            args.push(url.clone());
+        }
+
         if let Some(ref sources) = self.setting_sources {
             args.push("--setting-sources".to_string());
             args.push(sources.clone());
@@ -953,6 +985,10 @@ impl QueryCommand {
 
         if self.bare {
             args.push("--bare".to_string());
+        }
+
+        if self.safe_mode {
+            args.push("--safe-mode".to_string());
         }
 
         if self.disable_slash_commands {
@@ -1509,6 +1545,40 @@ mod tests {
         assert_eq!(plugin_dir_count, 2);
         assert!(args.contains(&"/plugins/foo".to_string()));
         assert!(args.contains(&"/plugins/bar".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_url_single() {
+        let cmd = QueryCommand::new("test").plugin_url("https://example.com/p.zip");
+        let args = cmd.args();
+        assert!(args.contains(&"--plugin-url".to_string()));
+        assert!(args.contains(&"https://example.com/p.zip".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_url_multiple() {
+        let cmd = QueryCommand::new("test")
+            .plugin_url("https://example.com/a.zip")
+            .plugin_url("https://example.com/b.zip");
+        let args = cmd.args();
+        let plugin_url_count = args.iter().filter(|a| *a == "--plugin-url").count();
+        assert_eq!(plugin_url_count, 2);
+        assert!(args.contains(&"https://example.com/a.zip".to_string()));
+        assert!(args.contains(&"https://example.com/b.zip".to_string()));
+    }
+
+    #[test]
+    fn test_safe_mode_flag() {
+        let cmd = QueryCommand::new("test").safe_mode();
+        let args = cmd.args();
+        assert!(args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn test_safe_mode_absent_by_default() {
+        let cmd = QueryCommand::new("test");
+        let args = cmd.args();
+        assert!(!args.contains(&"--safe-mode".to_string()));
     }
 
     #[test]
