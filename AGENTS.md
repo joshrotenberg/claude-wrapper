@@ -181,6 +181,30 @@ Releases are driven by [`release-plz`](https://github.com/release-plz/release-pl
 - On every push to `main`, the `release-plz` workflow updates a long-running "chore: release" PR with the pending version bump + changelog
 - Merging that PR tags `v{version}`, creates a GitHub release, and publishes to crates.io
 
+## CLI coverage
+
+The wrapper aims to cover the full `claude` CLI subcommand and global-flag
+surface that is meaningful for non-interactive (`-p` / programmatic) use. Last
+audited against `claude` 2.1.186.
+
+Open coverage gaps -- commands or flags we intend to wrap but have not yet --
+are tracked as GitHub issues, not here. To re-audit, compare `claude --help`
+and each `claude <subcommand> --help` against the builders in `src/command/`,
+file issues for the actionable gaps, and bump the "last audited" version above.
+
+The following are intentionally **not** wrapped. They are interactive-only and
+have no meaning under `claude -p`:
+
+- `--chrome` / `--no-chrome` -- Claude-in-Chrome integration
+- `--ide` -- IDE auto-connect on startup
+- `--remote-control [name]`, `--remote-control-session-name-prefix <prefix>` -- Remote Control feature
+- `--ax-screen-reader` -- screen-reader-friendly flat-text rendering
+- `claude plugin init` / `new` -- interactive plugin scaffolding that writes to the user's config dir
+
+And these are not wrapped because the CLI itself deprecated them:
+
+- `--mcp-debug` -- deprecated alias for `--debug`
+
 ## What to avoid
 
 - Don't re-introduce `cargo-dist` or `Dockerfile` infrastructure -- both were removed deliberately in PR #524 when the repo pivoted to pure-wrapper.
