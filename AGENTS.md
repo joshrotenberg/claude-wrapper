@@ -4,7 +4,7 @@ Guidance for AI assistants working on this repo.
 
 ## What this is
 
-`claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: long-lived `DuplexSession` for hosts (one child held open across turns; mid-turn interrupts, permission handlers, broadcast subscribers), transient `Session` for short-lived processes (subprocess-per-turn with `--resume`, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming), typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation.
+`claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: long-lived `DuplexSession` for hosts (one child held open across turns; mid-turn interrupts, permission handlers, broadcast subscribers), transient `Session` for short-lived processes (subprocess-per-turn with `--resume`, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming), typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation. It also exposes a read-side introspection layer that parses Claude Code's on-disk state (sessions, agents, skills, custom commands, settings, background jobs, worktrees) directly, without spawning the CLI.
 
 This is the only crate in the repo.
 
@@ -76,23 +76,41 @@ Key modules:
 - `src/command/mod.rs` -- `ClaudeCommand` trait (async `execute` gated on `feature = "async"`), `ClaudeCommandSyncExt` blanket-impl trait (sync)
 - `src/command/query.rs` -- `QueryCommand`, the workhorse; has both `execute` / `execute_json` and `execute_sync` / `execute_json_sync`
 - `src/command/mcp.rs` -- MCP server management
-- `src/command/plugin.rs`, `marketplace.rs`, `auth.rs`, `doctor.rs`, `agents.rs`, `version.rs`, `raw.rs` -- other subcommands
+- `src/command/` also has one module per remaining subcommand: `agents.rs` (deprecated), `auth.rs`, `auto_mode.rs`, `doctor.rs`, `install.rs`, `marketplace.rs`, `plugin.rs`, `project.rs`, `raw.rs`, `update.rs`, `version.rs`
 - `src/exec.rs` -- process spawning (tokio for async, `std::process` + `wait-timeout` for sync), concurrent pipe drain, timeout cleanup
 - `src/streaming.rs` -- `stream_query` / `stream_query_sync` for NDJSON streaming
 - `src/session.rs` -- `Session` for multi-turn conversations from short-lived processes (async-only; subprocess per turn; holds `Arc<Claude>`, auto-threads session_id, tracks history/cost, supports streaming, optional `BudgetTracker` attachment)
 - `src/duplex.rs` -- `DuplexSession` for long-running hosts (async + json; one `claude` subprocess held open in stream-json mode across many turns; supports `subscribe`, `interrupt`, and an async `PermissionHandler` for mid-turn permission decisions)
+- `src/conversation.rs` -- `Conversation`, host-side bookkeeping over `DuplexSession` (rolling `TurnResult` history, cumulative cost, optional `BudgetTracker` hard-stop). Gated on `json` + `async`
 - `src/budget.rs` -- `BudgetTracker` with fire-once warn/exceeded callbacks and `Error::BudgetExceeded` hard-stop
 - `src/tool_pattern.rs` -- `ToolPattern` for typed `--allowed-tools` / `--disallowed-tools` patterns (`tool`, `tool_with_args`, `all`, `mcp` constructors; `parse()` validation; loose `From<&str>` for back-compat)
+- `src/slash.rs` -- builders for slash-command strings (e.g. `/compact`) to feed stream-json input
 - `src/mcp_config.rs` -- `McpConfigBuilder` for generating `.mcp.json` files
 - `src/retry.rs` -- `RetryPolicy`, `BackoffStrategy`, `with_retry` (async) and `with_retry_sync`
 - `src/dangerous.rs` -- `DangerousClient` + env-var gate for bypass-permissions mode (isolated from the default API surface)
+- `src/version.rs` -- `CliVersion` parsing and tested-range checks (`CliVersionStatus`); backs `Claude::cli_version` / `cli_version_sync`
+- `src/auth.rs` -- auth-strategy detection (`detect`, `AuthStrategy`, `AuthSummary`); inspects env + credential files, spawns no subprocess. Distinct from `command/auth.rs`, which runs `claude auth`
 - `src/types.rs` -- `QueryResult`, `Transport`, `PermissionMode`, `Effort`, etc.
-- `src/error.rs` -- `Error` enum (thiserror)
+- `src/error.rs` -- `Error` enum (thiserror, `#[non_exhaustive]`)
+
+### On-disk introspection (read-side)
+
+A family of read-only modules that parse Claude Code's on-disk state directly,
+without spawning the CLI. Each exposes a `*Root` / loader type with `list` / `get`
+accessors:
+
+- `src/artifacts.rs` -- agent definitions (`~/.claude/agents/<name>.md`); also has write helpers
+- `src/commands.rs` -- custom slash-command definitions (user + project `*.md`)
+- `src/skills.rs` -- skill definitions (`~/.claude/skills/<name>/SKILL.md`)
+- `src/history.rs` -- session history (`~/.claude/projects/<slug>/<session_id>.jsonl`); `json`-gated
+- `src/jobs.rs` -- background-job / supervisor daemon state; `json`-gated
+- `src/settings.rs` -- the four layered settings files, merged by precedence; `json`-gated
+- `src/worktrees.rs` -- git worktree introspection for `--worktree` sessions
 
 ## Feature flags
 
 - `async` (default) -- tokio-backed async API. Disabling drops tokio from the runtime dep tree.
-- `json` (default) -- JSON output parsing via serde_json; also gates `Session`, `stream_query`, `execute_json`, `StreamEvent`.
+- `json` (default) -- JSON output parsing via serde_json; also gates `Session`, `DuplexSession`, `Conversation`, `stream_query`, `execute_json`, `StreamEvent`, and the `history` / `jobs` / `settings` introspection modules.
 - `tempfile` (default) -- `McpConfigBuilder::build_temp` via `TempMcpConfig`.
 - `sync` -- blocking API: `*_sync` functions on `exec::`, `retry::`, each command builder, and `Claude`. Pulls in `wait-timeout` only.
 
@@ -111,10 +129,14 @@ The `Session` module and every `async fn execute` / `async fn execute_json` are 
 
 ## Multi-turn API notes
 
-The crate ships two multi-turn primitives. Recommend `DuplexSession`
-for long-running hosts (the featureful default for agentic / UI
-work), and `Session` for short-lived processes that just need
-conversation continuity over a series of one-off subprocess calls.
+The crate ships two core multi-turn primitives plus a convenience
+wrapper. Recommend `DuplexSession` for long-running hosts (the
+featureful default for agentic / UI work), and `Session` for
+short-lived processes that just need conversation continuity over a
+series of one-off subprocess calls. `Conversation` wraps a
+`DuplexSession` with rolling history, cumulative cost, and an optional
+`BudgetTracker` hard-stop for hosts that want that bookkeeping built
+in rather than accumulating it themselves.
 
 ### `DuplexSession` (recommended for long-running hosts)
 
