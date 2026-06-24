@@ -68,6 +68,10 @@ name = "health_check"
 required-features = ["async"]
 
 [[example]]
+name = "inspect_state"
+required-features = ["json"]
+
+[[example]]
 name = "json_output"
 required-features = ["async", "json"]
 

@@ -21,10 +21,13 @@ Features:
 - Async (tokio) and blocking (`std::thread` + `wait-timeout`) APIs behind feature flags
 - Long-lived `DuplexSession` for hosts (IDE backends, daemons, agent servers, chat UIs): one `claude` subprocess held open across turns, mid-turn interrupts, mid-turn permission decisions, broadcast event subscribers
 - Transient `Session` for short-lived processes (CLIs, build scripts, batch jobs): subprocess-per-turn with `--resume` continuity, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming
+- `Conversation` for host-side history/cost/budget bookkeeping over a `DuplexSession`
 - NDJSON streaming events (`stream_query` / `stream_query_sync`)
 - Typed tool-permission patterns (`ToolPattern`)
-- MCP server management: list, get, add, add-json, remove, add-from-desktop, serve, reset-project-choices
+- Read-side introspection of Claude Code's on-disk state without spawning the CLI: session history, agents, skills, custom commands, settings, background jobs, worktrees
+- MCP server management: list, get, add, add-json, remove, add-from-desktop, login, logout, serve, reset-project-choices
 - Plugin and marketplace subcommands
+- Other subcommands: `doctor`, `install`, `update`, `project purge`, `auto-mode`, and `ultrareview` (cloud-hosted multi-agent code review)
 - Auth: `status`, `login`, `logout`, `setup-token`
 - `McpConfigBuilder` for programmatic `.mcp.json` generation (with optional tempfile backing)
 - Retry policy with fixed or exponential backoff
@@ -41,7 +44,7 @@ Default features: `["async", "json", "tempfile"]`. To drop `tokio`
 entirely for a sync-only build:
 
 ```toml
-claude-wrapper = { version = "0.6", default-features = false, features = ["json", "sync"] }
+claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
 ```
 
 ## Quick start (async)
@@ -117,10 +120,13 @@ let claude = Claude::builder()
 | Category | Builders |
 |---|---|
 | Query | `QueryCommand` |
-| MCP | `McpListCommand`, `McpGetCommand`, `McpAddCommand`, `McpAddJsonCommand`, `McpRemoveCommand`, `McpAddFromDesktopCommand`, `McpServeCommand`, `McpResetProjectChoicesCommand` |
-| Plugins | `PluginListCommand`, `PluginInstallCommand`, `PluginUninstallCommand`, `PluginEnableCommand`, `PluginDisableCommand`, `PluginUpdateCommand`, `PluginValidateCommand` |
+| MCP | `McpListCommand`, `McpGetCommand`, `McpAddCommand`, `McpAddJsonCommand`, `McpRemoveCommand`, `McpAddFromDesktopCommand`, `McpLoginCommand`, `McpLogoutCommand`, `McpServeCommand`, `McpResetProjectChoicesCommand` |
+| Plugins | `PluginListCommand`, `PluginInstallCommand`, `PluginUninstallCommand`, `PluginEnableCommand`, `PluginDisableCommand`, `PluginUpdateCommand`, `PluginValidateCommand`, `PluginDetailsCommand`, `PluginPruneCommand`, `PluginTagCommand` |
 | Marketplace | `MarketplaceListCommand`, `MarketplaceAddCommand`, `MarketplaceRemoveCommand`, `MarketplaceUpdateCommand` |
 | Auth | `AuthStatusCommand`, `AuthLoginCommand`, `AuthLogoutCommand`, `SetupTokenCommand` |
+| Auto-mode | `AutoModeConfigCommand`, `AutoModeDefaultsCommand`, `AutoModeCritiqueCommand` |
+| Lifecycle | `InstallCommand`, `UpdateCommand`, `ProjectPurgeCommand` |
+| Review | `UltrareviewCommand` |
 | Misc | `VersionCommand`, `DoctorCommand`, `AgentsCommand`, `RawCommand` |
 
 Every builder implements `ClaudeCommand` (`args()`, async `execute`).
@@ -344,6 +350,34 @@ stream_query(&claude, &cmd, |event: StreamEvent| {
 Sync: `stream_query_sync`. The handler runs on the caller's thread, so
 it can capture non-`Send` state (`Rc<RefCell<_>>`, etc.).
 
+## On-disk introspection
+
+Read Claude Code's on-disk state under `~/.claude` directly, without
+spawning the CLI. Each module exposes a root/loader with `list` / `get`
+accessors and returns an empty result when the directory is absent.
+
+| Module | Type | Reads |
+|---|---|---|
+| `history` | `HistoryRoot` | sessions and transcripts (`projects/<slug>/<id>.jsonl`) |
+| `artifacts` | `AgentsRoot` | agent definitions (`agents/<name>.md`) |
+| `skills` | `SkillsRoot` | skill definitions (`skills/<name>/SKILL.md`) |
+| `commands` | `CommandsRoot` | custom slash commands |
+| `settings` | `SettingsLoader` | the four settings layers, merged by precedence |
+| `jobs` | `JobsRoot` | background-agent / supervisor state |
+| `worktrees` | `WorktreeRoot` | git worktrees for `--worktree` sessions |
+
+```rust
+use claude_wrapper::history::HistoryRoot;
+
+let history = HistoryRoot::home()?;
+for project in history.list_projects()? {
+    println!("{} ({} sessions)", project.decoded_path.display(), project.session_count);
+}
+```
+
+The `history`, `jobs`, and `settings` modules require the `json`
+feature (on by default). See the `inspect_state` example for a tour.
+
 ## MCP servers
 
 ```rust
@@ -471,7 +505,7 @@ let output = RawCommand::new("custom-subcommand")
 Sync-only build with no tokio:
 
 ```toml
-claude-wrapper = { version = "0.6", default-features = false, features = ["json", "sync"] }
+claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
 ```
 
 ## Examples
@@ -484,10 +518,14 @@ cargo run --example mcp_config        # MCP config generation
 cargo run --example health_check      # CLI diagnostics
 cargo run --example agent_worker      # Agent worker setup
 cargo run --example supervised_worker # Restart loop with budget tracking
+cargo run --example duplex_chat       # Interactive multi-turn chat (DuplexSession)
+cargo run --example duplex_interrupt  # Cancel an in-flight turn
+cargo run --example duplex_http_service # One DuplexSession behind HTTP routes
+cargo run --example inspect_state --features json # Read on-disk state (no CLI)
 ```
 
-All examples use the async API and require `--features async` (on by
-default).
+Most examples use the async API (`--features async`, on by default);
+`inspect_state` is read-only and needs just `--features json`.
 
 ## Testing
 

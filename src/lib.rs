@@ -11,14 +11,14 @@
 //! | Feature | Default | Purpose |
 //! |---|---|---|
 //! | `async` | yes | tokio-backed async API. Disabling drops tokio from the runtime dep tree. |
-//! | `json` | yes | JSON output parsing ([`QueryCommand::execute_json`], [`streaming::StreamEvent`], [`session::Session`], [`streaming::stream_query`]). |
+//! | `json` | yes | JSON output parsing and the JSON-backed surface ([`QueryCommand::execute_json`], [`streaming`], [`session::Session`], [`duplex`], [`conversation`], and the [`history`] / [`jobs`] / [`settings`] introspection modules). |
 //! | `tempfile` | yes | [`TempMcpConfig`] for one-shot MCP config files. |
 //! | `sync` | no | Blocking API: `*_sync` methods on [`exec`], [`retry`], every command builder, and [`Claude`]. |
 //!
 //! Sync-only (tokio-free) build:
 //!
 //! ```toml
-//! claude-wrapper = { version = "0.6", default-features = false, features = ["json", "sync"] }
+//! claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
 //! ```
 //!
 //! # Quick start (async)
@@ -258,6 +258,34 @@
 //!     .mcp_config("/tmp/my-project/.mcp.json")
 //!     .execute(&claude)
 //!     .await?;
+//! # Ok(()) }
+//! # }
+//! ```
+//!
+//! # On-disk introspection
+//!
+//! A family of read-only modules parses Claude Code's on-disk state
+//! under `~/.claude` directly, without spawning the CLI. Each exposes a
+//! root/loader with `list` / `get` accessors and degrades to an empty
+//! result when the directory is absent: [`history`] (sessions and
+//! transcripts), [`artifacts`] (agents), [`skills`], [`commands`]
+//! (custom slash commands), [`settings`] (the four merged layers),
+//! [`jobs`] (background-agent state), and [`worktrees`]. See the
+//! `inspect_state` example for an end-to-end tour.
+//!
+//! ```no_run
+//! # #[cfg(feature = "json")] {
+//! use claude_wrapper::history::HistoryRoot;
+//!
+//! # fn example() -> claude_wrapper::Result<()> {
+//! let history = HistoryRoot::home()?;
+//! for project in history.list_projects()? {
+//!     println!(
+//!         "{} ({} sessions)",
+//!         project.decoded_path.display(),
+//!         project.session_count,
+//!     );
+//! }
 //! # Ok(()) }
 //! # }
 //! ```
