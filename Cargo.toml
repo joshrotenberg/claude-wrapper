@@ -1,6 +1,6 @@
 [package]
 name = "claude-wrapper"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
