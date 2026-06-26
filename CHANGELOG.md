@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.2](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.1...v0.12.2) - 2026-06-24
+
+### Added
+
+- *(ultrareview)* wrap the ultrareview command ([#661](https://github.com/joshrotenberg/claude-wrapper/pull/661))
+- *(mcp)* wrap mcp login and mcp logout ([#660](https://github.com/joshrotenberg/claude-wrapper/pull/660))
+- *(query)* add --plugin-url and --safe-mode flags ([#659](https://github.com/joshrotenberg/claude-wrapper/pull/659))
+
+### Other
+
+- refresh README and crate docs, add introspection example ([#662](https://github.com/joshrotenberg/claude-wrapper/pull/662))
+- *(agents)* CLI coverage scope plus module-inventory refresh ([#658](https://github.com/joshrotenberg/claude-wrapper/pull/658))
+- bump actions/checkout from 6 to 7 ([#652](https://github.com/joshrotenberg/claude-wrapper/pull/652))
+
 ## [0.12.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.0...v0.12.1) - 2026-06-15
 
 ### Fixed
