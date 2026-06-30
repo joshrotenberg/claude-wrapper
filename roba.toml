@@ -1,0 +1,107 @@
+# claude-wrapper project config for roba (https://crates.io/crates/roba).
+#
+# The top level stays safe-by-default: no full_auto, no worktree. Those are
+# task-scoped, so they live in the named `worker` profile and only fire when
+# you opt in with `--profile worker` (or the `fix` verb). See `roba config
+# lint`. Run `roba config explain` to see what is active.
+model = "opus"
+stream = true
+show_thinking = true
+
+# ---------------------------------------------------------------------------
+# Single-issue lifecycle as one profile per phase -- one posture per phase,
+# each a distinct roba run. plan and review are read-only; implement (worker)
+# is the only one that mutates. The sequencing (plan -> implement -> review ->
+# the human merges) is composition you drive, not a chain baked into config.
+#
+# claude-wrapper's own rule (AGENTS.md): "Do not merge PRs -- the human will
+# do it." So these verbs stop at a ready draft PR; the merge is always manual.
+# ---------------------------------------------------------------------------
+
+# PLAN -- read-only orientation against recent history. Produce an approach,
+# touch nothing.  ->  roba --profile plan "how should I approach X?"
+[profile.plan]
+readonly = true
+git_log = 10
+
+# IMPLEMENT -- the task-scoped dispatch posture: bypass tool checks, capped so
+# an unattended run self-arrests (the cascade-needs-runway lesson). worktree
+# is OFF: claude-wrapper is a Rust crate with a heavy dep tree, so a fresh
+# worktree would cold-rebuild `target/` every run; branch in place (or have an
+# orchestrator `git worktree add` + `-C` for real parallel isolation).
+#   roba --profile worker -f task.md
+[profile.worker]
+full_auto = true
+worktree = false
+max_turns = 80
+max_budget_usd = 10.0
+
+# REVIEW -- read-only against the working-tree diff.
+#   roba --profile review "is this safe to merge?"
+[profile.review]
+readonly = true
+git_diff = true
+
+# ---------------------------------------------------------------------------
+# Lifecycle verbs. Each is ONE rich roba run (width), never a multi-step chain
+# (depth). issue and review are read-only and bring their own gh context, so
+# they take the bare `--readonly` posture; fix is the full_auto implement shot
+# and inherits the worker caps. The watch/merge tail stays in gh and is
+# MANUAL per AGENTS.md:
+#   roba fix 664 && gh pr checks <pr> --watch    # then the human merges
+# ---------------------------------------------------------------------------
+
+# PLAN by issue number: summarize + propose an approach, write no code.
+#   roba issue 664
+[alias.issue]
+description = "Summarize a claude-wrapper issue and propose an approach (read-only)"
+args = ["n"]
+flags = ["--readonly"]
+template = """
+Summarize claude-wrapper issue #${n} and propose an implementation approach.
+Cite the files involved (this is a single-crate library; most error/result
+work lives in src/error.rs and src/types.rs). Do not write code.
+
+$(gh issue view ${n})
+"""
+
+# IMPLEMENT an issue end-to-end, then open a DRAFT PR. full_auto via the
+# worker profile -- an explicit, named opt-in.
+#   roba fix 664
+[alias.fix]
+description = "Implement a claude-wrapper issue, open a draft PR (full_auto, no merge)"
+args = ["n"]
+flags = ["--profile", "worker"]
+template = """
+Implement claude-wrapper issue #${n}. Follow AGENTS.md exactly.
+
+- Branch off main (feat/ or fix/ naming); never commit to main.
+- thiserror for library errors; the Error enum is #[non_exhaustive], so a new
+  variant is non-breaking. No em dashes (use --). No emojis.
+- Run the FULL gate before pushing: cargo fmt --all -- --check; cargo clippy
+  --all-targets --all-features -- -D warnings; cargo test --lib --all-features;
+  cargo test --doc --all-features; cargo test --test fake_claude --all-features.
+  If the change touches feature-gated code, also verify the feature-combo
+  builds in AGENTS.md (default / --all-features / --no-default-features
+  --features "json,sync").
+- Commit with a conventional-commit subject. Open a DRAFT PR with the plan as
+  the body and `Closes #${n}`. Do NOT merge -- the human merges.
+- Surface anything that does not fit rather than forcing it.
+
+$(gh issue view ${n})
+"""
+
+# REVIEW a PR by number against its own diff (read-only).
+#   roba review 665
+[alias.review]
+description = "Review a claude-wrapper PR by number (read-only)"
+args = ["pr"]
+flags = ["--readonly"]
+template = """
+Review PR #${pr} in claude-wrapper for correctness and regressions. Cite
+file:line. Check it against AGENTS.md conventions (thiserror, no em dashes,
+builder-returns-Self, feature-gate hygiene). No style nits.
+
+Title: $(gh pr view ${pr} --json title -q '.title')
+$(gh pr diff ${pr})
+"""
