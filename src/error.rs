@@ -173,6 +173,41 @@ pub enum Error {
         /// event ("Reached maximum number of turns (N)") when present.
         max_turns: Option<u32>,
     },
+
+    /// A `--max-budget-usd`-capped run hit its spend ceiling. The CLI
+    /// emits a terminal `result` event with `subtype ==
+    /// "error_max_budget_usd"` (exit 1, with the result JSON on
+    /// stdout), which would otherwise fold into
+    /// [`Error::CommandFailed`].
+    ///
+    /// This is distinct from a genuine failure: the working tree may
+    /// be fine and the run simply hit the cap mid-task. Orchestrators
+    /// can match this variant to finish the lifecycle (run remaining
+    /// gates, commit) rather than treating it as broken or re-parsing
+    /// the trace for `error_max_budget_usd`.
+    ///
+    /// The `max_usd` is claude's reported cap, not the actual spend.
+    /// Detection is post-hoc (claude checks the budget after each API
+    /// call completes), so a run can overspend the cap before tripping.
+    ///
+    /// Raised by [`Error::from_command_failure`] ahead of the auth
+    /// classifier. Only detected when the result event is present on
+    /// stdout (the `json` / `stream-json` output formats); text-mode
+    /// failures without it remain [`Error::CommandFailed`].
+    ///
+    /// This is separate from [`Error::BudgetExceeded`], which is the
+    /// wrapper's own [`BudgetTracker`](crate::budget::BudgetTracker)
+    /// ceiling -- a different mechanism from claude's CLI cap.
+    #[error("claude hit the --max-budget-usd cap{}: {command} (exit code {exit_code})", max_usd.map(|n| format!(" of ${n:.2}")).unwrap_or_default())]
+    MaxBudgetExceeded {
+        /// The full command line that failed.
+        command: String,
+        /// Process exit code (1).
+        exit_code: i32,
+        /// The configured `--max-budget-usd` cap, parsed from the
+        /// result event ("Reached maximum budget ($X)") when present.
+        max_usd: Option<f64>,
+    },
 }
 
 impl Error {
@@ -202,6 +237,19 @@ impl Error {
                 command,
                 exit_code,
                 max_turns: parse_max_turns_cap(&stdout),
+            };
+        }
+        // A --max-budget-usd cap hit mirrors the max-turns shape: a
+        // terminal `result` event with subtype "error_max_budget_usd"
+        // on stdout. Surface it as its own typed variant -- ahead of
+        // the auth classifier, since it is never auth-shaped -- so
+        // consumers can tell "hit the cap" (recoverable) from a genuine
+        // failure.
+        if stdout.contains("\"error_max_budget_usd\"") {
+            return Self::MaxBudgetExceeded {
+                command,
+                exit_code,
+                max_usd: parse_max_budget_cap(&stdout),
             };
         }
         if let Some(kind) = crate::auth::classify_failure(exit_code, &stdout, &stderr) {
@@ -263,6 +311,17 @@ fn parse_max_turns_cap(stdout: &str) -> Option<u32> {
         .nth(1)
         .and_then(|rest| rest.split(')').next())
         .and_then(|n| n.trim().parse::<u32>().ok())
+}
+
+/// Parse the configured `--max-budget-usd` cap from a CLI result
+/// event's human-readable error ("Reached maximum budget ($X)").
+/// Returns `None` when the phrase or a parseable amount is absent.
+fn parse_max_budget_cap(stdout: &str) -> Option<f64> {
+    stdout
+        .split("maximum budget ($")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|n| n.trim().parse::<f64>().ok())
 }
 
 impl From<std::io::Error> for Error {
@@ -512,5 +571,92 @@ mod tests {
         .to_string();
         assert!(s.contains("--max-turns"), "got: {s}");
         assert!(s.contains("of 5"), "got: {s}");
+    }
+
+    // -- max-budget-usd classification (#664) -----------------------
+
+    // Exact shape of a --max-budget-usd cap-hit result event, from the
+    // field (claude 2.1.186, --output-format stream-json). The cap was
+    // $0.01 but actual spend was $0.127 -- detection is post-hoc, so the
+    // variant reports the cap, not the spend.
+    const MAX_BUDGET_STDOUT: &str = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"modelUsage":{"claude-haiku-4-5":{"costUSD":0.1273986}},"session_id":"s1"}"#;
+
+    #[test]
+    fn from_command_failure_max_budget_yields_typed_variant() {
+        let e = Error::from_command_failure(
+            "claude --print --max-budget-usd 0.01".into(),
+            1,
+            MAX_BUDGET_STDOUT.into(),
+            String::new(),
+            None,
+        );
+        match e {
+            Error::MaxBudgetExceeded {
+                max_usd, exit_code, ..
+            } => {
+                assert_eq!(max_usd, Some(0.01));
+                assert_eq!(exit_code, 1);
+            }
+            other => panic!("expected MaxBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_budget_detected_without_parseable_cap() {
+        let stdout = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true}"#;
+        let e = Error::from_command_failure("c".into(), 1, stdout.into(), String::new(), None);
+        match e {
+            Error::MaxBudgetExceeded { max_usd, .. } => assert_eq!(max_usd, None),
+            other => panic!("expected MaxBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_max_budget_failure_stays_command_failed() {
+        let e =
+            Error::from_command_failure("c".into(), 1, "other output".into(), "boom".into(), None);
+        assert!(matches!(e, Error::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn max_budget_check_does_not_swallow_auth() {
+        // A genuine auth failure (no error_max_budget_usd) still
+        // classifies as Auth -- the budget guard precedes but doesn't
+        // shadow it.
+        let e = Error::from_command_failure(
+            "c".into(),
+            1,
+            String::new(),
+            "Not authenticated. Run `claude login`.".into(),
+            None,
+        );
+        assert!(matches!(e, Error::Auth { .. }));
+    }
+
+    #[test]
+    fn parse_max_budget_cap_variants() {
+        assert_eq!(
+            parse_max_budget_cap("Reached maximum budget ($0.01)"),
+            Some(0.01)
+        );
+        assert_eq!(parse_max_budget_cap(MAX_BUDGET_STDOUT), Some(0.01));
+        assert_eq!(
+            parse_max_budget_cap("Reached maximum budget ($5)"),
+            Some(5.0)
+        );
+        assert_eq!(parse_max_budget_cap("no such phrase"), None);
+        assert_eq!(parse_max_budget_cap("maximum budget ($nope)"), None);
+    }
+
+    #[test]
+    fn max_budget_display_includes_cap() {
+        let s = Error::MaxBudgetExceeded {
+            command: "claude --print".into(),
+            exit_code: 1,
+            max_usd: Some(0.01),
+        }
+        .to_string();
+        assert!(s.contains("--max-budget-usd"), "got: {s}");
+        assert!(s.contains("of $0.01"), "got: {s}");
     }
 }
