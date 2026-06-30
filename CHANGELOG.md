@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.3](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.2...v0.12.3) - 2026-06-30
+
+### Added
+
+- detect claude's --max-budget-usd cap as MaxBudgetExceeded ([#666](https://github.com/joshrotenberg/claude-wrapper/pull/666))
+
+### Other
+
+- add roba.toml (safe-default + named worker config) ([#665](https://github.com/joshrotenberg/claude-wrapper/pull/665))
+
 ## [0.12.2](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.1...v0.12.2) - 2026-06-24
 
 ### Added
