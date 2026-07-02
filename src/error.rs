@@ -163,7 +163,11 @@ pub enum Error {
     /// classifier. Only detected when the result event is present on
     /// stdout (the `json` / `stream-json` output formats); text-mode
     /// failures without it remain [`Error::CommandFailed`].
+    ///
+    /// This variant is `#[non_exhaustive]`: match with `..` so future
+    /// field additions are not breaking.
     #[error("claude hit the --max-turns cap{}: {command} (exit code {exit_code})", max_turns.map(|n| format!(" of {n}")).unwrap_or_default())]
+    #[non_exhaustive]
     MaxTurnsExceeded {
         /// The full command line that failed.
         command: String,
@@ -172,6 +176,15 @@ pub enum Error {
         /// The configured `--max-turns` cap, parsed from the result
         /// event ("Reached maximum number of turns (N)") when present.
         max_turns: Option<u32>,
+        /// Actual spend, from the result event's `total_cost_usd`
+        /// when present.
+        cost_usd: Option<f64>,
+        /// Turns completed before the cap, from the result event's
+        /// `num_turns` when present.
+        num_turns: Option<u32>,
+        /// Session id from the result event when present; usable to
+        /// resume the capped run.
+        session_id: Option<String>,
     },
 
     /// A `--max-budget-usd`-capped run hit its spend ceiling. The CLI
@@ -198,7 +211,11 @@ pub enum Error {
     /// This is separate from [`Error::BudgetExceeded`], which is the
     /// wrapper's own [`BudgetTracker`](crate::budget::BudgetTracker)
     /// ceiling -- a different mechanism from claude's CLI cap.
+    ///
+    /// This variant is `#[non_exhaustive]`: match with `..` so future
+    /// field additions are not breaking.
     #[error("claude hit the --max-budget-usd cap{}: {command} (exit code {exit_code})", max_usd.map(|n| format!(" of ${n:.2}")).unwrap_or_default())]
+    #[non_exhaustive]
     MaxBudgetExceeded {
         /// The full command line that failed.
         command: String,
@@ -207,6 +224,15 @@ pub enum Error {
         /// The configured `--max-budget-usd` cap, parsed from the
         /// result event ("Reached maximum budget ($X)") when present.
         max_usd: Option<f64>,
+        /// Actual spend, from the result event's `total_cost_usd`
+        /// when present.
+        cost_usd: Option<f64>,
+        /// Turns completed before the cap, from the result event's
+        /// `num_turns` when present.
+        num_turns: Option<u32>,
+        /// Session id from the result event when present; usable to
+        /// resume the capped run.
+        session_id: Option<String>,
     },
 }
 
@@ -237,6 +263,9 @@ impl Error {
                 command,
                 exit_code,
                 max_turns: parse_max_turns_cap(&stdout),
+                cost_usd: parse_result_number(&stdout, "total_cost_usd"),
+                num_turns: parse_result_number(&stdout, "num_turns"),
+                session_id: parse_result_string(&stdout, "session_id"),
             };
         }
         // A --max-budget-usd cap hit mirrors the max-turns shape: a
@@ -250,6 +279,9 @@ impl Error {
                 command,
                 exit_code,
                 max_usd: parse_max_budget_cap(&stdout),
+                cost_usd: parse_result_number(&stdout, "total_cost_usd"),
+                num_turns: parse_result_number(&stdout, "num_turns"),
+                session_id: parse_result_string(&stdout, "session_id"),
             };
         }
         if let Some(kind) = crate::auth::classify_failure(exit_code, &stdout, &stderr) {
@@ -322,6 +354,27 @@ fn parse_max_budget_cap(stdout: &str) -> Option<f64> {
         .nth(1)
         .and_then(|rest| rest.split(')').next())
         .and_then(|n| n.trim().parse::<f64>().ok())
+}
+
+/// Extract a top-level numeric field (e.g. `"num_turns":2`) from a
+/// result event's raw JSON. String-based, like the cap parsers above:
+/// `serde_json` is an optional dependency and this module must work
+/// without it. Returns `None` when the field or a parseable value is
+/// absent.
+fn parse_result_number<T: std::str::FromStr>(stdout: &str, field: &str) -> Option<T> {
+    let rest = stdout.split(&format!("\"{field}\":")).nth(1)?;
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    rest[..end].trim().parse::<T>().ok()
+}
+
+/// Extract a top-level string field (e.g. `"session_id":"abc"`) from
+/// a result event's raw JSON. Assumes the value contains no escaped
+/// quotes, which holds for session ids. Returns `None` when the field
+/// is absent or not a string.
+fn parse_result_string(stdout: &str, field: &str) -> Option<String> {
+    let rest = stdout.split(&format!("\"{field}\":")).nth(1)?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    rest.split('"').next().map(str::to_string)
 }
 
 impl From<std::io::Error> for Error {
@@ -510,10 +563,16 @@ mod tests {
             Error::MaxTurnsExceeded {
                 max_turns,
                 exit_code,
+                cost_usd,
+                num_turns,
+                session_id,
                 ..
             } => {
                 assert_eq!(max_turns, Some(1));
                 assert_eq!(exit_code, 1);
+                assert_eq!(cost_usd, Some(0.08));
+                assert_eq!(num_turns, Some(2));
+                assert_eq!(session_id.as_deref(), Some("s1"));
             }
             other => panic!("expected MaxTurnsExceeded, got {other:?}"),
         }
@@ -524,7 +583,18 @@ mod tests {
         let stdout = r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
         let e = Error::from_command_failure("c".into(), 1, stdout.into(), String::new(), None);
         match e {
-            Error::MaxTurnsExceeded { max_turns, .. } => assert_eq!(max_turns, None),
+            Error::MaxTurnsExceeded {
+                max_turns,
+                cost_usd,
+                num_turns,
+                session_id,
+                ..
+            } => {
+                assert_eq!(max_turns, None);
+                assert_eq!(cost_usd, None);
+                assert_eq!(num_turns, None);
+                assert_eq!(session_id, None);
+            }
             other => panic!("expected MaxTurnsExceeded, got {other:?}"),
         }
     }
@@ -567,6 +637,9 @@ mod tests {
             command: "claude --print".into(),
             exit_code: 1,
             max_turns: Some(5),
+            cost_usd: None,
+            num_turns: None,
+            session_id: None,
         }
         .to_string();
         assert!(s.contains("--max-turns"), "got: {s}");
@@ -575,11 +648,11 @@ mod tests {
 
     // -- max-budget-usd classification (#664) -----------------------
 
-    // Exact shape of a --max-budget-usd cap-hit result event, from the
-    // field (claude 2.1.186, --output-format stream-json). The cap was
-    // $0.01 but actual spend was $0.127 -- detection is post-hoc, so the
-    // variant reports the cap, not the spend.
-    const MAX_BUDGET_STDOUT: &str = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"modelUsage":{"claude-haiku-4-5":{"costUSD":0.1273986}},"session_id":"s1"}"#;
+    // Shape of a --max-budget-usd cap-hit result event, from the field
+    // (claude 2.1.186, --output-format stream-json). The cap was $0.01
+    // but actual spend was $0.127 -- detection is post-hoc, so `max_usd`
+    // reports the cap and `cost_usd` the spend.
+    const MAX_BUDGET_STDOUT: &str = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"total_cost_usd":0.1273986,"modelUsage":{"claude-haiku-4-5":{"costUSD":0.1273986}},"session_id":"s1"}"#;
 
     #[test]
     fn from_command_failure_max_budget_yields_typed_variant() {
@@ -592,10 +665,18 @@ mod tests {
         );
         match e {
             Error::MaxBudgetExceeded {
-                max_usd, exit_code, ..
+                max_usd,
+                exit_code,
+                cost_usd,
+                num_turns,
+                session_id,
+                ..
             } => {
                 assert_eq!(max_usd, Some(0.01));
                 assert_eq!(exit_code, 1);
+                assert_eq!(cost_usd, Some(0.1273986));
+                assert_eq!(num_turns, Some(1));
+                assert_eq!(session_id.as_deref(), Some("s1"));
             }
             other => panic!("expected MaxBudgetExceeded, got {other:?}"),
         }
@@ -606,7 +687,18 @@ mod tests {
         let stdout = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true}"#;
         let e = Error::from_command_failure("c".into(), 1, stdout.into(), String::new(), None);
         match e {
-            Error::MaxBudgetExceeded { max_usd, .. } => assert_eq!(max_usd, None),
+            Error::MaxBudgetExceeded {
+                max_usd,
+                cost_usd,
+                num_turns,
+                session_id,
+                ..
+            } => {
+                assert_eq!(max_usd, None);
+                assert_eq!(cost_usd, None);
+                assert_eq!(num_turns, None);
+                assert_eq!(session_id, None);
+            }
             other => panic!("expected MaxBudgetExceeded, got {other:?}"),
         }
     }
@@ -654,9 +746,53 @@ mod tests {
             command: "claude --print".into(),
             exit_code: 1,
             max_usd: Some(0.01),
+            cost_usd: None,
+            num_turns: None,
+            session_id: None,
         }
         .to_string();
         assert!(s.contains("--max-budget-usd"), "got: {s}");
         assert!(s.contains("of $0.01"), "got: {s}");
+    }
+
+    // -- result-event spend-field extraction (#668) ------------------
+
+    #[test]
+    fn parse_result_number_variants() {
+        assert_eq!(
+            parse_result_number::<f64>(MAX_TURNS_STDOUT, "total_cost_usd"),
+            Some(0.08)
+        );
+        assert_eq!(
+            parse_result_number::<u32>(MAX_TURNS_STDOUT, "num_turns"),
+            Some(2)
+        );
+        // Terminal field (closed by `}` rather than `,`).
+        assert_eq!(
+            parse_result_number::<u32>(r#"{"num_turns":3}"#, "num_turns"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_result_number::<f64>("no json here", "total_cost_usd"),
+            None
+        );
+        assert_eq!(
+            parse_result_number::<u32>(r#"{"num_turns":"nope"}"#, "num_turns"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_result_string_variants() {
+        assert_eq!(
+            parse_result_string(MAX_TURNS_STDOUT, "session_id").as_deref(),
+            Some("s1")
+        );
+        assert_eq!(parse_result_string("no json here", "session_id"), None);
+        // A non-string value is not misread as a string.
+        assert_eq!(
+            parse_result_string(r#"{"session_id":42}"#, "session_id"),
+            None
+        );
     }
 }
