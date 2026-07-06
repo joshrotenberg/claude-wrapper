@@ -18,7 +18,7 @@
 //! Sync-only (tokio-free) build:
 //!
 //! ```toml
-//! claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
+//! claude-wrapper = { version = "0.13", default-features = false, features = ["json", "sync"] }
 //! ```
 //!
 //! # Quick start (async)
