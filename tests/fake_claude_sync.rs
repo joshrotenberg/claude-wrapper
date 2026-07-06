@@ -87,15 +87,18 @@ fn sync_timeout_fires_and_returns_promptly() {
 fn sync_large_output_does_not_deadlock() {
     // Emit ~256KB of output — larger than any reasonable pipe buffer —
     // so the test catches a naive "wait then read" implementation
-    // that would block the child once the pipe fills.
-    let big = "x".repeat(256 * 1024);
-    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", &big)]);
+    // that would block the child once the pipe fills. The payload is
+    // generated inside the child (FAKE_CLAUDE_OUTPUT_BYTES): passing it
+    // via the environment would exceed Linux's 128KB per-env-string
+    // limit and fail execve with E2BIG.
+    let bytes = 256 * 1024;
+    let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT_BYTES", &bytes.to_string())]);
 
     let output = run_claude_sync(&claude, vec!["--version".to_string()])
         .expect("sync execution with large output should succeed");
 
     assert!(output.success);
-    assert!(output.stdout.len() >= big.len());
+    assert!(output.stdout.len() >= bytes);
 }
 
 #[test]
@@ -104,10 +107,10 @@ fn sync_large_output_does_not_deadlock_with_timeout() {
     // (i.e. a Claude with a timeout set, even though we finish well
     // under it). This is the one that proves the concurrent-drain
     // threads in the sync timeout code path actually work.
-    let big = "x".repeat(256 * 1024);
+    let bytes = 256 * 1024;
     let claude = Claude::builder()
         .binary(fake_binary())
-        .env("FAKE_CLAUDE_OUTPUT", &big)
+        .env("FAKE_CLAUDE_OUTPUT_BYTES", bytes.to_string())
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -116,7 +119,7 @@ fn sync_large_output_does_not_deadlock_with_timeout() {
         .expect("sync timeout-path execution with large output should succeed");
 
     assert!(output.success);
-    assert!(output.stdout.len() >= big.len());
+    assert!(output.stdout.len() >= bytes);
 }
 
 // ── command-surface tests ─────────────────────────────────────────

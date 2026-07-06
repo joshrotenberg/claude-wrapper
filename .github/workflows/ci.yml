@@ -66,6 +66,14 @@ jobs:
       - name: Unit tests without default features
         run: cargo test --lib --no-default-features
 
+      - name: Integration tests (fake-binary)
+        # tests/fake-claude.sh is a bash script and cannot run on
+        # Windows; gate this step to the Unix runners. integration.rs
+        # is entirely #[ignore] (real binary + auth), so `--test '*'`
+        # without `--ignored` runs only the fake-binary suites.
+        if: matrix.os != 'windows-latest'
+        run: cargo test --test '*' --all-features
+
       - name: Doc tests
         run: cargo test --doc --all-features
 
