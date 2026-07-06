@@ -341,4 +341,96 @@ mod tests {
         assert!(json.contains("hub"));
         assert!(json.contains("tool"));
     }
+
+    // -- filesystem / constructor coverage (#681) -------------------
+
+    #[test]
+    #[cfg(feature = "json")]
+    fn write_to_creates_parent_dirs_and_roundtrips() {
+        // Nested path whose parent does not exist exercises create_dir_all.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b/c/servers.mcp.json");
+
+        let written = McpConfigBuilder::new()
+            .http_server("hub", "http://localhost:9090")
+            .stdio_server("tool", "node", ["server.js"])
+            .write_to(&nested)
+            .unwrap();
+
+        assert_eq!(written, nested);
+        assert!(nested.exists());
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&nested).unwrap()).unwrap();
+        let servers = &parsed["mcpServers"];
+        assert_eq!(servers["hub"]["type"], "http");
+        assert_eq!(servers["hub"]["url"], "http://localhost:9090");
+        assert_eq!(servers["tool"]["type"], "stdio");
+        assert_eq!(servers["tool"]["command"], "node");
+        assert_eq!(servers["tool"]["args"][0], "server.js");
+    }
+
+    #[test]
+    #[cfg(feature = "json")]
+    fn http_server_with_headers_serializes_headers() {
+        let config = McpConfigBuilder::new().http_server_with_headers(
+            "hub",
+            "http://localhost:9090",
+            [("Authorization", "Bearer token")],
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        let hub = &parsed["mcpServers"]["hub"];
+        assert_eq!(hub["type"], "http");
+        assert_eq!(hub["url"], "http://localhost:9090");
+        assert_eq!(hub["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    #[cfg(feature = "json")]
+    fn stdio_server_with_env_serializes_env() {
+        let config = McpConfigBuilder::new().stdio_server_with_env(
+            "tool",
+            "node",
+            ["server.js"],
+            [("API_KEY", "secret")],
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        let tool = &parsed["mcpServers"]["tool"];
+        assert_eq!(tool["type"], "stdio");
+        assert_eq!(tool["command"], "node");
+        assert_eq!(tool["args"][0], "server.js");
+        assert_eq!(tool["env"]["API_KEY"], "secret");
+    }
+
+    #[test]
+    #[cfg(feature = "json")]
+    fn raw_server_config_serializes() {
+        let config = McpConfigBuilder::new().server(
+            "raw",
+            McpServerConfig::Http {
+                url: "http://example.test".into(),
+                headers: HashMap::new(),
+            },
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        assert_eq!(parsed["mcpServers"]["raw"]["type"], "http");
+        assert_eq!(parsed["mcpServers"]["raw"]["url"], "http://example.test");
+    }
+
+    #[test]
+    #[cfg(all(feature = "tempfile", feature = "json"))]
+    fn build_temp_roundtrips_to_parsed_servers() {
+        let config = McpConfigBuilder::new().http_server_with_headers(
+            "hub",
+            "http://localhost:9090",
+            [("X-Test", "1")],
+        );
+
+        let temp = config.build_temp().unwrap();
+        assert!(temp.path().ends_with(".mcp.json"));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(temp.path()).unwrap()).unwrap();
+        assert_eq!(parsed["mcpServers"]["hub"]["headers"]["X-Test"], "1");
+    }
 }
