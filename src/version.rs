@@ -25,8 +25,11 @@ use std::str::FromStr;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CliVersion {
+    /// Major version component.
     pub major: u32,
+    /// Minor version component.
     pub minor: u32,
+    /// Patch version component.
     pub patch: u32,
 }
 

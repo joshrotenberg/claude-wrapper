@@ -43,7 +43,9 @@ pub enum McpServerConfig {
     /// HTTP transport (streamable HTTP or SSE).
     #[serde(rename = "http")]
     Http {
+        /// The server endpoint URL.
         url: String,
+        /// Extra HTTP headers to send (e.g. auth).
         #[serde(skip_serializing_if = "HashMap::is_empty")]
         headers: HashMap<String, String>,
     },
@@ -51,9 +53,12 @@ pub enum McpServerConfig {
     /// Stdio transport (subprocess).
     #[serde(rename = "stdio")]
     Stdio {
+        /// The executable to launch.
         command: String,
+        /// Arguments passed to the command.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
+        /// Environment variables set for the subprocess.
         #[serde(skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
     },

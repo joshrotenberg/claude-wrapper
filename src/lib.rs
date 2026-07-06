@@ -315,10 +315,12 @@
 //! # Ok(()) }
 //! # }
 //! ```
+#![warn(missing_docs)]
 
 pub mod artifacts;
 pub mod auth;
 pub mod budget;
+/// Per-subcommand builders and the [`command::ClaudeCommand`] trait.
 pub mod command;
 pub mod commands;
 #[cfg(all(feature = "json", feature = "async"))]

@@ -40,6 +40,7 @@ pub struct AgentsCommand {
 
 #[allow(deprecated)]
 impl AgentsCommand {
+    /// Create a new [`AgentsCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()

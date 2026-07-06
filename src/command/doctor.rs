@@ -31,6 +31,7 @@ use crate::exec::CommandOutput;
 pub struct DoctorCommand {}
 
 impl DoctorCommand {
+    /// Create a new [`DoctorCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()

@@ -32,6 +32,7 @@ use crate::exec::CommandOutput;
 pub struct VersionCommand;
 
 impl VersionCommand {
+    /// Create a new [`VersionCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self

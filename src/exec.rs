@@ -22,9 +22,13 @@ use crate::error::{Error, Result};
 /// Raw output from a claude CLI invocation.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
+    /// Process exit code.
     pub exit_code: i32,
+    /// Whether the process exited successfully (exit code 0).
     pub success: bool,
 }
 

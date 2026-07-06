@@ -30,6 +30,7 @@ use crate::exec::CommandOutput;
 pub struct UpdateCommand;
 
 impl UpdateCommand {
+    /// Create a new [`UpdateCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self

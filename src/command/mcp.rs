@@ -474,6 +474,7 @@ impl ClaudeCommand for McpServeCommand {
 pub struct McpResetProjectChoicesCommand;
 
 impl McpResetProjectChoicesCommand {
+    /// Create a new [`McpResetProjectChoicesCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self

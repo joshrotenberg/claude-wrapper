@@ -38,6 +38,7 @@ pub struct InstallCommand {
 }
 
 impl InstallCommand {
+    /// Create a new [`InstallCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
