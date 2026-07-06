@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.0...v0.13.1) - 2026-07-06
+
+### Fixed
+
+- bump install snippets from 0.12 to 0.13 (closes #677) ([#682](https://github.com/joshrotenberg/claude-wrapper/pull/682))
+
+### Other
+
+- run fake-binary integration tests on ubuntu and macos ([#689](https://github.com/joshrotenberg/claude-wrapper/pull/689))
+- cover mcp_config write_to / build_temp filesystem paths ([#687](https://github.com/joshrotenberg/claude-wrapper/pull/687))
+- add exec.rs unit coverage ([#686](https://github.com/joshrotenberg/claude-wrapper/pull/686))
+- enforce missing_docs and document undocumented public items ([#685](https://github.com/joshrotenberg/claude-wrapper/pull/685))
+- add module-level //! headers to 16 modules (closes #679) ([#684](https://github.com/joshrotenberg/claude-wrapper/pull/684))
+
 ## [0.13.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.3...v0.13.0) - 2026-07-06
 
 ### Added
