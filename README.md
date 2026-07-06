@@ -44,7 +44,7 @@ Default features: `["async", "json", "tempfile"]`. To drop `tokio`
 entirely for a sync-only build:
 
 ```toml
-claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
+claude-wrapper = { version = "0.13", default-features = false, features = ["json", "sync"] }
 ```
 
 ## Quick start (async)
@@ -505,7 +505,7 @@ let output = RawCommand::new("custom-subcommand")
 Sync-only build with no tokio:
 
 ```toml
-claude-wrapper = { version = "0.12", default-features = false, features = ["json", "sync"] }
+claude-wrapper = { version = "0.13", default-features = false, features = ["json", "sync"] }
 ```
 
 ## Examples
