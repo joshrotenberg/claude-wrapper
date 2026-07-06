@@ -10,6 +10,10 @@
 #   FAKE_CLAUDE_COST_USD    - cost in JSON output (default: 0.0)
 #   FAKE_CLAUDE_NUM_TURNS   - num_turns in JSON output (default: 1)
 #   FAKE_CLAUDE_FORKED_SESSION_ID - session_id when --fork-session is present
+#   FAKE_CLAUDE_OUTPUT_BYTES - if >0, OUTPUT becomes this many 'x' bytes,
+#       generated in-process. Use for large-output tests: passing a big
+#       string via FAKE_CLAUDE_OUTPUT hits Linux's 128KB per-env-string
+#       limit (MAX_ARG_STRLEN) and fails execve with E2BIG.
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -18,6 +22,12 @@
 
 OUTPUT="${FAKE_CLAUDE_OUTPUT:-fake response}"
 EXIT_CODE="${FAKE_CLAUDE_EXIT_CODE:-0}"
+
+# Generate large output in-process rather than passing it through the
+# environment (which would exceed Linux's per-env-string limit).
+if [[ -n "${FAKE_CLAUDE_OUTPUT_BYTES:-}" && "${FAKE_CLAUDE_OUTPUT_BYTES}" -gt 0 ]]; then
+    OUTPUT=$(head -c "$FAKE_CLAUDE_OUTPUT_BYTES" /dev/zero | tr '\0' 'x')
+fi
 SESSION_ID="${FAKE_CLAUDE_SESSION_ID:-fake-session-id}"
 ERROR_MSG="${FAKE_CLAUDE_ERROR_MSG:-command failed}"
 DELAY="${FAKE_CLAUDE_DELAY:-0}"
