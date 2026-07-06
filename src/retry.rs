@@ -1,3 +1,10 @@
+//! Retry and backoff for transient CLI failures.
+//!
+//! [`RetryPolicy`] configures how many attempts to make, the
+//! [`BackoffStrategy`] between them, and which errors count as
+//! retryable. A default policy can be attached to the
+//! [`Claude`](crate::Claude) client and overridden per command.
+
 use std::time::Duration;
 
 use tracing::warn;

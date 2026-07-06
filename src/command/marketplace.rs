@@ -1,3 +1,9 @@
+//! Marketplace subcommand builders.
+//!
+//! Builders for the `claude plugin marketplace` surface: list, add,
+//! remove, and update the marketplaces that [`crate::command::plugin`]
+//! installs plugins from.
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

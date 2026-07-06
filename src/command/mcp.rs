@@ -1,3 +1,10 @@
+//! MCP server management subcommand builders.
+//!
+//! Builders for the `claude mcp` surface: list, get, add, add-json,
+//! remove, add-from-desktop, login, logout, serve, and
+//! reset-project-choices. To generate a `.mcp.json` config file
+//! programmatically, see [`crate::mcp_config`].
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

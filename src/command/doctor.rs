@@ -1,3 +1,9 @@
+//! The `claude doctor` builder.
+//!
+//! [`DoctorCommand`] runs `claude doctor`, the CLI's installation and
+//! environment health check, and returns its output as
+//! [`CommandOutput`].
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

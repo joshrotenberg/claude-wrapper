@@ -1,3 +1,10 @@
+//! Plugin subcommand builders.
+//!
+//! Builders for the `claude plugin` surface: list, install, uninstall,
+//! enable, disable, update, validate, details, prune, and tag. See
+//! [`crate::command::marketplace`] for managing the marketplaces
+//! plugins are installed from.
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

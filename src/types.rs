@@ -1,3 +1,10 @@
+//! Shared enums and serde types used across the command builders.
+//!
+//! Small value types like [`Transport`], [`Scope`], [`Effort`],
+//! [`PermissionMode`], [`OutputFormat`], and [`InputFormat`] that map
+//! onto `claude` CLI flag values, with `Display`/`FromStr` and serde
+//! wiring so they round-trip cleanly through args and JSON.
+
 use std::fmt;
 use std::str::FromStr;
 

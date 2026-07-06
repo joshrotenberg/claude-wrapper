@@ -1,3 +1,13 @@
+//! The `claude -p` query builder.
+//!
+//! [`QueryCommand`] is the crate's workhorse: a builder for oneshot
+//! print-mode queries covering the full `claude -p` flag surface, with
+//! typed output ([`execute`](QueryCommand::execute) /
+//! [`execute_json`](QueryCommand::execute_json)) and, under the `sync`
+//! feature, blocking peers. Spawn-time flags shared with
+//! [`DuplexOptions`](crate::duplex::DuplexOptions) live in a common
+//! internal `SharedSpawnArgs`, so the two builders cannot drift.
+
 use crate::Claude;
 use crate::command::ClaudeCommand;
 use crate::command::spawn_args::SharedSpawnArgs;

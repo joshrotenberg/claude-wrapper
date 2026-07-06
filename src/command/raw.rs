@@ -1,3 +1,10 @@
+//! The raw-subcommand escape hatch.
+//!
+//! [`RawCommand`] runs an arbitrary `claude` subcommand with
+//! caller-supplied args, for surfaces this crate does not yet wrap as a
+//! typed builder. Output comes back as [`CommandOutput`]; there is no
+//! typed parsing.
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

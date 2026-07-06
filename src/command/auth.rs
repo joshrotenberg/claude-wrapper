@@ -1,3 +1,10 @@
+//! Authentication subcommand builders.
+//!
+//! Builders for the `claude` auth surface: [`AuthStatusCommand`],
+//! [`AuthLoginCommand`], [`AuthLogoutCommand`], and
+//! [`SetupTokenCommand`]. For detecting which auth strategy the CLI
+//! will use without invoking it, see [`crate::auth`].
+
 use crate::Claude;
 use crate::command::ClaudeCommand;
 use crate::error::Result;

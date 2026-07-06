@@ -1,3 +1,10 @@
+//! The `claude --version` builder.
+//!
+//! [`VersionCommand`] runs `claude --version` and returns the raw
+//! output. For a parsed, comparable version and tested-range checks,
+//! use [`Claude::cli_version`](crate::Claude::cli_version) and
+//! [`crate::version`].
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;

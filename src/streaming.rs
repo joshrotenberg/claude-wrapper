@@ -1,3 +1,10 @@
+//! NDJSON streaming of `claude` events.
+//!
+//! [`stream_query`] (and its blocking peer `stream_query_sync`) run a
+//! query in `stream-json` mode and hand each decoded event to a
+//! caller-supplied callback as it arrives, rather than buffering the
+//! whole run. Requires the `json` feature.
+
 #[cfg(feature = "json")]
 use std::time::Duration;
 

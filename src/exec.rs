@@ -1,3 +1,13 @@
+//! Process spawning and execution for the `claude` CLI.
+//!
+//! Builds and runs the child process behind every command: applies the
+//! [`Claude`] client's binary path, working directory, environment, and
+//! timeout, scrubs the `CLAUDECODE` env var so nested runs are not
+//! detected as recursive, drains stdout/stderr without deadlocking, and
+//! maps failures onto [`Error`] via
+//! [`from_command_failure`](crate::error::Error::from_command_failure).
+//! Both the async (tokio) and blocking (`sync` feature) paths live here.
+
 use std::time::Duration;
 
 #[cfg(feature = "async")]

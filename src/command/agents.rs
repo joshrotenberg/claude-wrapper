@@ -1,3 +1,10 @@
+//! The deprecated `agents` subcommand builder.
+//!
+//! [`AgentsCommand`] wraps `claude agents`. It is retained for
+//! back-compat; prefer the read-side [`crate::artifacts`] introspection
+//! for agent definitions and `--agent` / `--agents` on
+//! [`QueryCommand`](crate::QueryCommand) for selecting one.
+
 #[cfg(feature = "async")]
 use crate::Claude;
 use crate::command::ClaudeCommand;
