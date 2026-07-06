@@ -454,8 +454,11 @@ pub struct SessionSummary {
 /// Full parsed session.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionLog {
+    /// The session id (the `.jsonl` file stem).
     pub session_id: String,
+    /// Slug of the project the session belongs to.
     pub project_slug: String,
+    /// Every parsed entry, in file order.
     pub entries: Vec<HistoryEntry>,
 }
 
@@ -468,22 +471,35 @@ pub struct SessionLog {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryEntry {
+    /// A `user` entry: a prompt turn written by the user.
     User {
+        /// Entry uuid, when present.
         uuid: Option<String>,
+        /// ISO-8601 timestamp, when present.
         timestamp: Option<String>,
+        /// Working directory recorded for the turn, when present.
         cwd: Option<String>,
+        /// Git branch recorded for the turn, when present.
         git_branch: Option<String>,
+        /// The raw `message` payload as Claude Code wrote it.
         message: Value,
+        /// Any additional fields not modeled above.
         #[serde(flatten)]
         rest: serde_json::Map<String, Value>,
     },
+    /// An `assistant` entry: a model response turn.
     Assistant {
+        /// Entry uuid, when present.
         uuid: Option<String>,
+        /// ISO-8601 timestamp, when present.
         timestamp: Option<String>,
+        /// The raw `message` payload as Claude Code wrote it.
         message: Value,
+        /// Any additional fields not modeled above.
         #[serde(flatten)]
         rest: serde_json::Map<String, Value>,
     },
+    /// Any other entry type, carried as raw JSON for caller inspection.
     Other {
         /// The `type` field as Claude Code wrote it.
         type_tag: String,

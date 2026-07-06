@@ -27,31 +27,44 @@ pub enum Error {
     /// A claude command failed with a non-zero exit code.
     #[error("claude command failed: {command} (exit code {exit_code}){}{}{}", working_dir.as_ref().map(|d| format!(" (in {})", d.display())).unwrap_or_default(), if stdout.is_empty() { String::new() } else { format!("\nstdout: {stdout}") }, if stderr.is_empty() { String::new() } else { format!("\nstderr: {stderr}") })]
     CommandFailed {
+        /// The full command line that failed.
         command: String,
+        /// Process exit code.
         exit_code: i32,
+        /// Captured standard output.
         stdout: String,
+        /// Captured standard error.
         stderr: String,
+        /// Working directory the command ran in, when set.
         working_dir: Option<PathBuf>,
     },
 
     /// An I/O error occurred while spawning or communicating with the process.
     #[error("io error: {message}{}", working_dir.as_ref().map(|d| format!(" (in {})", d.display())).unwrap_or_default())]
     Io {
+        /// Human-readable description of the I/O failure.
         message: String,
+        /// The underlying I/O error.
         #[source]
         source: std::io::Error,
+        /// Working directory the operation ran in, when set.
         working_dir: Option<PathBuf>,
     },
 
     /// The command timed out.
     #[error("claude command timed out after {timeout_seconds}s")]
-    Timeout { timeout_seconds: u64 },
+    Timeout {
+        /// The timeout, in seconds, that was exceeded.
+        timeout_seconds: u64,
+    },
 
     /// JSON parsing failed.
     #[cfg(feature = "json")]
     #[error("json parse error: {message}")]
     Json {
+        /// Human-readable description of what failed to parse.
         message: String,
+        /// The underlying serde error.
         #[source]
         source: serde_json::Error,
     },
@@ -59,7 +72,9 @@ pub enum Error {
     /// The installed CLI version does not meet the minimum requirement.
     #[error("CLI version {found} does not meet minimum requirement {minimum}")]
     VersionMismatch {
+        /// The version detected on the system.
         found: crate::version::CliVersion,
+        /// The minimum version required.
         minimum: crate::version::CliVersion,
     },
 
@@ -69,13 +84,21 @@ pub enum Error {
     #[error(
         "dangerous operations are not allowed; set the env var `{env_var}=1` at process start if you really mean it"
     )]
-    DangerousNotAllowed { env_var: &'static str },
+    DangerousNotAllowed {
+        /// Name of the opt-in env var that must be set.
+        env_var: &'static str,
+    },
 
     /// A configured [`BudgetTracker`](crate::budget::BudgetTracker) has
     /// hit its `max_usd` ceiling. Raised before the next call is
     /// dispatched, so the CLI is not invoked.
     #[error("budget exceeded: ${total_usd:.4} spent, ${max_usd:.4} max")]
-    BudgetExceeded { total_usd: f64, max_usd: f64 },
+    BudgetExceeded {
+        /// Total spend accumulated so far, in USD.
+        total_usd: f64,
+        /// The configured ceiling, in USD.
+        max_usd: f64,
+    },
 
     /// A [`DuplexSession`](crate::duplex::DuplexSession) operation was
     /// attempted after the session task exited (child died, EOF on

@@ -232,9 +232,13 @@ impl Settings {
 /// isn't there.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsPaths {
+    /// Path to the user settings file (`~/.claude/settings.json`).
     pub user: PathBuf,
+    /// Path to the user-local settings file (`settings.local.json`).
     pub user_local: PathBuf,
+    /// Path to the project settings file, when a project root is known.
     pub project: Option<PathBuf>,
+    /// Path to the project-local settings file, when a project root is known.
     pub project_local: Option<PathBuf>,
 }
 

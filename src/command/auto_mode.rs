@@ -40,6 +40,7 @@ use crate::exec::CommandOutput;
 pub struct AutoModeConfigCommand;
 
 impl AutoModeConfigCommand {
+    /// Create a new [`AutoModeConfigCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -67,6 +68,7 @@ impl ClaudeCommand for AutoModeConfigCommand {
 pub struct AutoModeDefaultsCommand;
 
 impl AutoModeDefaultsCommand {
+    /// Create a new [`AutoModeDefaultsCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -113,6 +115,7 @@ pub struct AutoModeCritiqueCommand {
 }
 
 impl AutoModeCritiqueCommand {
+    /// Create a new [`AutoModeCritiqueCommand`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
