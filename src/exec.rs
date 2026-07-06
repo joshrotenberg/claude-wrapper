@@ -1019,3 +1019,367 @@ fn join_with_deadline(
 
     (stdout, stderr)
 }
+
+// Fake-binary-driven tests for the spawn/execute paths. Unix-only: they
+// write and run a small bash `claude` stand-in, which cannot execute on
+// Windows. CI runs `cargo test --lib` on Windows too, so the module is
+// gated on `unix` to compile out there; ubuntu/macOS (and `llvm-cov`)
+// exercise it. `tempfile` is a dev-dependency, so it is always available
+// under `#[cfg(test)]` regardless of the crate feature.
+#[cfg(all(test, unix, any(feature = "async", feature = "sync")))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::Claude;
+
+    /// Write `body` as an executable bash `claude` stand-in in a fresh
+    /// tempdir. Returns the dir (keep it bound so it outlives the run)
+    /// and the script path.
+    fn fake_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake-claude.sh");
+        let mut f = std::fs::File::create(&path).expect("create script");
+        write!(f, "#!/usr/bin/env bash\n{body}\n").expect("write script");
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        (dir, path)
+    }
+
+    fn client(path: &std::path::Path) -> Claude {
+        Claude::builder()
+            .binary(path)
+            .build()
+            .expect("build client")
+    }
+
+    // Serializes the env-scrub tests, which mutate process-global env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_scrub_vars() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the synchronous mutation is serialized by ENV_LOCK and
+        // not held across any await; no other test reads these vars.
+        unsafe {
+            std::env::set_var("CLAUDECODE", "1");
+            std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
+        }
+    }
+
+    fn clear_scrub_vars() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: see set_scrub_vars.
+        unsafe {
+            std::env::remove_var("CLAUDECODE");
+            std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
+        }
+    }
+
+    // ---------- async ----------
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_success_maps_output() {
+        let (_dir, path) = fake_script(r#"echo "hi there"; exit 0"#);
+        let out = run_claude(&client(&path), vec!["--version".into()])
+            .await
+            .expect("success");
+        assert!(out.success);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("hi there"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_nonzero_exit_maps_command_failed() {
+        let (_dir, path) = fake_script(r#"echo "boom" >&2; exit 3"#);
+        let err = run_claude(&client(&path), vec![]).await.unwrap_err();
+        match err {
+            Error::CommandFailed {
+                exit_code, stderr, ..
+            } => {
+                assert_eq!(exit_code, 3);
+                assert!(stderr.contains("boom"));
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_rail_stop_maps_max_turns() {
+        let (_dir, path) = fake_script(
+            r#"echo '{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (2)"]}'; exit 1"#,
+        );
+        let err = run_claude(&client(&path), vec![]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::MaxTurnsExceeded {
+                    max_turns: Some(2),
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_auth_shaped_stderr_maps_auth() {
+        let (_dir, path) =
+            fake_script(r#"echo "Not authenticated. Run `claude login`." >&2; exit 1"#);
+        let err = run_claude(&client(&path), vec![]).await.unwrap_err();
+        assert!(matches!(err, Error::Auth { .. }), "got: {err:?}");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_scrubs_claude_env_vars() {
+        let (_dir, path) =
+            fake_script(r#"echo "CC=[${CLAUDECODE:-}] EP=[${CLAUDE_CODE_ENTRYPOINT:-}]""#);
+        // The child sees the vars scrubbed regardless; setting them in the
+        // parent is what makes the assertion meaningful rather than
+        // trivially empty. Correctness does not depend on the lock (the
+        // scrub removes them either way), so it only wraps the synchronous
+        // env mutations -- never held across the await, per clippy.
+        set_scrub_vars();
+        let out = run_claude(&client(&path), vec![]).await.expect("success");
+        clear_scrub_vars();
+        assert!(out.stdout.contains("CC=[]"), "got: {}", out.stdout);
+        assert!(out.stdout.contains("EP=[]"), "got: {}", out.stdout);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_applies_working_dir() {
+        let (_dir, path) = fake_script(r#"pwd"#);
+        let workdir = tempfile::tempdir().expect("workdir");
+        let claude = Claude::builder()
+            .binary(&path)
+            .working_dir(workdir.path())
+            .build()
+            .expect("build");
+        let out = run_claude(&claude, vec![]).await.expect("success");
+        let got = std::fs::canonicalize(out.stdout.trim()).expect("canonicalize pwd");
+        let want = std::fs::canonicalize(workdir.path()).expect("canonicalize workdir");
+        assert_eq!(got, want);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdin_prompt_round_trips() {
+        let (_dir, path) = fake_script(r#"cat"#);
+        let out = run_claude_with_stdin_prompt(&client(&path), vec![], "hello via stdin".into())
+            .await
+            .expect("success");
+        assert!(out.stdout.contains("hello via stdin"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_allow_exit_codes_permits_listed_code() {
+        let (_dir, path) = fake_script(r#"echo out; exit 2"#);
+        let out = run_claude_allow_exit_codes(&client(&path), vec![], &[2])
+            .await
+            .expect("allowed code is Ok");
+        assert!(!out.success);
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.contains("out"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_allow_exit_codes_still_errors_on_unlisted_code() {
+        let (_dir, path) = fake_script(r#"exit 2"#);
+        let err = run_claude_allow_exit_codes(&client(&path), vec![], &[5])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CommandFailed { exit_code: 2, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_timeout_fires_on_slow_child() {
+        let (_dir, path) = fake_script(r#"sleep 3; echo done"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("build");
+        let err = run_claude(&claude, vec![]).await.unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_timeout_path_returns_output_when_fast() {
+        let (_dir, path) = fake_script(r#"echo quick"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build");
+        let out = run_claude(&claude, vec![]).await.expect("success");
+        assert!(out.stdout.contains("quick"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_timeout_path_maps_command_failed() {
+        let (_dir, path) = fake_script(r#"echo e >&2; exit 4"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build");
+        let err = run_claude(&claude, vec![]).await.unwrap_err();
+        assert!(
+            matches!(err, Error::CommandFailed { exit_code: 4, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdin_with_timeout_round_trips() {
+        let (_dir, path) = fake_script(r#"cat"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build");
+        let out = run_claude_with_stdin_prompt(&claude, vec![], "piped under timeout".into())
+            .await
+            .expect("success");
+        assert!(out.stdout.contains("piped under timeout"));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdin_timeout_fires_on_slow_child() {
+        let (_dir, path) = fake_script(r#"sleep 3"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("build");
+        let err = run_claude_with_stdin_prompt(&claude, vec![], "x".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_spawn_failure_maps_io() {
+        let claude = Claude::builder()
+            .binary("/nonexistent/definitely/not/here")
+            .build()
+            .expect("build");
+        let err = run_claude(&claude, vec![]).await.unwrap_err();
+        assert!(matches!(err, Error::Io { .. }), "got: {err:?}");
+    }
+
+    // ---------- sync ----------
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_success_maps_output() {
+        let (_dir, path) = fake_script(r#"echo "hi sync"; exit 0"#);
+        let out = run_claude_sync(&client(&path), vec![]).expect("success");
+        assert!(out.success);
+        assert!(out.stdout.contains("hi sync"));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_nonzero_exit_maps_command_failed() {
+        let (_dir, path) = fake_script(r#"echo "boom" >&2; exit 3"#);
+        let err = run_claude_sync(&client(&path), vec![]).unwrap_err();
+        match err {
+            Error::CommandFailed {
+                exit_code, stderr, ..
+            } => {
+                assert_eq!(exit_code, 3);
+                assert!(stderr.contains("boom"));
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_scrubs_claude_env_vars() {
+        let (_dir, path) =
+            fake_script(r#"echo "CC=[${CLAUDECODE:-}] EP=[${CLAUDE_CODE_ENTRYPOINT:-}]""#);
+        set_scrub_vars();
+        let out = run_claude_sync(&client(&path), vec![]).expect("success");
+        clear_scrub_vars();
+        assert!(out.stdout.contains("CC=[]"), "got: {}", out.stdout);
+        assert!(out.stdout.contains("EP=[]"), "got: {}", out.stdout);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_stdin_prompt_round_trips() {
+        let (_dir, path) = fake_script(r#"cat"#);
+        let out = run_claude_with_stdin_prompt_sync(&client(&path), vec![], "sync stdin".into())
+            .expect("success");
+        assert!(out.stdout.contains("sync stdin"));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_allow_exit_codes_permits_listed_code() {
+        let (_dir, path) = fake_script(r#"echo out; exit 2"#);
+        let out = run_claude_allow_exit_codes_sync(&client(&path), vec![], &[2])
+            .expect("allowed code is Ok");
+        assert!(!out.success);
+        assert_eq!(out.exit_code, 2);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_timeout_fires_on_slow_child() {
+        let (_dir, path) = fake_script(r#"sleep 3; echo done"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("build");
+        let err = run_claude_sync(&claude, vec![]).unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_timeout_path_returns_output_when_fast() {
+        let (_dir, path) = fake_script(r#"echo quick"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build");
+        let out = run_claude_sync(&claude, vec![]).expect("success");
+        assert!(out.stdout.contains("quick"));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_stdin_with_timeout_round_trips() {
+        let (_dir, path) = fake_script(r#"cat"#);
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build");
+        let out = run_claude_with_stdin_prompt_sync(&claude, vec![], "sync piped".into())
+            .expect("success");
+        assert!(out.stdout.contains("sync piped"));
+    }
+}
