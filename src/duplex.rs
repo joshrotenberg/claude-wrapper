@@ -23,8 +23,21 @@
 //! [`QueryCommand`] for one-off calls or [`Session`] for transient
 //! multi-turn with cumulative cost / history tracking.
 //!
+//! # Cost and budget bookkeeping
+//!
+//! [`DuplexSession`] itself keeps no cross-turn accounting: each
+//! [`TurnResult`] carries that turn's cost and nothing accumulates.
+//! For cumulative cost, turn history, and a
+//! [`BudgetTracker`]-enforced spend ceiling (send fails fast with
+//! [`Error::BudgetExceeded`] once the ceiling is hit), wrap the
+//! session in a [`Conversation`] --
+//! it is a thin bookkeeping layer over this module, not a different
+//! transport.
+//!
 //! [`QueryCommand`]: crate::QueryCommand
 //! [`Session`]: crate::session::Session
+//! [`Conversation`]: crate::conversation::Conversation
+//! [`BudgetTracker`]: crate::budget::BudgetTracker
 //!
 //! # Example
 //!
@@ -558,7 +571,9 @@ impl DuplexOptions {
     /// This is the CLI's cap, checked post-hoc after each API call,
     /// so a session can overspend before tripping. It is distinct
     /// from the wrapper's [`BudgetTracker`](crate::budget::BudgetTracker)
-    /// ceiling, which gates oneshot dispatch host-side.
+    /// ceiling, which gates dispatch host-side -- attach one via
+    /// [`Conversation::with_budget`](crate::conversation::Conversation::with_budget)
+    /// to stop a duplex conversation before the next turn is sent.
     #[must_use]
     pub fn max_budget_usd(mut self, budget: f64) -> Self {
         self.shared.max_budget_usd = Some(budget);
@@ -712,6 +727,10 @@ impl TurnResult {
 
     /// Extract `total_cost_usd` (preferred) or the legacy `cost_usd`
     /// field, if either is present.
+    ///
+    /// This is the cost of one turn. For the conversation-wide
+    /// running total, record turns through a
+    /// [`Conversation`](crate::conversation::Conversation).
     #[must_use]
     pub fn total_cost_usd(&self) -> Option<f64> {
         self.result
@@ -913,6 +932,11 @@ impl DuplexSession {
     /// Returns [`Error::DuplexTurnInFlight`] if another turn is
     /// already pending, and [`Error::DuplexClosed`] if the session
     /// task has already exited.
+    ///
+    /// The returned [`TurnResult`] is per-turn; nothing accumulates
+    /// across calls. For cumulative cost/history and a budget
+    /// ceiling, send through a
+    /// [`Conversation`](crate::conversation::Conversation) instead.
     pub async fn send(&self, prompt: impl Into<String>) -> Result<TurnResult> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.outbound_tx
