@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.3...v0.13.0) - 2026-07-06
+
+### Added
+
+- bring DuplexOptions to parity with the QueryCommand knob set ([#674](https://github.com/joshrotenberg/claude-wrapper/pull/674))
+- [**breaking**] carry cost and turn figures on rail-stop error variants ([#669](https://github.com/joshrotenberg/claude-wrapper/pull/669))
+
+### Fixed
+
+- gate mcp_config serialization tests on the json feature ([#673](https://github.com/joshrotenberg/claude-wrapper/pull/673))
+
+### Other
+
+- point duplex users at Conversation for cost and budget bookkeeping ([#676](https://github.com/joshrotenberg/claude-wrapper/pull/676))
+
 ## [0.12.3](https://github.com/joshrotenberg/claude-wrapper/compare/v0.12.2...v0.12.3) - 2026-06-30
 
 ### Added
