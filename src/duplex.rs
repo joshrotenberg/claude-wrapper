@@ -190,8 +190,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::Claude;
+use crate::command::spawn_args::SharedSpawnArgs;
 use crate::error::{Error, Result};
-use crate::types::PermissionMode;
+use crate::tool_pattern::ToolPattern;
+use crate::types::{Effort, PermissionMode};
 
 /// Default capacity of the per-session [`broadcast::Sender`] backing
 /// [`DuplexSession::subscribe`].
@@ -312,17 +314,9 @@ impl std::fmt::Debug for PermissionHandler {
 /// regardless of these options.
 #[derive(Debug, Default, Clone)]
 pub struct DuplexOptions {
-    model: Option<String>,
-    system_prompt: Option<String>,
-    append_system_prompt: Option<String>,
-    resume: Option<String>,
-    continue_session: bool,
-    worktree: bool,
-    worktree_name: Option<String>,
-    agent: Option<String>,
-    agents_json: Option<String>,
-    permission_mode: Option<PermissionMode>,
-    dangerously_skip_permissions: bool,
+    // Spawn-time knobs shared with QueryCommand; the flag emission
+    // lives on SharedSpawnArgs so the two builders cannot drift.
+    shared: SharedSpawnArgs,
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
@@ -332,21 +326,21 @@ impl DuplexOptions {
     /// Set the model for this session (`--model`).
     #[must_use]
     pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
+        self.shared.model = Some(model.into());
         self
     }
 
     /// Set the system prompt for this session (`--system-prompt`).
     #[must_use]
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
+        self.shared.system_prompt = Some(prompt.into());
         self
     }
 
     /// Append to the default system prompt (`--append-system-prompt`).
     #[must_use]
     pub fn append_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.append_system_prompt = Some(prompt.into());
+        self.shared.append_system_prompt = Some(prompt.into());
         self
     }
 
@@ -368,7 +362,7 @@ impl DuplexOptions {
     /// at the CLI; passing both lets the CLI decide (it errors today).
     #[must_use]
     pub fn resume(mut self, session_id: impl Into<String>) -> Self {
-        self.resume = Some(session_id.into());
+        self.shared.resume = Some(session_id.into());
         self
     }
 
@@ -380,7 +374,7 @@ impl DuplexOptions {
     /// session id; use this when "the last one" is what you want.
     #[must_use]
     pub fn continue_session(mut self) -> Self {
-        self.continue_session = true;
+        self.shared.continue_session = true;
         self
     }
 
@@ -396,9 +390,9 @@ impl DuplexOptions {
     /// merge later.
     #[must_use]
     pub fn worktree(mut self, name: Option<impl Into<String>>) -> Self {
-        self.worktree = true;
+        self.shared.worktree = true;
         if let Some(n) = name {
-            self.worktree_name = Some(n.into());
+            self.shared.worktree_name = Some(n.into());
         }
         self
     }
@@ -418,7 +412,7 @@ impl DuplexOptions {
     /// passing it here.
     #[must_use]
     pub fn agent(mut self, name: impl Into<String>) -> Self {
-        self.agent = Some(name.into());
+        self.shared.agent = Some(name.into());
         self
     }
 
@@ -435,7 +429,7 @@ impl DuplexOptions {
     /// "prompt": "You are a code reviewer"}}`.
     #[must_use]
     pub fn agents_json(mut self, json: impl Into<String>) -> Self {
-        self.agents_json = Some(json.into());
+        self.shared.agents_json = Some(json.into());
         self
     }
 
@@ -456,7 +450,7 @@ impl DuplexOptions {
     /// when you really need it.
     #[must_use]
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
-        self.permission_mode = Some(mode);
+        self.shared.permission_mode = Some(mode);
         self
     }
 
@@ -469,7 +463,155 @@ impl DuplexOptions {
     /// [`PermissionMode::AcceptEdits`] instead.
     #[must_use]
     pub fn dangerously_skip_permissions(mut self) -> Self {
-        self.dangerously_skip_permissions = true;
+        self.shared.dangerously_skip_permissions = true;
+        self
+    }
+
+    /// Start a new session under a caller-chosen id
+    /// (`--session-id <uuid>`).
+    ///
+    /// Mirrors [`QueryCommand::session_id`](crate::QueryCommand::session_id)
+    /// for the duplex path. Unlike [`Self::resume`] (pick up an
+    /// existing session) or [`Self::continue_session`] (pick up the
+    /// most recent one), this mints a fresh session whose id the host
+    /// knows up front -- useful when the host indexes sessions
+    /// externally before the first turn completes.
+    #[must_use]
+    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+        self.shared.session_id = Some(id.into());
+        self
+    }
+
+    /// Set a JSON schema for structured output validation
+    /// (`--json-schema <schema>`).
+    ///
+    /// Mirrors [`QueryCommand::json_schema`](crate::QueryCommand::json_schema)
+    /// for the duplex path. `schema` is the inline JSON of the schema;
+    /// the turn's closing result message carries the validated
+    /// `structured_output`.
+    #[must_use]
+    pub fn json_schema(mut self, schema: impl Into<String>) -> Self {
+        self.shared.json_schema = Some(schema.into());
+        self
+    }
+
+    /// Add allowed tool patterns (`--allowed-tools`).
+    ///
+    /// Mirrors [`QueryCommand::allowed_tools`](crate::QueryCommand::allowed_tools)
+    /// for the duplex path: accepts anything convertible into
+    /// [`ToolPattern`], including bare strings (e.g. `"Bash"`,
+    /// `"Bash(git log:*)"`, `"mcp__my-server__*"`), and joins them
+    /// into the comma-separated form the CLI expects.
+    #[must_use]
+    pub fn allowed_tools<I, T>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<ToolPattern>,
+    {
+        self.shared
+            .allowed_tools
+            .extend(tools.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a single allowed tool pattern.
+    #[must_use]
+    pub fn allowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
+        self.shared.allowed_tools.push(tool.into());
+        self
+    }
+
+    /// Add disallowed tool patterns (`--disallowed-tools`).
+    #[must_use]
+    pub fn disallowed_tools<I, T>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<ToolPattern>,
+    {
+        self.shared
+            .disallowed_tools
+            .extend(tools.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a single disallowed tool pattern.
+    #[must_use]
+    pub fn disallowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
+        self.shared.disallowed_tools.push(tool.into());
+        self
+    }
+
+    /// Cap the number of agentic turns (`--max-turns <n>`).
+    ///
+    /// The cap applies per turn sent through [`DuplexSession::send`];
+    /// a turn that exhausts it closes with an `error_max_turns`
+    /// result rather than an assistant reply.
+    #[must_use]
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.shared.max_turns = Some(turns);
+        self
+    }
+
+    /// Cap claude's own spend for the session
+    /// (`--max-budget-usd <usd>`).
+    ///
+    /// This is the CLI's cap, checked post-hoc after each API call,
+    /// so a session can overspend before tripping. It is distinct
+    /// from the wrapper's [`BudgetTracker`](crate::budget::BudgetTracker)
+    /// ceiling, which gates oneshot dispatch host-side.
+    #[must_use]
+    pub fn max_budget_usd(mut self, budget: f64) -> Self {
+        self.shared.max_budget_usd = Some(budget);
+        self
+    }
+
+    /// Set a fallback model for when the primary is overloaded
+    /// (`--fallback-model <model>`).
+    #[must_use]
+    pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
+        self.shared.fallback_model = Some(model.into());
+        self
+    }
+
+    /// Set the reasoning effort level (`--effort <level>`).
+    #[must_use]
+    pub fn effort(mut self, effort: Effort) -> Self {
+        self.shared.effort = Some(effort);
+        self
+    }
+
+    /// Add an additional directory for tool access
+    /// (`--add-dir <dir>`, repeatable).
+    #[must_use]
+    pub fn add_dir(mut self, dir: impl Into<String>) -> Self {
+        self.shared.add_dir.push(dir.into());
+        self
+    }
+
+    /// Add an MCP config file path (`--mcp-config <path>`,
+    /// repeatable).
+    ///
+    /// Pair with [`crate::McpConfigBuilder`] to generate the file.
+    #[must_use]
+    pub fn mcp_config(mut self, path: impl Into<String>) -> Self {
+        self.shared.mcp_config.push(path.into());
+        self
+    }
+
+    /// Only use MCP servers from `--mcp-config` files, ignoring the
+    /// user- and project-level MCP configuration
+    /// (`--strict-mcp-config`).
+    #[must_use]
+    pub fn strict_mcp_config(mut self) -> Self {
+        self.shared.strict_mcp_config = true;
+        self
+    }
+
+    /// Do not persist the session to on-disk history
+    /// (`--no-session-persistence`).
+    #[must_use]
+    pub fn no_session_persistence(mut self) -> Self {
+        self.shared.no_session_persistence = true;
         self
     }
 
@@ -529,46 +671,8 @@ impl DuplexOptions {
             "stream-json".to_string(),
         ];
 
-        if let Some(m) = self.model {
-            args.push("--model".to_string());
-            args.push(m);
-        }
-        if let Some(p) = self.system_prompt {
-            args.push("--system-prompt".to_string());
-            args.push(p);
-        }
-        if let Some(p) = self.append_system_prompt {
-            args.push("--append-system-prompt".to_string());
-            args.push(p);
-        }
-        if let Some(id) = self.resume {
-            args.push("--resume".to_string());
-            args.push(id);
-        }
-        if self.continue_session {
-            args.push("--continue".to_string());
-        }
-        if self.worktree {
-            args.push("--worktree".to_string());
-            if let Some(n) = self.worktree_name {
-                args.push(n);
-            }
-        }
-        if let Some(json) = self.agents_json {
-            args.push("--agents".to_string());
-            args.push(json);
-        }
-        if let Some(name) = self.agent {
-            args.push("--agent".to_string());
-            args.push(name);
-        }
-        if let Some(mode) = self.permission_mode {
-            args.push("--permission-mode".to_string());
-            args.push(mode.as_arg().to_string());
-        }
-        if self.dangerously_skip_permissions {
-            args.push("--dangerously-skip-permissions".to_string());
-        }
+        self.shared.append_to(&mut args);
+
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
             args.push("stdio".to_string());
@@ -1605,6 +1709,132 @@ mod tests {
             agents_pos < dash_dash_pos,
             "--agents must precede `--` separator; got {args:?}"
         );
+    }
+
+    // -- QueryCommand knob-set parity (#672) -------------------------
+
+    #[test]
+    fn into_args_includes_session_id() {
+        let args = DuplexOptions::default().session_id("sid-9").into_args();
+        assert!(args.windows(2).any(|w| w == ["--session-id", "sid-9"]));
+    }
+
+    #[test]
+    fn into_args_includes_json_schema() {
+        let schema = r#"{"type":"object"}"#;
+        let args = DuplexOptions::default().json_schema(schema).into_args();
+        assert!(args.windows(2).any(|w| w == ["--json-schema", schema]));
+    }
+
+    #[test]
+    fn into_args_joins_allowed_tools_comma_separated() {
+        let args = DuplexOptions::default()
+            .allowed_tools(["Read", "Bash(git log:*)"])
+            .allowed_tool("Write")
+            .into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--allowed-tools", "Read,Bash(git log:*),Write"]),
+            "missing joined --allowed-tools in {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_joins_disallowed_tools_comma_separated() {
+        let args = DuplexOptions::default()
+            .disallowed_tools(["WebSearch"])
+            .disallowed_tool("WebFetch")
+            .into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--disallowed-tools", "WebSearch,WebFetch"]),
+            "missing joined --disallowed-tools in {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_includes_caps() {
+        let args = DuplexOptions::default()
+            .max_turns(4)
+            .max_budget_usd(0.25)
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--max-turns", "4"]));
+        assert!(args.windows(2).any(|w| w == ["--max-budget-usd", "0.25"]));
+    }
+
+    #[test]
+    fn into_args_includes_fallback_model_and_effort() {
+        let args = DuplexOptions::default()
+            .fallback_model("haiku")
+            .effort(Effort::Low)
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--fallback-model", "haiku"]));
+        assert!(args.windows(2).any(|w| w == ["--effort", "low"]));
+    }
+
+    #[test]
+    fn into_args_repeats_add_dir_and_mcp_config() {
+        let args = DuplexOptions::default()
+            .add_dir("/a")
+            .add_dir("/b")
+            .mcp_config("x.json")
+            .strict_mcp_config()
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--add-dir", "/a"]));
+        assert!(args.windows(2).any(|w| w == ["--add-dir", "/b"]));
+        assert!(args.windows(2).any(|w| w == ["--mcp-config", "x.json"]));
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn into_args_includes_no_session_persistence() {
+        let args = DuplexOptions::default()
+            .no_session_persistence()
+            .into_args();
+        assert!(args.iter().any(|a| a == "--no-session-persistence"));
+    }
+
+    #[test]
+    fn parity_flags_land_before_additional_args() {
+        // Same `--` ordering bug class as resume/agent.
+        let args = DuplexOptions::default()
+            .max_turns(2)
+            .json_schema("{}")
+            .arg("--")
+            .arg("trailing")
+            .into_args();
+        let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
+        for flag in ["--max-turns", "--json-schema"] {
+            let pos = args.iter().position(|a| a == flag).unwrap();
+            assert!(
+                pos < dash_dash_pos,
+                "{flag} must precede `--` separator; got {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn into_args_omits_parity_flags_by_default() {
+        let args = DuplexOptions::default().into_args();
+        for flag in [
+            "--session-id",
+            "--json-schema",
+            "--allowed-tools",
+            "--disallowed-tools",
+            "--max-turns",
+            "--max-budget-usd",
+            "--fallback-model",
+            "--effort",
+            "--add-dir",
+            "--mcp-config",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "{flag} should not appear by default; got {args:?}"
+            );
+        }
     }
 
     #[test]

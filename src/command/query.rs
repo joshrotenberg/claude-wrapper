@@ -1,5 +1,6 @@
 use crate::Claude;
 use crate::command::ClaudeCommand;
+use crate::command::spawn_args::SharedSpawnArgs;
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
 use crate::tool_pattern::ToolPattern;
@@ -30,37 +31,17 @@ use crate::types::{Effort, InputFormat, OutputFormat, PermissionMode};
 #[derive(Debug, Clone)]
 pub struct QueryCommand {
     prompt: String,
-    model: Option<String>,
-    system_prompt: Option<String>,
-    append_system_prompt: Option<String>,
+    // Spawn-time knobs shared with DuplexOptions; the flag emission
+    // lives on SharedSpawnArgs so the two builders cannot drift.
+    shared: SharedSpawnArgs,
     output_format: Option<OutputFormat>,
-    max_budget_usd: Option<f64>,
-    permission_mode: Option<PermissionMode>,
-    allowed_tools: Vec<ToolPattern>,
-    disallowed_tools: Vec<ToolPattern>,
-    mcp_config: Vec<String>,
-    add_dir: Vec<String>,
-    effort: Option<Effort>,
-    max_turns: Option<u32>,
-    json_schema: Option<String>,
-    continue_session: bool,
-    resume: Option<String>,
-    session_id: Option<String>,
-    fallback_model: Option<String>,
-    no_session_persistence: bool,
-    dangerously_skip_permissions: bool,
-    agent: Option<String>,
-    agents_json: Option<String>,
     tools: Vec<String>,
     file: Vec<String>,
     include_partial_messages: bool,
     input_format: Option<InputFormat>,
-    strict_mcp_config: bool,
     settings: Option<String>,
     fork_session: bool,
     retry_policy: Option<crate::retry::RetryPolicy>,
-    worktree: bool,
-    worktree_name: Option<String>,
     brief: bool,
     debug_filter: Option<String>,
     debug_file: Option<String>,
@@ -88,37 +69,15 @@ impl QueryCommand {
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
-            model: None,
-            system_prompt: None,
-            append_system_prompt: None,
+            shared: SharedSpawnArgs::default(),
             output_format: None,
-            max_budget_usd: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
-            mcp_config: Vec::new(),
-            add_dir: Vec::new(),
-            effort: None,
-            max_turns: None,
-            json_schema: None,
-            continue_session: false,
-            resume: None,
-            session_id: None,
-            fallback_model: None,
-            no_session_persistence: false,
-            dangerously_skip_permissions: false,
-            agent: None,
-            agents_json: None,
             tools: Vec::new(),
             file: Vec::new(),
             include_partial_messages: false,
             input_format: None,
-            strict_mcp_config: false,
             settings: None,
             fork_session: false,
             retry_policy: None,
-            worktree: false,
-            worktree_name: None,
             brief: false,
             debug_filter: None,
             debug_file: None,
@@ -144,21 +103,21 @@ impl QueryCommand {
     /// Set the model to use (e.g. "sonnet", "opus", or a full model ID).
     #[must_use]
     pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
+        self.shared.model = Some(model.into());
         self
     }
 
     /// Set a custom system prompt (replaces the default).
     #[must_use]
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
+        self.shared.system_prompt = Some(prompt.into());
         self
     }
 
     /// Append to the default system prompt.
     #[must_use]
     pub fn append_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.append_system_prompt = Some(prompt.into());
+        self.shared.append_system_prompt = Some(prompt.into());
         self
     }
 
@@ -172,14 +131,14 @@ impl QueryCommand {
     /// Set the maximum budget in USD.
     #[must_use]
     pub fn max_budget_usd(mut self, budget: f64) -> Self {
-        self.max_budget_usd = Some(budget);
+        self.shared.max_budget_usd = Some(budget);
         self
     }
 
     /// Set the permission mode.
     #[must_use]
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
-        self.permission_mode = Some(mode);
+        self.shared.permission_mode = Some(mode);
         self
     }
 
@@ -204,14 +163,16 @@ impl QueryCommand {
         I: IntoIterator<Item = T>,
         T: Into<ToolPattern>,
     {
-        self.allowed_tools.extend(tools.into_iter().map(Into::into));
+        self.shared
+            .allowed_tools
+            .extend(tools.into_iter().map(Into::into));
         self
     }
 
     /// Add a single allowed tool pattern.
     #[must_use]
     pub fn allowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
-        self.allowed_tools.push(tool.into());
+        self.shared.allowed_tools.push(tool.into());
         self
     }
 
@@ -222,7 +183,8 @@ impl QueryCommand {
         I: IntoIterator<Item = T>,
         T: Into<ToolPattern>,
     {
-        self.disallowed_tools
+        self.shared
+            .disallowed_tools
             .extend(tools.into_iter().map(Into::into));
         self
     }
@@ -230,63 +192,63 @@ impl QueryCommand {
     /// Add a single disallowed tool pattern.
     #[must_use]
     pub fn disallowed_tool(mut self, tool: impl Into<ToolPattern>) -> Self {
-        self.disallowed_tools.push(tool.into());
+        self.shared.disallowed_tools.push(tool.into());
         self
     }
 
     /// Add an MCP config file path.
     #[must_use]
     pub fn mcp_config(mut self, path: impl Into<String>) -> Self {
-        self.mcp_config.push(path.into());
+        self.shared.mcp_config.push(path.into());
         self
     }
 
     /// Add an additional directory for tool access.
     #[must_use]
     pub fn add_dir(mut self, dir: impl Into<String>) -> Self {
-        self.add_dir.push(dir.into());
+        self.shared.add_dir.push(dir.into());
         self
     }
 
     /// Set the effort level.
     #[must_use]
     pub fn effort(mut self, effort: Effort) -> Self {
-        self.effort = Some(effort);
+        self.shared.effort = Some(effort);
         self
     }
 
     /// Set the maximum number of turns.
     #[must_use]
     pub fn max_turns(mut self, turns: u32) -> Self {
-        self.max_turns = Some(turns);
+        self.shared.max_turns = Some(turns);
         self
     }
 
     /// Set a JSON schema for structured output validation.
     #[must_use]
     pub fn json_schema(mut self, schema: impl Into<String>) -> Self {
-        self.json_schema = Some(schema.into());
+        self.shared.json_schema = Some(schema.into());
         self
     }
 
     /// Continue the most recent conversation.
     #[must_use]
     pub fn continue_session(mut self) -> Self {
-        self.continue_session = true;
+        self.shared.continue_session = true;
         self
     }
 
     /// Resume a specific session by ID.
     #[must_use]
     pub fn resume(mut self, session_id: impl Into<String>) -> Self {
-        self.resume = Some(session_id.into());
+        self.shared.resume = Some(session_id.into());
         self
     }
 
     /// Use a specific session ID.
     #[must_use]
     pub fn session_id(mut self, id: impl Into<String>) -> Self {
-        self.session_id = Some(id.into());
+        self.shared.session_id = Some(id.into());
         self
     }
 
@@ -299,9 +261,9 @@ impl QueryCommand {
     /// the CLI.
     #[cfg(all(feature = "json", feature = "async"))]
     pub(crate) fn replace_session(mut self, id: impl Into<String>) -> Self {
-        self.continue_session = false;
-        self.resume = Some(id.into());
-        self.session_id = None;
+        self.shared.continue_session = false;
+        self.shared.resume = Some(id.into());
+        self.shared.session_id = None;
         self.fork_session = false;
         self
     }
@@ -309,21 +271,21 @@ impl QueryCommand {
     /// Set a fallback model for when the primary model is overloaded.
     #[must_use]
     pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
-        self.fallback_model = Some(model.into());
+        self.shared.fallback_model = Some(model.into());
         self
     }
 
     /// Disable session persistence (sessions won't be saved to disk).
     #[must_use]
     pub fn no_session_persistence(mut self) -> Self {
-        self.no_session_persistence = true;
+        self.shared.no_session_persistence = true;
         self
     }
 
     /// Bypass all permission checks. Only use in sandboxed environments.
     #[must_use]
     pub fn dangerously_skip_permissions(mut self) -> Self {
-        self.dangerously_skip_permissions = true;
+        self.shared.dangerously_skip_permissions = true;
         self
     }
 
@@ -342,7 +304,7 @@ impl QueryCommand {
     /// passing it here.
     #[must_use]
     pub fn agent(mut self, agent: impl Into<String>) -> Self {
-        self.agent = Some(agent.into());
+        self.shared.agent = Some(agent.into());
         self
     }
 
@@ -359,7 +321,7 @@ impl QueryCommand {
     /// "prompt": "You are a code reviewer"}}`.
     #[must_use]
     pub fn agents_json(mut self, json: impl Into<String>) -> Self {
-        self.agents_json = Some(json.into());
+        self.shared.agents_json = Some(json.into());
         self
     }
 
@@ -402,7 +364,7 @@ impl QueryCommand {
     /// Only use MCP servers from `--mcp-config`, ignoring all other MCP configurations.
     #[must_use]
     pub fn strict_mcp_config(mut self) -> Self {
-        self.strict_mcp_config = true;
+        self.shared.strict_mcp_config = true;
         self
     }
 
@@ -423,7 +385,7 @@ impl QueryCommand {
     /// Create a new git worktree for this session, providing an isolated working directory.
     #[must_use]
     pub fn worktree(mut self) -> Self {
-        self.worktree = true;
+        self.shared.worktree = true;
         self
     }
 
@@ -451,8 +413,8 @@ impl QueryCommand {
     /// ```
     #[must_use]
     pub fn worktree_named(mut self, name: impl Into<String>) -> Self {
-        self.worktree = true;
-        self.worktree_name = Some(name.into());
+        self.shared.worktree = true;
+        self.shared.worktree_name = Some(name.into());
         self
     }
 
@@ -797,21 +759,6 @@ impl QueryCommand {
     fn build_args(&self) -> Vec<String> {
         let mut args = vec!["--print".to_string()];
 
-        if let Some(ref model) = self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if let Some(ref prompt) = self.system_prompt {
-            args.push("--system-prompt".to_string());
-            args.push(prompt.clone());
-        }
-
-        if let Some(ref prompt) = self.append_system_prompt {
-            args.push("--append-system-prompt".to_string());
-            args.push(prompt.clone());
-        }
-
         if let Some(ref format) = self.output_format {
             args.push("--output-format".to_string());
             args.push(format.as_arg().to_string());
@@ -824,87 +771,7 @@ impl QueryCommand {
             args.push("--verbose".to_string());
         }
 
-        if let Some(budget) = self.max_budget_usd {
-            args.push("--max-budget-usd".to_string());
-            args.push(budget.to_string());
-        }
-
-        if let Some(ref mode) = self.permission_mode {
-            args.push("--permission-mode".to_string());
-            args.push(mode.as_arg().to_string());
-        }
-
-        if !self.allowed_tools.is_empty() {
-            args.push("--allowed-tools".to_string());
-            args.push(join_patterns(&self.allowed_tools));
-        }
-
-        if !self.disallowed_tools.is_empty() {
-            args.push("--disallowed-tools".to_string());
-            args.push(join_patterns(&self.disallowed_tools));
-        }
-
-        for config in &self.mcp_config {
-            args.push("--mcp-config".to_string());
-            args.push(config.clone());
-        }
-
-        for dir in &self.add_dir {
-            args.push("--add-dir".to_string());
-            args.push(dir.clone());
-        }
-
-        if let Some(ref effort) = self.effort {
-            args.push("--effort".to_string());
-            args.push(effort.as_arg().to_string());
-        }
-
-        if let Some(turns) = self.max_turns {
-            args.push("--max-turns".to_string());
-            args.push(turns.to_string());
-        }
-
-        if let Some(ref schema) = self.json_schema {
-            args.push("--json-schema".to_string());
-            args.push(schema.clone());
-        }
-
-        if self.continue_session {
-            args.push("--continue".to_string());
-        }
-
-        if let Some(ref session_id) = self.resume {
-            args.push("--resume".to_string());
-            args.push(session_id.clone());
-        }
-
-        if let Some(ref id) = self.session_id {
-            args.push("--session-id".to_string());
-            args.push(id.clone());
-        }
-
-        if let Some(ref model) = self.fallback_model {
-            args.push("--fallback-model".to_string());
-            args.push(model.clone());
-        }
-
-        if self.no_session_persistence {
-            args.push("--no-session-persistence".to_string());
-        }
-
-        if self.dangerously_skip_permissions {
-            args.push("--dangerously-skip-permissions".to_string());
-        }
-
-        if let Some(ref agent) = self.agent {
-            args.push("--agent".to_string());
-            args.push(agent.clone());
-        }
-
-        if let Some(ref agents) = self.agents_json {
-            args.push("--agents".to_string());
-            args.push(agents.clone());
-        }
+        self.shared.append_to(&mut args);
 
         if !self.tools.is_empty() {
             args.push("--tools".to_string());
@@ -925,10 +792,6 @@ impl QueryCommand {
             args.push(format.as_arg().to_string());
         }
 
-        if self.strict_mcp_config {
-            args.push("--strict-mcp-config".to_string());
-        }
-
         if let Some(ref settings) = self.settings {
             args.push("--settings".to_string());
             args.push(settings.clone());
@@ -936,13 +799,6 @@ impl QueryCommand {
 
         if self.fork_session {
             args.push("--fork-session".to_string());
-        }
-
-        if self.worktree {
-            args.push("--worktree".to_string());
-            if let Some(ref name) = self.worktree_name {
-                args.push(name.clone());
-            }
         }
 
         if self.brief {
@@ -1062,17 +918,6 @@ fn shell_quote(arg: &str) -> String {
     } else {
         arg.to_string()
     }
-}
-
-fn join_patterns(patterns: &[ToolPattern]) -> String {
-    let mut out = String::new();
-    for (i, p) in patterns.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(p.as_str());
-    }
-    out
 }
 
 #[cfg(test)]
