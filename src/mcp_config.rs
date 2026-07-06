@@ -275,6 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "json")]
     fn test_http_server_config() {
         let config = McpConfigBuilder::new().http_server("my-hub", "http://127.0.0.1:9090");
 
@@ -285,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "json")]
     fn test_stdio_server_config() {
         let config = McpConfigBuilder::new().stdio_server(
             "my-tool",
@@ -300,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tempfile")]
+    #[cfg(all(feature = "tempfile", feature = "json"))]
     fn test_build_temp() {
         let config = McpConfigBuilder::new()
             .http_server("hub", "http://localhost:9090")
@@ -316,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "json")]
     fn test_multiple_servers() {
         let config = McpConfigBuilder::new()
             .http_server("hub", "http://localhost:9090")
