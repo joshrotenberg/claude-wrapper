@@ -1,3 +1,11 @@
+//! The crate's [`Error`] type and [`Result`] alias.
+//!
+//! Every fallible operation returns [`Result<T>`]. [`Error`] is
+//! `#[non_exhaustive]` and classifies CLI failures into typed variants
+//! (auth, rail-stop caps, timeouts) via
+//! [`Error::from_command_failure`]; see its variant docs for what each
+//! carries.
+
 use std::path::PathBuf;
 
 use crate::auth::AuthErrorKind;

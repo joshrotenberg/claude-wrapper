@@ -1,3 +1,10 @@
+//! Claude CLI version parsing and tested-range checks.
+//!
+//! [`CliVersion`] parses the `claude --version` string; the helpers
+//! here compare it against the range this crate is tested against and
+//! surface drift (via [`CliVersionStatus`] and a `tracing::warn!`) so a
+//! host can react to an unexpectedly old or new CLI.
+
 use std::fmt;
 use std::str::FromStr;
 

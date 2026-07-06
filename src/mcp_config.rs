@@ -1,3 +1,11 @@
+//! Programmatic `.mcp.json` generation.
+//!
+//! [`McpConfigBuilder`] assembles HTTP and stdio MCP server entries and
+//! serializes them to the `.mcp.json` shape the `claude` CLI expects,
+//! either to a string, a caller-chosen path, or (with the `tempfile`
+//! feature) a self-cleaning [`TempMcpConfig`] for one-shot use with
+//! [`QueryCommand::mcp_config`](crate::QueryCommand::mcp_config).
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
