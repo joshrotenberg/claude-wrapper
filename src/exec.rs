@@ -130,11 +130,13 @@ async fn run_internal_stdin(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
+    let mut child = spawn_retrying_txtbsy(&mut cmd)
+        .await
+        .map_err(|e| Error::Io {
+            message: format!("failed to spawn claude: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -211,11 +213,13 @@ async fn run_with_timeout_stdin(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
+    let mut child = spawn_retrying_txtbsy(&mut cmd)
+        .await
+        .map_err(|e| Error::Io {
+            message: format!("failed to spawn claude: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -438,11 +442,13 @@ async fn run_with_timeout(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
+    let mut child = spawn_retrying_txtbsy(&mut cmd)
+        .await
+        .map_err(|e| Error::Io {
+            message: format!("failed to spawn claude: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
 
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -516,6 +522,37 @@ async fn drain<R: AsyncReadExt + Unpin>(reader: &mut R) -> String {
     let mut buf = Vec::new();
     let _ = reader.read_to_end(&mut buf).await;
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Total time to keep retrying a spawn that reports `ETXTBSY`.
+#[cfg(any(feature = "async", feature = "sync"))]
+const TXTBSY_RETRY_BUDGET: Duration = Duration::from_millis(500);
+
+/// Spawn `cmd`, retrying briefly on `ETXTBSY` (`ExecutableFileBusy`).
+///
+/// `execve` fails with `ETXTBSY` when another process holds the target file
+/// open for writing. In a multithreaded program this happens transiently even
+/// for a file this process has finished writing: if another thread `fork`s
+/// while a writable descriptor to the binary is still open, the child inherits
+/// that descriptor and holds it until its own `exec` completes. Any `execve`
+/// of the file in that window sees a writer and fails. The condition always
+/// clears on its own, so retry with a short bounded backoff rather than
+/// surfacing a spurious spawn failure.
+#[cfg(feature = "async")]
+async fn spawn_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && backoff <= TXTBSY_RETRY_BUDGET =>
+            {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            other => return other,
+        }
+    }
 }
 
 // ---------- sync twins ----------
@@ -606,7 +643,7 @@ fn run_internal_stdin_sync(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
+    let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
         message: format!("failed to spawn claude: {e}"),
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
@@ -687,7 +724,7 @@ fn run_with_timeout_stdin_sync(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
+    let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
         message: format!("failed to spawn claude: {e}"),
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
@@ -896,7 +933,7 @@ fn run_with_timeout_sync(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Error::Io {
+    let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
         message: format!("failed to spawn claude: {e}"),
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
@@ -972,6 +1009,27 @@ fn drain_sync<R: std::io::Read>(mut reader: R) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Blocking mirror of [`spawn_retrying_txtbsy`]. See that function for why
+/// `ETXTBSY` is retried rather than surfaced.
+#[cfg(feature = "sync")]
+fn spawn_retrying_txtbsy_sync(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && backoff <= TXTBSY_RETRY_BUDGET =>
+            {
+                std::thread::sleep(backoff);
+                backoff *= 2;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Wait for both drain threads to finish, returning "" for any that
 /// miss the deadline. Threads aren't cancellable in std; if the child's
 /// subprocesses are still holding a pipe fd open after kill(), the
@@ -1040,8 +1098,15 @@ mod tests {
     fn fake_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fake-claude.sh");
-        let mut f = std::fs::File::create(&path).expect("create script");
-        write!(f, "#!/usr/bin/env bash\n{body}\n").expect("write script");
+        // Close the writable handle before returning so the window in which a
+        // concurrent test's fork could inherit a writable fd to this script
+        // (and make our later execve fail with ETXTBSY) is as short as
+        // possible. Spawn itself retries ETXTBSY; this just makes it rarer.
+        {
+            let mut f = std::fs::File::create(&path).expect("create script");
+            write!(f, "#!/usr/bin/env bash\n{body}\n").expect("write script");
+            f.sync_all().expect("sync script");
+        }
         let perms = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("chmod");
         (dir, path)
@@ -1175,6 +1240,20 @@ mod tests {
             .await
             .expect("success");
         assert!(out.stdout.contains("hello via stdin"));
+    }
+
+    // The retry loop in `spawn_retrying_txtbsy` must only absorb `ETXTBSY`;
+    // every other spawn error has to surface promptly rather than be retried
+    // until the budget elapses. A missing binary yields `NotFound`, which
+    // must return on the first attempt.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_spawn_retry_passes_through_non_txtbsy_error() {
+        let mut cmd = Command::new("/nonexistent/definitely-not-a-real-binary");
+        let err = spawn_retrying_txtbsy(&mut cmd)
+            .await
+            .expect_err("spawn of missing binary should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
     #[cfg(feature = "async")]
@@ -1331,6 +1410,17 @@ mod tests {
         let out = run_claude_with_stdin_prompt_sync(&client(&path), vec![], "sync stdin".into())
             .expect("success");
         assert!(out.stdout.contains("sync stdin"));
+    }
+
+    // Sync mirror: only `ETXTBSY` is retried; a missing binary must surface
+    // `NotFound` on the first attempt.
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_spawn_retry_passes_through_non_txtbsy_error() {
+        let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
+        let err =
+            spawn_retrying_txtbsy_sync(&mut cmd).expect_err("spawn of missing binary should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
     #[cfg(feature = "sync")]
