@@ -213,6 +213,43 @@ impl Effort {
     }
 }
 
+/// How far a hermetic seal reaches when sealing the ambient `~/.claude`
+/// promptspace (`CLAUDE.md`, agents, skills, MCP servers).
+///
+/// Chooses the value passed to `--setting-sources`; the seal itself is
+/// applied by `hermetic` / `hermetic_scoped` on
+/// [`QueryCommand`](crate::QueryCommand) and
+/// [`DuplexOptions`](crate::duplex::DuplexOptions), which also set
+/// `--strict-mcp-config` and
+/// `--exclude-dynamic-system-prompt-sections`.
+///
+/// A hermetic seal never touches authentication. It is distinct from
+/// `--bare`, which forces API-key billing by reading auth strictly from
+/// `ANTHROPIC_API_KEY` / `apiKeyHelper`; a seal leaves OAuth and
+/// keychain auth working as normal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HermeticScope {
+    /// Drop every ambient setting source: user, project, and local
+    /// (`--setting-sources ""`). Only the CLI's built-in agents and
+    /// defaults remain; a user-level `~/.claude` no longer leaks in.
+    #[default]
+    Full,
+    /// Seal only the project and local ambient config while keeping the
+    /// user's global `~/.claude` (`--setting-sources user`). A project
+    /// `CLAUDE.md` and project-level agents stop being adopted.
+    Project,
+}
+
+impl HermeticScope {
+    /// The value emitted for `--setting-sources` under this scope.
+    pub(crate) fn setting_sources_value(self) -> &'static str {
+        match self {
+            Self::Full => "",
+            Self::Project => "user",
+        }
+    }
+}
+
 /// Scope for MCP and plugin commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Scope {

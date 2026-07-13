@@ -14,7 +14,7 @@ use crate::command::spawn_args::SharedSpawnArgs;
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
 use crate::tool_pattern::ToolPattern;
-use crate::types::{Effort, InputFormat, OutputFormat, PermissionMode};
+use crate::types::{Effort, HermeticScope, InputFormat, OutputFormat, PermissionMode};
 
 /// Builder for `claude -p <prompt>` (oneshot print-mode queries).
 ///
@@ -442,6 +442,38 @@ impl QueryCommand {
     #[must_use]
     pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
         self.shared.setting_sources = Some(sources.into());
+        self
+    }
+
+    /// Seal the ambient `~/.claude` config for a reproducible run
+    /// ([`HermeticScope::Full`]).
+    ///
+    /// Equivalent to `hermetic_scoped(HermeticScope::Full)`: drops all
+    /// ambient setting sources (`--setting-sources ""`), restricts MCP
+    /// to `--mcp-config` servers (`--strict-mcp-config`), and moves
+    /// per-machine sections out of the system prompt
+    /// (`--exclude-dynamic-system-prompt-sections`). Provide everything
+    /// the run needs explicitly via [`Self::append_system_prompt`],
+    /// [`Self::mcp_config`], [`Self::add_dir`], and friends.
+    ///
+    /// This is not [`Self::bare`]: a hermetic seal leaves OAuth and
+    /// keychain auth working, whereas `--bare` forces API-key billing.
+    /// A later [`Self::setting_sources`] call overrides the seal scope.
+    #[must_use]
+    pub fn hermetic(mut self) -> Self {
+        self.shared.apply_hermetic(HermeticScope::Full);
+        self
+    }
+
+    /// Seal the ambient `~/.claude` config at an explicit
+    /// [`HermeticScope`].
+    ///
+    /// See [`Self::hermetic`] for the flag set. Use
+    /// [`HermeticScope::Project`] to keep the user's global `~/.claude`
+    /// while sealing project and local ambient config.
+    #[must_use]
+    pub fn hermetic_scoped(mut self, scope: HermeticScope) -> Self {
+        self.shared.apply_hermetic(scope);
         self
     }
 
@@ -1322,6 +1354,48 @@ mod tests {
         let cmd = QueryCommand::new("test");
         let args = cmd.args();
         assert!(!args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn hermetic_emits_full_seal_flags() {
+        let args = QueryCommand::new("test").hermetic().args();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1].is_empty()),
+            "got {args:?}"
+        );
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(args.contains(&"--exclude-dynamic-system-prompt-sections".to_string()));
+        assert!(!args.contains(&"--bare".to_string()));
+    }
+
+    #[test]
+    fn hermetic_scoped_project_keeps_user() {
+        let args = QueryCommand::new("test")
+            .hermetic_scoped(HermeticScope::Project)
+            .args();
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn setting_sources_overrides_hermetic_scope() {
+        // The escape hatch: a later setting_sources call wins over the
+        // scope the hermetic preset chose.
+        let args = QueryCommand::new("test")
+            .hermetic()
+            .setting_sources("user,project")
+            .args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--setting-sources", "user,project"]),
+            "got {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "--setting-sources").count(),
+            1,
+            "--setting-sources must not be duplicated"
+        );
     }
 
     #[test]
