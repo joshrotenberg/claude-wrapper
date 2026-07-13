@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.2](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.1...v0.13.2) - 2026-07-13
+
+### Added
+
+- add hermetic() preset to seal ambient claude config ([#695](https://github.com/joshrotenberg/claude-wrapper/pull/695))
+- promote spawn-safe QueryCommand knobs to DuplexOptions builders ([#694](https://github.com/joshrotenberg/claude-wrapper/pull/694))
+- add setting_sources to DuplexOptions ([#692](https://github.com/joshrotenberg/claude-wrapper/pull/692))
+
+### Fixed
+
+- retry spawn on ETXTBSY to debounce fork/exec race in tests ([#696](https://github.com/joshrotenberg/claude-wrapper/pull/696))
+
 ## [0.13.1](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.0...v0.13.1) - 2026-07-06
 
 ### Fixed
