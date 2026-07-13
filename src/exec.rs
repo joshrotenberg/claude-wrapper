@@ -379,11 +379,13 @@ async fn run_internal(
         cmd.env(key, value);
     }
 
-    let output = cmd.output().await.map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
+    let output = output_retrying_txtbsy(&mut cmd)
+        .await
+        .map_err(|e| Error::Io {
+            message: format!("failed to spawn claude: {e}"),
+            source: e,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -560,6 +562,31 @@ async fn spawn_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<tokio::proc
     let mut backoff = Duration::from_millis(1);
     loop {
         match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && start.elapsed() < TXTBSY_RETRY_BUDGET =>
+            {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(TXTBSY_MAX_BACKOFF);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Run `cmd` to completion, retrying on `ETXTBSY` like
+/// [`spawn_retrying_txtbsy`].
+///
+/// The one-shot capture paths call `Command::output` (spawn, wait, and
+/// collect in one step) rather than holding a `Child`, so they need the
+/// same retry wrapped around `output` itself. The `ETXTBSY` still occurs
+/// at the `execve` inside `output`.
+#[cfg(feature = "async")]
+async fn output_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let start = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cmd.output().await {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ExecutableFileBusy
                     && start.elapsed() < TXTBSY_RETRY_BUDGET =>
@@ -888,7 +915,7 @@ fn run_internal_sync(
         cmd.env(key, value);
     }
 
-    let output = cmd.output().map_err(|e| Error::Io {
+    let output = output_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
         message: format!("failed to spawn claude: {e}"),
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
@@ -1036,6 +1063,28 @@ fn spawn_retrying_txtbsy_sync(
     let mut backoff = Duration::from_millis(1);
     loop {
         match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && start.elapsed() < TXTBSY_RETRY_BUDGET =>
+            {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(TXTBSY_MAX_BACKOFF);
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Blocking mirror of [`output_retrying_txtbsy`]. See that function for
+/// why the one-shot capture paths need the retry around `output`.
+#[cfg(feature = "sync")]
+fn output_retrying_txtbsy_sync(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    let start = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cmd.output() {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ExecutableFileBusy
                     && start.elapsed() < TXTBSY_RETRY_BUDGET =>
@@ -1274,6 +1323,19 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
+    // Same guarantee for the one-shot capture path: a missing binary must
+    // surface `NotFound` immediately, not spin until the ETXTBSY budget
+    // elapses.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_output_retry_passes_through_non_txtbsy_error() {
+        let mut cmd = Command::new("/nonexistent/definitely-not-a-real-binary");
+        let err = output_retrying_txtbsy(&mut cmd)
+            .await
+            .expect_err("output of missing binary should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
+    }
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn async_allow_exit_codes_permits_listed_code() {
@@ -1438,6 +1500,15 @@ mod tests {
         let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
         let err =
             spawn_retrying_txtbsy_sync(&mut cmd).expect_err("spawn of missing binary should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_output_retry_passes_through_non_txtbsy_error() {
+        let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
+        let err = output_retrying_txtbsy_sync(&mut cmd)
+            .expect_err("output of missing binary should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
