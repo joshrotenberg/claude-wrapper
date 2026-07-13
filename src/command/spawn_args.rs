@@ -7,7 +7,7 @@
 //! cannot drift between the oneshot and duplex paths.
 
 use crate::tool_pattern::ToolPattern;
-use crate::types::{Effort, PermissionMode};
+use crate::types::{Effort, HermeticScope, PermissionMode};
 
 /// The spawn-time knobs common to `QueryCommand` and `DuplexOptions`.
 ///
@@ -59,6 +59,25 @@ pub(crate) struct SharedSpawnArgs {
 }
 
 impl SharedSpawnArgs {
+    /// Seal the ambient `~/.claude` promptspace for a reproducible run.
+    ///
+    /// Sets the three flags a hermetic run needs, in one place so the
+    /// oneshot and duplex presets cannot drift:
+    /// - `--setting-sources <scope>` (the ambient-config seal)
+    /// - `--strict-mcp-config` (only servers from `--mcp-config`)
+    /// - `--exclude-dynamic-system-prompt-sections` (drop cwd/env/git
+    ///   status from the default system prompt)
+    ///
+    /// Deliberately does not touch `bare`: a hermetic seal must leave
+    /// authentication alone, whereas `--bare` forces API-key billing.
+    /// A later [`Self::setting_sources`](crate::QueryCommand::setting_sources)
+    /// call (or its duplex peer) overrides the scope chosen here.
+    pub(crate) fn apply_hermetic(&mut self, scope: HermeticScope) {
+        self.setting_sources = Some(scope.setting_sources_value().to_string());
+        self.strict_mcp_config = true;
+        self.exclude_dynamic_system_prompt_sections = true;
+    }
+
     /// Append the configured flags to `args`, in a stable order.
     pub(crate) fn append_to(&self, args: &mut Vec<String>) {
         if let Some(ref model) = self.model {
@@ -364,6 +383,47 @@ mod tests {
                 "--strict-mcp-config".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn hermetic_full_seals_all_setting_sources() {
+        let mut shared = SharedSpawnArgs::default();
+        shared.apply_hermetic(HermeticScope::Full);
+        let args = args_of(shared);
+        // Empty --setting-sources value (full seal) plus the two guards.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1].is_empty()),
+            "got {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(
+            args.iter()
+                .any(|a| a == "--exclude-dynamic-system-prompt-sections")
+        );
+        // A seal must never imply --bare (that would force API-key billing).
+        assert!(!args.iter().any(|a| a == "--bare"));
+    }
+
+    #[test]
+    fn hermetic_project_keeps_user_source() {
+        let mut shared = SharedSpawnArgs::default();
+        shared.apply_hermetic(HermeticScope::Project);
+        let args = args_of(shared);
+        assert!(
+            args.windows(2).any(|w| w == ["--setting-sources", "user"]),
+            "got {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(
+            args.iter()
+                .any(|a| a == "--exclude-dynamic-system-prompt-sections")
+        );
+    }
+
+    #[test]
+    fn hermetic_default_scope_is_full() {
+        assert_eq!(HermeticScope::default(), HermeticScope::Full);
     }
 
     #[test]

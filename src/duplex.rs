@@ -206,7 +206,7 @@ use crate::Claude;
 use crate::command::spawn_args::SharedSpawnArgs;
 use crate::error::{Error, Result};
 use crate::tool_pattern::ToolPattern;
-use crate::types::{Effort, PermissionMode};
+use crate::types::{Effort, HermeticScope, PermissionMode};
 
 /// Default capacity of the per-session [`broadcast::Sender`] backing
 /// [`DuplexSession::subscribe`].
@@ -651,6 +651,35 @@ impl DuplexOptions {
     #[must_use]
     pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
         self.shared.setting_sources = Some(sources.into());
+        self
+    }
+
+    /// Seal the ambient `~/.claude` config for a reproducible session
+    /// ([`HermeticScope::Full`]).
+    ///
+    /// Sets `--setting-sources ""`, `--strict-mcp-config`, and
+    /// `--exclude-dynamic-system-prompt-sections`. This gives a warm
+    /// duplex session a clean seal without the [`Self::arg`] escape
+    /// hatch. Mirrors
+    /// [`QueryCommand::hermetic`](crate::QueryCommand::hermetic).
+    ///
+    /// This is not [`Self::bare`]: a hermetic seal leaves OAuth and
+    /// keychain auth working, whereas `--bare` forces API-key billing.
+    /// A later [`Self::setting_sources`] call overrides the seal scope.
+    #[must_use]
+    pub fn hermetic(mut self) -> Self {
+        self.shared.apply_hermetic(HermeticScope::Full);
+        self
+    }
+
+    /// Seal the ambient `~/.claude` config at an explicit
+    /// [`HermeticScope`].
+    ///
+    /// See [`Self::hermetic`] for the flag set. Mirrors
+    /// [`QueryCommand::hermetic_scoped`](crate::QueryCommand::hermetic_scoped).
+    #[must_use]
+    pub fn hermetic_scoped(mut self, scope: HermeticScope) -> Self {
+        self.shared.apply_hermetic(scope);
         self
     }
 
@@ -1959,6 +1988,32 @@ mod tests {
     fn into_args_omits_setting_sources_by_default() {
         let args = DuplexOptions::default().into_args();
         assert!(!args.iter().any(|a| a == "--setting-sources"));
+    }
+
+    #[test]
+    fn into_args_hermetic_emits_full_seal() {
+        let args = DuplexOptions::default().hermetic().into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1].is_empty()),
+            "got {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(
+            args.iter()
+                .any(|a| a == "--exclude-dynamic-system-prompt-sections")
+        );
+        // A hermetic seal must never imply --bare.
+        assert!(!args.iter().any(|a| a == "--bare"));
+    }
+
+    #[test]
+    fn into_args_hermetic_scoped_project_keeps_user() {
+        let args = DuplexOptions::default()
+            .hermetic_scoped(HermeticScope::Project)
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     #[test]
