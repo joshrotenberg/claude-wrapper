@@ -321,10 +321,31 @@ impl std::fmt::Debug for PermissionHandler {
 
 /// Configuration for [`DuplexSession::spawn`].
 ///
-/// Builder methods cover the most common spawn-time options. The
-/// spawn call always includes
+/// Builder methods cover the spawn-time options shared with
+/// [`QueryCommand`](crate::QueryCommand); the flag emission lives on a
+/// common internal `SharedSpawnArgs`, so the oneshot and duplex paths
+/// cannot drift on how a knob is rendered. The spawn call always
+/// includes
 /// `--print --verbose --input-format stream-json --output-format stream-json`
 /// regardless of these options.
+///
+/// A few `QueryCommand` knobs are intentionally not surfaced here
+/// because they only make sense for a oneshot run or are owned by the
+/// duplex transport itself:
+///
+/// - Transport is fixed: `output_format`, `input_format`,
+///   `include_partial_messages`, `verbose`, and `prompt_via_stdin` are
+///   pinned by the duplex spawn and not configurable.
+/// - `retry_policy` reruns a whole oneshot invocation; a duplex session
+///   holds one child open across turns, so there is nothing to retry at
+///   this layer.
+/// - `brief` and `from_pr` shape a single oneshot run (SendUserMessage
+///   for one-turn agent-to-user replies, resume-from-PR startup); a
+///   duplex host drives turns and session selection itself.
+/// - `prompt_suggestions` and `replay_user_messages` shape stdin/stream
+///   echoing; the duplex layer owns its own stream plumbing.
+///
+/// Use [`Self::arg`] if you need one of these on a duplex spawn anyway.
 #[derive(Debug, Default, Clone)]
 pub struct DuplexOptions {
     // Spawn-time knobs shared with QueryCommand; the flag emission
@@ -638,6 +659,174 @@ impl DuplexOptions {
     #[must_use]
     pub fn no_session_persistence(mut self) -> Self {
         self.shared.no_session_persistence = true;
+        self
+    }
+
+    /// Set the list of available built-in tools (`--tools`).
+    ///
+    /// Use `""` to disable all tools, `"default"` for all tools, or
+    /// specific tool names like `["Bash", "Edit", "Read"]`. This is
+    /// distinct from [`Self::allowed_tools`], which controls tool
+    /// permissions rather than which built-ins load. Mirrors
+    /// [`QueryCommand::tools`](crate::QueryCommand::tools).
+    #[must_use]
+    pub fn tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.shared.tools.extend(tools.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a file resource to download at startup (`--file`).
+    ///
+    /// Format: `file_id:relative_path` (e.g. `file_abc:doc.txt`).
+    /// Repeatable. Mirrors [`QueryCommand::file`](crate::QueryCommand::file).
+    #[must_use]
+    pub fn file(mut self, spec: impl Into<String>) -> Self {
+        self.shared.file.push(spec.into());
+        self
+    }
+
+    /// Path to a settings JSON file or a JSON string (`--settings`).
+    ///
+    /// Mirrors [`QueryCommand::settings`](crate::QueryCommand::settings).
+    #[must_use]
+    pub fn settings(mut self, settings: impl Into<String>) -> Self {
+        self.shared.settings = Some(settings.into());
+        self
+    }
+
+    /// When resuming, create a new session id instead of reusing the
+    /// original (`--fork-session`).
+    ///
+    /// Only meaningful alongside [`Self::resume`] or
+    /// [`Self::continue_session`]. Mirrors
+    /// [`QueryCommand::fork_session`](crate::QueryCommand::fork_session).
+    #[must_use]
+    pub fn fork_session(mut self) -> Self {
+        self.shared.fork_session = true;
+        self
+    }
+
+    /// Enable debug logging with an optional filter, e.g. `"api,hooks"`
+    /// (`--debug`). Mirrors
+    /// [`QueryCommand::debug_filter`](crate::QueryCommand::debug_filter).
+    #[must_use]
+    pub fn debug_filter(mut self, filter: impl Into<String>) -> Self {
+        self.shared.debug_filter = Some(filter.into());
+        self
+    }
+
+    /// Write debug logs to the given file path (`--debug-file`).
+    ///
+    /// Mirrors [`QueryCommand::debug_file`](crate::QueryCommand::debug_file).
+    #[must_use]
+    pub fn debug_file(mut self, path: impl Into<String>) -> Self {
+        self.shared.debug_file = Some(path.into());
+        self
+    }
+
+    /// Beta feature headers for API key authentication (`--betas`).
+    ///
+    /// Mirrors [`QueryCommand::betas`](crate::QueryCommand::betas).
+    #[must_use]
+    pub fn betas(mut self, betas: impl Into<String>) -> Self {
+        self.shared.betas = Some(betas.into());
+        self
+    }
+
+    /// Load plugins from the given directory for this session
+    /// (`--plugin-dir`). Repeatable. Mirrors
+    /// [`QueryCommand::plugin_dir`](crate::QueryCommand::plugin_dir).
+    #[must_use]
+    pub fn plugin_dir(mut self, dir: impl Into<String>) -> Self {
+        self.shared.plugin_dirs.push(dir.into());
+        self
+    }
+
+    /// Fetch a plugin `.zip` from a URL for this session only
+    /// (`--plugin-url`). Repeatable. Mirrors
+    /// [`QueryCommand::plugin_url`](crate::QueryCommand::plugin_url).
+    #[must_use]
+    pub fn plugin_url(mut self, url: impl Into<String>) -> Self {
+        self.shared.plugin_urls.push(url.into());
+        self
+    }
+
+    /// Create a tmux session for the worktree (`--tmux`).
+    ///
+    /// Mirrors [`QueryCommand::tmux`](crate::QueryCommand::tmux).
+    #[must_use]
+    pub fn tmux(mut self) -> Self {
+        self.shared.tmux = true;
+        self
+    }
+
+    /// Run in minimal mode (`--bare`).
+    ///
+    /// Skips hooks, LSP, plugin sync, attribution, auto-memory,
+    /// background prefetches, keychain reads, and `CLAUDE.md`
+    /// auto-discovery. Anthropic auth is restricted to
+    /// `ANTHROPIC_API_KEY` or `apiKeyHelper`; OAuth and keychain are
+    /// never read. Mirrors [`QueryCommand::bare`](crate::QueryCommand::bare).
+    #[must_use]
+    pub fn bare(mut self) -> Self {
+        self.shared.bare = true;
+        self
+    }
+
+    /// Start with all customizations disabled (`--safe-mode`).
+    ///
+    /// Disables `CLAUDE.md`, skills, plugins, hooks, MCP servers,
+    /// custom commands and agents, and output styles for
+    /// troubleshooting. Mirrors
+    /// [`QueryCommand::safe_mode`](crate::QueryCommand::safe_mode).
+    #[must_use]
+    pub fn safe_mode(mut self) -> Self {
+        self.shared.safe_mode = true;
+        self
+    }
+
+    /// Disable all slash-command skills (`--disable-slash-commands`).
+    ///
+    /// Mirrors
+    /// [`QueryCommand::disable_slash_commands`](crate::QueryCommand::disable_slash_commands).
+    #[must_use]
+    pub fn disable_slash_commands(mut self) -> Self {
+        self.shared.disable_slash_commands = true;
+        self
+    }
+
+    /// Include every hook lifecycle event in the stream-json output
+    /// (`--include-hook-events`).
+    ///
+    /// Duplex sessions always run in stream-json, so this takes effect
+    /// without extra configuration. Mirrors
+    /// [`QueryCommand::include_hook_events`](crate::QueryCommand::include_hook_events).
+    #[must_use]
+    pub fn include_hook_events(mut self) -> Self {
+        self.shared.include_hook_events = true;
+        self
+    }
+
+    /// Move per-machine sections (cwd, env info, memory paths, git
+    /// status) out of the system prompt and into the first user
+    /// message (`--exclude-dynamic-system-prompt-sections`).
+    ///
+    /// Improves cross-user prompt-cache reuse. Only applies with the
+    /// default system prompt; ignored with [`Self::system_prompt`].
+    /// Mirrors
+    /// [`QueryCommand::exclude_dynamic_system_prompt_sections`](crate::QueryCommand::exclude_dynamic_system_prompt_sections).
+    #[must_use]
+    pub fn exclude_dynamic_system_prompt_sections(mut self) -> Self {
+        self.shared.exclude_dynamic_system_prompt_sections = true;
+        self
+    }
+
+    /// Set a display name for this session (`--name`). Shown in the
+    /// `/resume` picker and terminal title. Mirrors
+    /// [`QueryCommand::name`](crate::QueryCommand::name).
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.shared.name = Some(name.into());
         self
     }
 
@@ -1845,6 +2034,136 @@ mod tests {
             .no_session_persistence()
             .into_args();
         assert!(args.iter().any(|a| a == "--no-session-persistence"));
+    }
+
+    // ─── #690: parity builders promoted from QueryCommand ───
+
+    #[test]
+    fn into_args_joins_tools_comma_separated() {
+        let args = DuplexOptions::default()
+            .tools(["Bash", "Read", "Edit"])
+            .into_args();
+        assert!(
+            args.windows(2).any(|w| w == ["--tools", "Bash,Read,Edit"]),
+            "missing joined --tools in {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_repeats_file_per_spec() {
+        let args = DuplexOptions::default()
+            .file("file_a:doc.txt")
+            .file("file_b:notes.md")
+            .into_args();
+        assert_eq!(args.iter().filter(|a| *a == "--file").count(), 2);
+        assert!(args.iter().any(|a| a == "file_a:doc.txt"));
+        assert!(args.iter().any(|a| a == "file_b:notes.md"));
+    }
+
+    #[test]
+    fn into_args_includes_settings() {
+        let args = DuplexOptions::default()
+            .settings("/tmp/settings.json")
+            .into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--settings", "/tmp/settings.json"])
+        );
+    }
+
+    #[test]
+    fn into_args_includes_fork_session() {
+        let args = DuplexOptions::default().fork_session().into_args();
+        assert!(args.iter().any(|a| a == "--fork-session"));
+    }
+
+    #[test]
+    fn into_args_includes_debug_filter_and_file() {
+        let args = DuplexOptions::default()
+            .debug_filter("api,hooks")
+            .debug_file("/tmp/debug.log")
+            .into_args();
+        assert!(args.windows(2).any(|w| w == ["--debug", "api,hooks"]));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--debug-file", "/tmp/debug.log"])
+        );
+    }
+
+    #[test]
+    fn into_args_includes_betas() {
+        let args = DuplexOptions::default().betas("feature-x").into_args();
+        assert!(args.windows(2).any(|w| w == ["--betas", "feature-x"]));
+    }
+
+    #[test]
+    fn into_args_repeats_plugin_dir_and_url() {
+        let args = DuplexOptions::default()
+            .plugin_dir("/plugins/a")
+            .plugin_dir("/plugins/b")
+            .plugin_url("https://example.com/p.zip")
+            .into_args();
+        assert_eq!(args.iter().filter(|a| *a == "--plugin-dir").count(), 2);
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--plugin-url", "https://example.com/p.zip"])
+        );
+    }
+
+    #[test]
+    fn into_args_includes_bare_family_bool_flags() {
+        let args = DuplexOptions::default()
+            .tmux()
+            .bare()
+            .safe_mode()
+            .disable_slash_commands()
+            .include_hook_events()
+            .exclude_dynamic_system_prompt_sections()
+            .into_args();
+        for flag in [
+            "--tmux",
+            "--bare",
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--include-hook-events",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "missing {flag} in {args:?}");
+        }
+    }
+
+    #[test]
+    fn into_args_includes_name() {
+        let args = DuplexOptions::default().name("my session").into_args();
+        assert!(args.windows(2).any(|w| w == ["--name", "my session"]));
+    }
+
+    #[test]
+    fn into_args_omits_promoted_parity_flags_by_default() {
+        let args = DuplexOptions::default().into_args();
+        for flag in [
+            "--tools",
+            "--file",
+            "--settings",
+            "--fork-session",
+            "--debug",
+            "--debug-file",
+            "--betas",
+            "--plugin-dir",
+            "--plugin-url",
+            "--tmux",
+            "--bare",
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--include-hook-events",
+            "--exclude-dynamic-system-prompt-sections",
+            "--name",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "{flag} should be absent by default; got {args:?}"
+            );
+        }
     }
 
     #[test]

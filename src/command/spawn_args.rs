@@ -40,6 +40,22 @@ pub(crate) struct SharedSpawnArgs {
     pub(crate) setting_sources: Option<String>,
     pub(crate) worktree: bool,
     pub(crate) worktree_name: Option<String>,
+    pub(crate) tools: Vec<String>,
+    pub(crate) file: Vec<String>,
+    pub(crate) settings: Option<String>,
+    pub(crate) fork_session: bool,
+    pub(crate) debug_filter: Option<String>,
+    pub(crate) debug_file: Option<String>,
+    pub(crate) betas: Option<String>,
+    pub(crate) plugin_dirs: Vec<String>,
+    pub(crate) plugin_urls: Vec<String>,
+    pub(crate) tmux: bool,
+    pub(crate) bare: bool,
+    pub(crate) safe_mode: bool,
+    pub(crate) disable_slash_commands: bool,
+    pub(crate) include_hook_events: bool,
+    pub(crate) exclude_dynamic_system_prompt_sections: bool,
+    pub(crate) name: Option<String>,
 }
 
 impl SharedSpawnArgs {
@@ -156,6 +172,79 @@ impl SharedSpawnArgs {
             if let Some(ref name) = self.worktree_name {
                 args.push(name.clone());
             }
+        }
+
+        if !self.tools.is_empty() {
+            args.push("--tools".to_string());
+            args.push(self.tools.join(","));
+        }
+
+        for spec in &self.file {
+            args.push("--file".to_string());
+            args.push(spec.clone());
+        }
+
+        if let Some(ref settings) = self.settings {
+            args.push("--settings".to_string());
+            args.push(settings.clone());
+        }
+
+        if self.fork_session {
+            args.push("--fork-session".to_string());
+        }
+
+        if let Some(ref filter) = self.debug_filter {
+            args.push("--debug".to_string());
+            args.push(filter.clone());
+        }
+
+        if let Some(ref path) = self.debug_file {
+            args.push("--debug-file".to_string());
+            args.push(path.clone());
+        }
+
+        if let Some(ref betas) = self.betas {
+            args.push("--betas".to_string());
+            args.push(betas.clone());
+        }
+
+        for dir in &self.plugin_dirs {
+            args.push("--plugin-dir".to_string());
+            args.push(dir.clone());
+        }
+
+        for url in &self.plugin_urls {
+            args.push("--plugin-url".to_string());
+            args.push(url.clone());
+        }
+
+        if self.tmux {
+            args.push("--tmux".to_string());
+        }
+
+        if self.bare {
+            args.push("--bare".to_string());
+        }
+
+        if self.safe_mode {
+            args.push("--safe-mode".to_string());
+        }
+
+        if self.disable_slash_commands {
+            args.push("--disable-slash-commands".to_string());
+        }
+
+        if self.include_hook_events {
+            args.push("--include-hook-events".to_string());
+        }
+
+        if self.exclude_dynamic_system_prompt_sections {
+            args.push("--exclude-dynamic-system-prompt-sections".to_string());
+        }
+
+        if let Some(ref name) = self.name {
+            args.push("--name".to_string());
+            args.push(name.clone());
         }
     }
 }
