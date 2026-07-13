@@ -669,7 +669,8 @@ fn extract_user_text_preview(entry: &Value, max_chars: usize) -> Option<String> 
     let content = entry.get("message")?.get("content")?;
     let raw = if let Some(s) = content.as_str() {
         s.to_string()
-    } else if let Some(arr) = content.as_array() {
+    } else {
+        let arr = content.as_array()?;
         let mut buf = String::new();
         for block in arr {
             let ty = block.get("type").and_then(Value::as_str).unwrap_or("");
@@ -683,8 +684,6 @@ fn extract_user_text_preview(entry: &Value, max_chars: usize) -> Option<String> 
             }
         }
         buf
-    } else {
-        return None;
     };
     let one_line = raw
         .split('\n')

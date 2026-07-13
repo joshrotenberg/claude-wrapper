@@ -622,6 +622,17 @@ impl DuplexOptions {
         self
     }
 
+    /// Comma-separated list of setting sources the CLI loads, for example
+    /// `"user,project,local"` (`--setting-sources`). Pass an empty string to
+    /// load none, sealing the session's promptspace against ambient project
+    /// config (agents, skills, `CLAUDE.md`). Mirrors
+    /// [`QueryCommand::setting_sources`](crate::QueryCommand::setting_sources).
+    #[must_use]
+    pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
+        self.shared.setting_sources = Some(sources.into());
+        self
+    }
+
     /// Do not persist the session to on-disk history
     /// (`--no-session-persistence`).
     #[must_use]
@@ -1741,6 +1752,24 @@ mod tests {
     fn into_args_includes_session_id() {
         let args = DuplexOptions::default().session_id("sid-9").into_args();
         assert!(args.windows(2).any(|w| w == ["--session-id", "sid-9"]));
+    }
+
+    #[test]
+    fn into_args_includes_setting_sources() {
+        let args = DuplexOptions::default()
+            .setting_sources("user,project")
+            .into_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--setting-sources", "user,project"]),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn into_args_omits_setting_sources_by_default() {
+        let args = DuplexOptions::default().into_args();
+        assert!(!args.iter().any(|a| a == "--setting-sources"));
     }
 
     #[test]
