@@ -45,26 +45,10 @@ pub struct QueryCommand {
     // lives on SharedSpawnArgs so the two builders cannot drift.
     shared: SharedSpawnArgs,
     output_format: Option<OutputFormat>,
-    tools: Vec<String>,
-    file: Vec<String>,
     include_partial_messages: bool,
     input_format: Option<InputFormat>,
-    settings: Option<String>,
-    fork_session: bool,
     retry_policy: Option<crate::retry::RetryPolicy>,
     brief: bool,
-    debug_filter: Option<String>,
-    debug_file: Option<String>,
-    betas: Option<String>,
-    plugin_dirs: Vec<String>,
-    plugin_urls: Vec<String>,
-    tmux: bool,
-    bare: bool,
-    safe_mode: bool,
-    disable_slash_commands: bool,
-    include_hook_events: bool,
-    exclude_dynamic_system_prompt_sections: bool,
-    name: Option<String>,
     from_pr: Option<String>,
     prompt_via_stdin: bool,
     verbose: bool,
@@ -80,26 +64,10 @@ impl QueryCommand {
             prompt: prompt.into(),
             shared: SharedSpawnArgs::default(),
             output_format: None,
-            tools: Vec::new(),
-            file: Vec::new(),
             include_partial_messages: false,
             input_format: None,
-            settings: None,
-            fork_session: false,
             retry_policy: None,
             brief: false,
-            debug_filter: None,
-            debug_file: None,
-            betas: None,
-            plugin_dirs: Vec::new(),
-            plugin_urls: Vec::new(),
-            tmux: false,
-            bare: false,
-            safe_mode: false,
-            disable_slash_commands: false,
-            include_hook_events: false,
-            exclude_dynamic_system_prompt_sections: false,
-            name: None,
             from_pr: None,
             prompt_via_stdin: false,
             verbose: false,
@@ -272,7 +240,7 @@ impl QueryCommand {
         self.shared.continue_session = false;
         self.shared.resume = Some(id.into());
         self.shared.session_id = None;
-        self.fork_session = false;
+        self.shared.fork_session = false;
         self
     }
 
@@ -340,7 +308,7 @@ impl QueryCommand {
     /// This is different from `allowed_tools` which controls MCP tool permissions.
     #[must_use]
     pub fn tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.tools.extend(tools.into_iter().map(Into::into));
+        self.shared.tools.extend(tools.into_iter().map(Into::into));
         self
     }
 
@@ -349,7 +317,7 @@ impl QueryCommand {
     /// Format: `file_id:relative_path` (e.g. `file_abc:doc.txt`).
     #[must_use]
     pub fn file(mut self, spec: impl Into<String>) -> Self {
-        self.file.push(spec.into());
+        self.shared.file.push(spec.into());
         self
     }
 
@@ -379,14 +347,14 @@ impl QueryCommand {
     /// Path to a settings JSON file or a JSON string.
     #[must_use]
     pub fn settings(mut self, settings: impl Into<String>) -> Self {
-        self.settings = Some(settings.into());
+        self.shared.settings = Some(settings.into());
         self
     }
 
     /// When resuming, create a new session ID instead of reusing the original.
     #[must_use]
     pub fn fork_session(mut self) -> Self {
-        self.fork_session = true;
+        self.shared.fork_session = true;
         self
     }
 
@@ -436,28 +404,28 @@ impl QueryCommand {
     /// Enable debug logging with an optional filter (e.g., "api,hooks").
     #[must_use]
     pub fn debug_filter(mut self, filter: impl Into<String>) -> Self {
-        self.debug_filter = Some(filter.into());
+        self.shared.debug_filter = Some(filter.into());
         self
     }
 
     /// Write debug logs to the specified file path.
     #[must_use]
     pub fn debug_file(mut self, path: impl Into<String>) -> Self {
-        self.debug_file = Some(path.into());
+        self.shared.debug_file = Some(path.into());
         self
     }
 
     /// Beta feature headers for API key authentication.
     #[must_use]
     pub fn betas(mut self, betas: impl Into<String>) -> Self {
-        self.betas = Some(betas.into());
+        self.shared.betas = Some(betas.into());
         self
     }
 
     /// Load plugins from the specified directory for this session.
     #[must_use]
     pub fn plugin_dir(mut self, dir: impl Into<String>) -> Self {
-        self.plugin_dirs.push(dir.into());
+        self.shared.plugin_dirs.push(dir.into());
         self
     }
 
@@ -466,7 +434,7 @@ impl QueryCommand {
     /// [`Self::plugin_dir`].
     #[must_use]
     pub fn plugin_url(mut self, url: impl Into<String>) -> Self {
-        self.plugin_urls.push(url.into());
+        self.shared.plugin_urls.push(url.into());
         self
     }
 
@@ -480,7 +448,7 @@ impl QueryCommand {
     /// Create a tmux session for the worktree.
     #[must_use]
     pub fn tmux(mut self) -> Self {
-        self.tmux = true;
+        self.shared.tmux = true;
         self
     }
 
@@ -501,14 +469,14 @@ impl QueryCommand {
     /// resolve via explicit `/skill-name` references.
     #[must_use]
     pub fn bare(mut self) -> Self {
-        self.bare = true;
+        self.shared.bare = true;
         self
     }
 
     /// Disable all slash-command skills (`--disable-slash-commands`).
     #[must_use]
     pub fn disable_slash_commands(mut self) -> Self {
-        self.disable_slash_commands = true;
+        self.shared.disable_slash_commands = true;
         self
     }
 
@@ -522,7 +490,7 @@ impl QueryCommand {
     /// the child.
     #[must_use]
     pub fn safe_mode(mut self) -> Self {
-        self.safe_mode = true;
+        self.shared.safe_mode = true;
         self
     }
 
@@ -531,7 +499,7 @@ impl QueryCommand {
     /// `OutputFormat::StreamJson`.
     #[must_use]
     pub fn include_hook_events(mut self) -> Self {
-        self.include_hook_events = true;
+        self.shared.include_hook_events = true;
         self
     }
 
@@ -542,7 +510,7 @@ impl QueryCommand {
     /// system prompt; ignored with `--system-prompt`.
     #[must_use]
     pub fn exclude_dynamic_system_prompt_sections(mut self) -> Self {
-        self.exclude_dynamic_system_prompt_sections = true;
+        self.shared.exclude_dynamic_system_prompt_sections = true;
         self
     }
 
@@ -550,7 +518,7 @@ impl QueryCommand {
     /// prompt box, `/resume` picker, and terminal title.
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
+        self.shared.name = Some(name.into());
         self
     }
 
@@ -781,16 +749,6 @@ impl QueryCommand {
 
         self.shared.append_to(&mut args);
 
-        if !self.tools.is_empty() {
-            args.push("--tools".to_string());
-            args.push(self.tools.join(","));
-        }
-
-        for spec in &self.file {
-            args.push("--file".to_string());
-            args.push(spec.clone());
-        }
-
         if self.include_partial_messages {
             args.push("--include-partial-messages".to_string());
         }
@@ -800,66 +758,8 @@ impl QueryCommand {
             args.push(format.as_arg().to_string());
         }
 
-        if let Some(ref settings) = self.settings {
-            args.push("--settings".to_string());
-            args.push(settings.clone());
-        }
-
-        if self.fork_session {
-            args.push("--fork-session".to_string());
-        }
-
         if self.brief {
             args.push("--brief".to_string());
-        }
-
-        if let Some(ref filter) = self.debug_filter {
-            args.push("--debug".to_string());
-            args.push(filter.clone());
-        }
-
-        if let Some(ref path) = self.debug_file {
-            args.push("--debug-file".to_string());
-            args.push(path.clone());
-        }
-
-        if let Some(ref betas) = self.betas {
-            args.push("--betas".to_string());
-            args.push(betas.clone());
-        }
-
-        for dir in &self.plugin_dirs {
-            args.push("--plugin-dir".to_string());
-            args.push(dir.clone());
-        }
-
-        for url in &self.plugin_urls {
-            args.push("--plugin-url".to_string());
-            args.push(url.clone());
-        }
-
-        if self.tmux {
-            args.push("--tmux".to_string());
-        }
-
-        if self.bare {
-            args.push("--bare".to_string());
-        }
-
-        if self.safe_mode {
-            args.push("--safe-mode".to_string());
-        }
-
-        if self.disable_slash_commands {
-            args.push("--disable-slash-commands".to_string());
-        }
-
-        if self.include_hook_events {
-            args.push("--include-hook-events".to_string());
-        }
-
-        if self.exclude_dynamic_system_prompt_sections {
-            args.push("--exclude-dynamic-system-prompt-sections".to_string());
         }
 
         if self.prompt_suggestions {
@@ -868,11 +768,6 @@ impl QueryCommand {
 
         if self.replay_user_messages {
             args.push("--replay-user-messages".to_string());
-        }
-
-        if let Some(ref name) = self.name {
-            args.push("--name".to_string());
-            args.push(name.clone());
         }
 
         if let Some(ref pr) = self.from_pr {
