@@ -37,6 +37,7 @@ pub(crate) struct SharedSpawnArgs {
     pub(crate) agent: Option<String>,
     pub(crate) agents_json: Option<String>,
     pub(crate) strict_mcp_config: bool,
+    pub(crate) setting_sources: Option<String>,
     pub(crate) worktree: bool,
     pub(crate) worktree_name: Option<String>,
 }
@@ -145,6 +146,11 @@ impl SharedSpawnArgs {
             args.push("--strict-mcp-config".to_string());
         }
 
+        if let Some(ref sources) = self.setting_sources {
+            args.push("--setting-sources".to_string());
+            args.push(sources.clone());
+        }
+
         if self.worktree {
             args.push("--worktree".to_string());
             if let Some(ref name) = self.worktree_name {
@@ -215,6 +221,29 @@ mod tests {
         });
         assert_eq!(args.iter().filter(|a| *a == "--mcp-config").count(), 2);
         assert_eq!(args.iter().filter(|a| *a == "--add-dir").count(), 1);
+    }
+
+    #[test]
+    fn setting_sources_carries_its_value() {
+        let args = args_of(SharedSpawnArgs {
+            setting_sources: Some("user,project".to_string()),
+            ..Default::default()
+        });
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1] == "user,project"),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn empty_setting_sources_still_emits_flag() {
+        // An empty value is meaningful: it loads no setting sources (a full seal).
+        let args = args_of(SharedSpawnArgs {
+            setting_sources: Some(String::new()),
+            ..Default::default()
+        });
+        assert_eq!(args, vec!["--setting-sources".to_string(), String::new()]);
     }
 
     #[test]

@@ -58,7 +58,6 @@ pub struct QueryCommand {
     betas: Option<String>,
     plugin_dirs: Vec<String>,
     plugin_urls: Vec<String>,
-    setting_sources: Option<String>,
     tmux: bool,
     bare: bool,
     safe_mode: bool,
@@ -94,7 +93,6 @@ impl QueryCommand {
             betas: None,
             plugin_dirs: Vec::new(),
             plugin_urls: Vec::new(),
-            setting_sources: None,
             tmux: false,
             bare: false,
             safe_mode: false,
@@ -475,7 +473,7 @@ impl QueryCommand {
     /// Comma-separated list of setting sources to load (e.g., "user,project,local").
     #[must_use]
     pub fn setting_sources(mut self, sources: impl Into<String>) -> Self {
-        self.setting_sources = Some(sources.into());
+        self.shared.setting_sources = Some(sources.into());
         self
     }
 
@@ -838,11 +836,6 @@ impl QueryCommand {
         for url in &self.plugin_urls {
             args.push("--plugin-url".to_string());
             args.push(url.clone());
-        }
-
-        if let Some(ref sources) = self.setting_sources {
-            args.push("--setting-sources".to_string());
-            args.push(sources.clone());
         }
 
         if self.tmux {
