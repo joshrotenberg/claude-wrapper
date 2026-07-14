@@ -418,7 +418,7 @@ fn parse_effort(s: &str) -> anyhow::Result<Effort> {
 }
 
 fn footer(settings: &Settings, r: &claude_wrapper::QueryResult) -> String {
-    let model = settings.model.as_deref().unwrap_or("default");
+    let model = actual_model(settings, r);
     let turns = r
         .num_turns
         .map(|n| format!("{n} turns"))
@@ -428,11 +428,26 @@ fn footer(settings: &Settings, r: &claude_wrapper::QueryResult) -> String {
         .duration_ms
         .map(|d| format!("{:.1}s", d as f64 / 1000.0))
         .unwrap_or_default();
-    [model.to_string(), turns, cost, dur]
+    [model, turns, cost, dur]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The model(s) the CLI actually billed, from the result's `modelUsage` map
+/// (keyed by model id). Falls back to the configured model, then "default" --
+/// so even a bare run reports what ran, not what you happened to set.
+fn actual_model(settings: &Settings, r: &claude_wrapper::QueryResult) -> String {
+    if let Some(serde_json::Value::Object(usage)) = r.extra.get("modelUsage")
+        && !usage.is_empty()
+    {
+        return usage.keys().cloned().collect::<Vec<_>>().join("+");
+    }
+    settings
+        .model
+        .clone()
+        .unwrap_or_else(|| "default".to_string())
 }
 
 /// Write `settings` as `[profiles.NAME]` into the project cr.toml, preserving
