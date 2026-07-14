@@ -40,16 +40,25 @@ which = "8"
 [dev-dependencies]
 anyhow = "1"
 axum = "0.8"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 
 # All examples use the async API; require the feature so they're
 # skipped automatically on sync-only builds.
 [[example]]
 name = "agent_worker"
 required-features = ["async", "json"]
+
+# Spike: `cr`, a minimal config-driven CLI over the wrapper's sync API.
+# Not a shipped binary -- an evaluation prototype. `cargo run --example cr
+# --no-default-features --features sync,json,tempfile -- ...`
+[[example]]
+name = "cr"
+required-features = ["sync", "json"]
 
 [[example]]
 name = "duplex_chat"
