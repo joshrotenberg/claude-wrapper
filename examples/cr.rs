@@ -12,10 +12,9 @@
 //! - `--save NAME` (creation-by-use: capture resolved flags into a profile)
 //! - the cost/turns footer, from the parsed `QueryResult`
 //!
-//! Deliberately NOT in the spike: streaming, `-e` editor compose, worktree
-//! lifecycle, the composition family (`--attach`/`--git-*`). Wiring those is a
-//! one-liner each against the wrapper; they're omitted to keep the surface
-//! honest.
+//! Deliberately NOT in the spike: `-e` editor compose, worktree lifecycle, the
+//! composition family (`--attach`/`--git-*`). Wiring those is a one-liner each
+//! against the wrapper; they're omitted to keep the surface honest.
 //!
 //! Run:
 //!   cargo run --example cr --no-default-features \
@@ -23,10 +22,12 @@
 //!   cargo run --example cr ... -- --profile cheap --explain "summarize this"
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use claude_wrapper::{Claude, Effort, QueryCommand};
+use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, stream_query_sync};
+use claude_wrapper::{Claude, Effort, OutputFormat, QueryCommand};
 use serde::{Deserialize, Serialize};
 
 /// A saved `claude -p` you can re-run: isolated, typed, repeatable.
@@ -84,6 +85,14 @@ struct RunArgs {
     /// Answer only: no footer.
     #[arg(short = 'q', long, help_heading = "Output")]
     quiet: bool,
+
+    /// Force live streaming (default: auto -- on a TTY, off on a pipe).
+    #[arg(long, help_heading = "Output", conflicts_with = "no_stream")]
+    stream: bool,
+
+    /// Force buffered output.
+    #[arg(long, help_heading = "Output")]
+    no_stream: bool,
 
     /// Continue the most recent session in this dir.
     #[arg(long, help_heading = "Session")]
@@ -366,7 +375,26 @@ fn run(
     }
     let claude = builder.build()?;
 
-    let mut cmd = QueryCommand::new(prompt).prompt_via_stdin(true);
+    // Streaming vs buffered. Structured output can't token-stream, and
+    // --no-stream forces buffered; otherwise --stream forces it on, else auto
+    // by whether stdout is a TTY.
+    let streaming = if args.json || args.schema.is_some() || args.no_stream {
+        false
+    } else {
+        args.stream || std::io::stdout().is_terminal()
+    };
+
+    // The sync streamer reads nothing from stdin (it nulls it), so a streaming
+    // run must carry the prompt in argv; a buffered run keeps prompt_via_stdin
+    // so the prompt never lands in ps/argv.
+    let mut cmd = QueryCommand::new(prompt);
+    if streaming {
+        cmd = cmd
+            .output_format(OutputFormat::StreamJson)
+            .include_partial_messages();
+    } else {
+        cmd = cmd.prompt_via_stdin(true);
+    }
     if let Some(m) = &settings.model {
         cmd = cmd.model(m);
     }
@@ -413,12 +441,17 @@ fn run(
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    // 6. Run (buffered; streaming is a deliberate spike gap) and render.
-    let result = cmd.execute_json_sync(&claude)?;
+    // 6. Run and render.
+    let result = if streaming {
+        stream_run(&claude, &cmd)?
+    } else {
+        cmd.execute_json_sync(&claude)?
+    };
 
+    // Streaming already wrote the answer live; buffered/JSON prints it now.
     if args.json || args.schema.is_some() {
         println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
+    } else if !streaming {
         print!("{}", result.result);
         if !result.result.ends_with('\n') {
             println!();
@@ -434,6 +467,46 @@ fn run(
     } else {
         std::process::ExitCode::SUCCESS
     })
+}
+
+/// Stream a run, writing assistant text deltas to stdout as they arrive, and
+/// return the final `result` event decoded as a `QueryResult` (for the footer).
+fn stream_run(claude: &Claude, cmd: &QueryCommand) -> anyhow::Result<claude_wrapper::QueryResult> {
+    use std::io::Write;
+
+    let mut out = std::io::stdout();
+    let mut final_result: Option<claude_wrapper::QueryResult> = None;
+    let mut wrote_any = false;
+
+    stream_query_sync(claude, cmd, |ev| {
+        if let Some(PartialMessageEvent::BlockDelta {
+            delta: BlockDelta::Text(t),
+            ..
+        }) = ev.partial_message()
+        {
+            let _ = write!(out, "{t}");
+            let _ = out.flush();
+            wrote_any = true;
+        }
+        if ev.is_result() {
+            final_result = serde_json::from_value(ev.data.clone()).ok();
+        }
+    })?;
+
+    if wrote_any {
+        let _ = writeln!(out);
+    }
+    // No partial-message deltas (older CLI, or a result-only run): fall back to
+    // the result text so the answer still appears.
+    match final_result {
+        Some(r) => {
+            if !wrote_any && !r.result.is_empty() {
+                println!("{}", r.result);
+            }
+            Ok(r)
+        }
+        None => anyhow::bail!("streaming run ended without a result event"),
+    }
 }
 
 fn resolve_prompt(args: &RunArgs) -> anyhow::Result<String> {
