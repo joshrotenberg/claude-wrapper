@@ -44,6 +44,12 @@ struct Cli {
 enum Command {
     /// List profiles and show what one resolves to.
     Profiles,
+    /// Show the config file paths, or open the project one in $EDITOR.
+    Config {
+        /// Open the project cr.toml in $EDITOR (creating it if absent).
+        #[arg(long)]
+        edit: bool,
+    },
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -86,6 +92,15 @@ struct RunArgs {
     /// Resume a specific session id.
     #[arg(long, value_name = "ID", help_heading = "Session")]
     resume: Option<String>,
+
+    /// Mint a new session with an id you choose (for scripted multi-turn).
+    #[arg(
+        long,
+        value_name = "UUID",
+        help_heading = "Session",
+        conflicts_with_all = ["resume", "continue"]
+    )]
+    session_id: Option<String>,
 
     /// Run as if from PATH (git -C style); resolved first.
     #[arg(
@@ -213,8 +228,12 @@ fn main() -> std::process::ExitCode {
     let user = user_path.as_deref().map(load_config).unwrap_or_default();
     let project = load_config(&project_path);
 
-    if let Some(Command::Profiles) = cli.command {
-        return cmd_profiles(&user, &project);
+    match cli.command {
+        Some(Command::Profiles) => return cmd_profiles(&user, &project),
+        Some(Command::Config { edit }) => {
+            return cmd_config(user_path.as_deref(), &project_path, edit);
+        }
+        None => {}
     }
 
     match run(cli.run, &user, &project, &project_path) {
@@ -253,6 +272,33 @@ fn cmd_profiles(user: &ConfigFile, project: &ConfigFile) -> std::process::ExitCo
     std::process::ExitCode::SUCCESS
 }
 
+fn cmd_config(user_path: Option<&Path>, project_path: &Path, edit: bool) -> std::process::ExitCode {
+    if edit {
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+        let status = std::process::Command::new(editor)
+            .arg(project_path)
+            .status();
+        return match status {
+            Ok(s) if s.success() => std::process::ExitCode::SUCCESS,
+            _ => std::process::ExitCode::from(1),
+        };
+    }
+    // Base first, project second: the order they layer in.
+    match user_path {
+        Some(p) => println!("user     {}", p.display()),
+        None => println!("user     (none; ~/.config/cr/config.toml)"),
+    }
+    let exists = if project_path.exists() {
+        ""
+    } else {
+        "  (absent)"
+    };
+    println!("project  {}{exists}", project_path.display());
+    std::process::ExitCode::SUCCESS
+}
+
 fn run(
     args: RunArgs,
     user: &ConfigFile,
@@ -268,15 +314,15 @@ fn run(
         settings = settings.overlay(d);
     }
 
+    // Profile selection: --profile > CR_PROFILE > project default > user default.
     let active = if args.no_profile {
         None
     } else {
-        args.profile.clone().or_else(|| {
-            project
-                .default_profile
-                .clone()
-                .or_else(|| user.default_profile.clone())
-        })
+        args.profile
+            .clone()
+            .or_else(|| std::env::var("CR_PROFILE").ok().filter(|s| !s.is_empty()))
+            .or_else(|| project.default_profile.clone())
+            .or_else(|| user.default_profile.clone())
     };
     if let Some(name) = &active {
         let p = project
@@ -352,6 +398,9 @@ fn run(
     }
     if let Some(id) = &args.resume {
         cmd = cmd.resume(id);
+    }
+    if let Some(id) = &args.session_id {
+        cmd = cmd.session_id(id);
     }
     if let Some(schema_path) = &args.schema {
         let schema = std::fs::read_to_string(schema_path)?;
