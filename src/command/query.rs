@@ -633,9 +633,11 @@ impl QueryCommand {
 
     /// Return the full command as a string that could be run in a shell.
     ///
-    /// Constructs a command string using the binary path from the Claude instance
-    /// and the arguments from this query. Arguments containing spaces or special
-    /// shell characters are shell-quoted to be safe for shell execution.
+    /// Constructs a command string using the binary path from the Claude instance,
+    /// the client's global args, and the arguments from this query -- the same
+    /// assembly the exec path performs, so the preview matches what actually
+    /// runs. Arguments containing spaces or special shell characters are
+    /// shell-quoted to be safe for shell execution.
     ///
     /// # Example
     ///
@@ -654,7 +656,7 @@ impl QueryCommand {
     /// # }
     /// ```
     pub fn to_command_string(&self, claude: &Claude) -> String {
-        let args = self.build_args();
+        let args = exec::full_command_args(claude, self.build_args());
         let quoted_args = args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>();
         format!("{} {}", claude.binary().display(), quoted_args.join(" "))
     }
@@ -1252,6 +1254,24 @@ mod tests {
 
         // Single quotes should be escaped in shell
         assert!(command_str.contains("'it'\\''s'"));
+    }
+
+    #[test]
+    fn to_command_string_includes_global_args() {
+        // The exec path prepends the client's global args; the preview
+        // must show them too (#705).
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .arg("--debug")
+            .build()
+            .unwrap();
+
+        let command_str = QueryCommand::new("hello").to_command_string(&claude);
+
+        assert!(
+            command_str.starts_with("/usr/local/bin/claude --debug --print"),
+            "global args must precede command args; got {command_str}"
+        );
     }
 
     #[test]
