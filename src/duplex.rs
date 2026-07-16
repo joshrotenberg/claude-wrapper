@@ -203,7 +203,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::Claude;
-use crate::command::spawn_args::SharedSpawnArgs;
+use crate::command::spawn_args::{SharedSpawnArgs, shell_quote};
 use crate::error::{Error, Result};
 use crate::tool_pattern::ToolPattern;
 use crate::types::{Effort, HermeticScope, PermissionMode};
@@ -905,7 +905,7 @@ impl DuplexOptions {
         self
     }
 
-    fn into_args(self) -> Vec<String> {
+    fn build_args(&self) -> Vec<String> {
         let mut args = vec![
             "--print".to_string(),
             "--verbose".to_string(),
@@ -921,9 +921,55 @@ impl DuplexOptions {
             args.push("--permission-prompt-tool".to_string());
             args.push("stdio".to_string());
         }
-        args.extend(self.additional_args);
+        args.extend(self.additional_args.iter().cloned());
 
         args
+    }
+
+    /// Assemble the exact argv [`DuplexSession::spawn`] passes to the
+    /// CLI binary: the client's global args followed by this option
+    /// set's flags. Single assembly path shared by the spawn and
+    /// [`Self::to_command_string`], so the preview cannot drift from
+    /// what actually runs.
+    fn spawn_command_args(&self, claude: &Claude) -> Vec<String> {
+        let mut args = claude.global_args.clone();
+        args.extend(self.build_args());
+        args
+    }
+
+    /// Return the full spawn command as a string that could be run in
+    /// a shell.
+    ///
+    /// The duplex analog of
+    /// [`QueryCommand::to_command_string`](crate::QueryCommand::to_command_string):
+    /// the binary path from the [`Claude`] client plus the exact
+    /// arguments [`DuplexSession::spawn`] would pass for these
+    /// options, including the client's global args. Both share one
+    /// args-assembly path, so this preview always matches the real
+    /// spawn. Arguments containing spaces or special shell characters
+    /// are shell-quoted.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, DuplexOptions};
+    ///
+    /// # fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder().build()?;
+    ///
+    /// let opts = DuplexOptions::default()
+    ///     .agent("reviewer")
+    ///     .setting_sources("project");
+    ///
+    /// println!("Would spawn: {}", opts.to_command_string(&claude));
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn to_command_string(&self, claude: &Claude) -> String {
+        let args = self.spawn_command_args(claude);
+        let quoted_args = args.iter().map(|arg| shell_quote(arg)).collect::<Vec<_>>();
+        format!("{} {}", claude.binary().display(), quoted_args.join(" "))
     }
 }
 
@@ -1101,9 +1147,7 @@ impl DuplexSession {
             .unwrap_or(DEFAULT_SUBSCRIBER_CAPACITY);
         let permission_handler = opts.on_permission.clone();
 
-        let mut command_args = Vec::new();
-        command_args.extend(claude.global_args.clone());
-        command_args.extend(opts.into_args());
+        let command_args = opts.spawn_command_args(claude);
 
         debug!(
             binary = %claude.binary.display(),
@@ -1771,8 +1815,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn into_args_default_includes_required_flags() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_default_includes_required_flags() {
+        let args = DuplexOptions::default().build_args();
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
         assert!(
@@ -1786,17 +1830,17 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_model() {
-        let args = DuplexOptions::default().model("haiku").into_args();
+    fn build_args_includes_model() {
+        let args = DuplexOptions::default().model("haiku").build_args();
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
     }
 
     #[test]
-    fn into_args_includes_system_prompts() {
+    fn build_args_includes_system_prompts() {
         let args = DuplexOptions::default()
             .system_prompt("be concise")
             .append_system_prompt("also polite")
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--system-prompt", "be concise"])
@@ -1808,24 +1852,100 @@ mod tests {
     }
 
     #[test]
-    fn into_args_appends_raw_args_last() {
+    fn build_args_appends_raw_args_last() {
         let args = DuplexOptions::default()
             .arg("--add-dir")
             .arg("/tmp/foo")
-            .into_args();
+            .build_args();
         // Last two entries should be the additional args, in order.
         assert_eq!(&args[args.len() - 2..], &["--add-dir", "/tmp/foo"]);
     }
 
+    // ─── to_command_string / spawn parity (#703) ───
+
+    fn preview_claude() -> Claude {
+        Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .unwrap()
+    }
+
     #[test]
-    fn into_args_includes_resume_when_set() {
-        let args = DuplexOptions::default().resume("abc-123").into_args();
+    fn spawn_command_args_prepends_global_args() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .arg("--debug")
+            .build()
+            .unwrap();
+        let args = DuplexOptions::default()
+            .model("haiku")
+            .spawn_command_args(&claude);
+        assert_eq!(args[0], "--debug");
+        assert_eq!(args[1], "--print");
+        assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
+    }
+
+    #[test]
+    fn to_command_string_is_binary_plus_spawn_args() {
+        // The preview must be exactly the binary plus the args the
+        // spawn path assembles (no arg here needs quoting).
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .arg("--debug")
+            .build()
+            .unwrap();
+        let opts = DuplexOptions::default().agent("reviewer");
+        let expected = format!(
+            "/usr/local/bin/claude {}",
+            opts.spawn_command_args(&claude).join(" ")
+        );
+        assert_eq!(opts.to_command_string(&claude), expected);
+    }
+
+    #[test]
+    fn to_command_string_includes_persona_flags() {
+        // Repro from #703: a spawn configured with an agent, allowed
+        // tools, and setting sources must show all three in the echo.
+        let command_str = DuplexOptions::default()
+            .agent("reviewer")
+            .allowed_tool("Read")
+            .allowed_tool("Bash(git:*)")
+            .setting_sources("project")
+            .to_command_string(&preview_claude());
+        assert!(command_str.starts_with("/usr/local/bin/claude"));
+        assert!(command_str.contains("--agent reviewer"));
+        assert!(command_str.contains("--allowed-tools 'Read,Bash(git:*)'"));
+        assert!(command_str.contains("--setting-sources project"));
+    }
+
+    #[test]
+    fn to_command_string_quotes_args_with_spaces() {
+        let command_str = DuplexOptions::default()
+            .system_prompt("be concise")
+            .to_command_string(&preview_claude());
+        assert!(command_str.contains("--system-prompt 'be concise'"));
+    }
+
+    #[test]
+    fn to_command_string_does_not_consume_options() {
+        // Borrowing preview: the same options remain usable after the
+        // echo (previewed first, then handed to spawn).
+        let claude = preview_claude();
+        let opts = DuplexOptions::default().model("haiku");
+        let first = opts.to_command_string(&claude);
+        let second = opts.to_command_string(&claude);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn build_args_includes_resume_when_set() {
+        let args = DuplexOptions::default().resume("abc-123").build_args();
         assert!(args.windows(2).any(|w| w == ["--resume", "abc-123"]));
     }
 
     #[test]
-    fn into_args_omits_resume_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_resume_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(
             !args.iter().any(|a| a == "--resume"),
             "--resume should not appear without an explicit resume(...) call; got {args:?}"
@@ -1833,20 +1953,20 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_continue_when_set() {
-        let args = DuplexOptions::default().continue_session().into_args();
+    fn build_args_includes_continue_when_set() {
+        let args = DuplexOptions::default().continue_session().build_args();
         assert!(args.iter().any(|a| a == "--continue"));
     }
 
     #[test]
-    fn into_args_omits_continue_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_continue_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--continue"));
     }
 
     #[test]
-    fn into_args_includes_worktree_flag_without_name() {
-        let args = DuplexOptions::default().worktree(None::<&str>).into_args();
+    fn build_args_includes_worktree_flag_without_name() {
+        let args = DuplexOptions::default().worktree(None::<&str>).build_args();
         assert!(args.iter().any(|a| a == "--worktree"));
         // No name means no positional follows --worktree.
         let pos = args.iter().position(|a| a == "--worktree").unwrap();
@@ -1857,17 +1977,17 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_worktree_flag_with_name() {
+    fn build_args_includes_worktree_flag_with_name() {
         let args = DuplexOptions::default()
             .worktree(Some("agent-xyz"))
-            .into_args();
+            .build_args();
         let pos = args.iter().position(|a| a == "--worktree").unwrap();
         assert_eq!(args.get(pos + 1).map(String::as_str), Some("agent-xyz"));
     }
 
     #[test]
-    fn into_args_omits_worktree_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_worktree_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(
             !args.iter().any(|a| a == "--worktree"),
             "--worktree should not appear without an explicit worktree(...) call; got {args:?}"
@@ -1881,7 +2001,7 @@ mod tests {
             .worktree(Some("foo"))
             .arg("--")
             .arg("trailing")
-            .into_args();
+            .build_args();
         let wt_pos = args.iter().position(|a| a == "--worktree").unwrap();
         let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
         assert!(
@@ -1891,8 +2011,8 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_agent_when_set() {
-        let args = DuplexOptions::default().agent("rust-qa").into_args();
+    fn build_args_includes_agent_when_set() {
+        let args = DuplexOptions::default().agent("rust-qa").build_args();
         assert!(
             args.windows(2).any(|w| w == ["--agent", "rust-qa"]),
             "missing --agent rust-qa in {args:?}"
@@ -1900,8 +2020,8 @@ mod tests {
     }
 
     #[test]
-    fn into_args_omits_agent_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_agent_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(
             !args.iter().any(|a| a == "--agent"),
             "--agent should not appear without an explicit agent(...) call; got {args:?}"
@@ -1909,16 +2029,16 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_agents_json_when_set() {
+    fn build_args_includes_agents_json_when_set() {
         let json = r#"{"reviewer":{"description":"r","prompt":"p"}}"#;
-        let args = DuplexOptions::default().agents_json(json).into_args();
+        let args = DuplexOptions::default().agents_json(json).build_args();
         let pos = args.iter().position(|a| a == "--agents").unwrap();
         assert_eq!(args.get(pos + 1).map(String::as_str), Some(json));
     }
 
     #[test]
-    fn into_args_omits_agents_json_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_agents_json_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--agents"));
     }
 
@@ -1928,7 +2048,7 @@ mod tests {
         let args = DuplexOptions::default()
             .agents_json(json)
             .agent("reviewer")
-            .into_args();
+            .build_args();
         // Both flags present.
         assert!(args.iter().any(|a| a == "--agents"));
         assert!(args.iter().any(|a| a == "--agent"));
@@ -1940,7 +2060,7 @@ mod tests {
             .agent("rust-qa")
             .arg("--")
             .arg("trailing")
-            .into_args();
+            .build_args();
         let agent_pos = args.iter().position(|a| a == "--agent").unwrap();
         let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
         assert!(
@@ -1955,7 +2075,7 @@ mod tests {
             .agents_json("{}")
             .arg("--")
             .arg("trailing")
-            .into_args();
+            .build_args();
         let agents_pos = args.iter().position(|a| a == "--agents").unwrap();
         let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
         assert!(
@@ -1967,16 +2087,16 @@ mod tests {
     // -- QueryCommand knob-set parity (#672) -------------------------
 
     #[test]
-    fn into_args_includes_session_id() {
-        let args = DuplexOptions::default().session_id("sid-9").into_args();
+    fn build_args_includes_session_id() {
+        let args = DuplexOptions::default().session_id("sid-9").build_args();
         assert!(args.windows(2).any(|w| w == ["--session-id", "sid-9"]));
     }
 
     #[test]
-    fn into_args_includes_setting_sources() {
+    fn build_args_includes_setting_sources() {
         let args = DuplexOptions::default()
             .setting_sources("user,project")
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--setting-sources", "user,project"]),
@@ -1985,14 +2105,14 @@ mod tests {
     }
 
     #[test]
-    fn into_args_omits_setting_sources_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_setting_sources_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--setting-sources"));
     }
 
     #[test]
-    fn into_args_hermetic_emits_full_seal() {
-        let args = DuplexOptions::default().hermetic().into_args();
+    fn build_args_hermetic_emits_full_seal() {
+        let args = DuplexOptions::default().hermetic().build_args();
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--setting-sources" && w[1].is_empty()),
@@ -2008,27 +2128,27 @@ mod tests {
     }
 
     #[test]
-    fn into_args_hermetic_scoped_project_keeps_user() {
+    fn build_args_hermetic_scoped_project_keeps_user() {
         let args = DuplexOptions::default()
             .hermetic_scoped(HermeticScope::Project)
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
     }
 
     #[test]
-    fn into_args_includes_json_schema() {
+    fn build_args_includes_json_schema() {
         let schema = r#"{"type":"object"}"#;
-        let args = DuplexOptions::default().json_schema(schema).into_args();
+        let args = DuplexOptions::default().json_schema(schema).build_args();
         assert!(args.windows(2).any(|w| w == ["--json-schema", schema]));
     }
 
     #[test]
-    fn into_args_joins_allowed_tools_comma_separated() {
+    fn build_args_joins_allowed_tools_comma_separated() {
         let args = DuplexOptions::default()
             .allowed_tools(["Read", "Bash(git log:*)"])
             .allowed_tool("Write")
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--allowed-tools", "Read,Bash(git log:*),Write"]),
@@ -2037,11 +2157,11 @@ mod tests {
     }
 
     #[test]
-    fn into_args_joins_disallowed_tools_comma_separated() {
+    fn build_args_joins_disallowed_tools_comma_separated() {
         let args = DuplexOptions::default()
             .disallowed_tools(["WebSearch"])
             .disallowed_tool("WebFetch")
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--disallowed-tools", "WebSearch,WebFetch"]),
@@ -2050,33 +2170,33 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_caps() {
+    fn build_args_includes_caps() {
         let args = DuplexOptions::default()
             .max_turns(4)
             .max_budget_usd(0.25)
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--max-turns", "4"]));
         assert!(args.windows(2).any(|w| w == ["--max-budget-usd", "0.25"]));
     }
 
     #[test]
-    fn into_args_includes_fallback_model_and_effort() {
+    fn build_args_includes_fallback_model_and_effort() {
         let args = DuplexOptions::default()
             .fallback_model("haiku")
             .effort(Effort::Low)
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--fallback-model", "haiku"]));
         assert!(args.windows(2).any(|w| w == ["--effort", "low"]));
     }
 
     #[test]
-    fn into_args_repeats_add_dir_and_mcp_config() {
+    fn build_args_repeats_add_dir_and_mcp_config() {
         let args = DuplexOptions::default()
             .add_dir("/a")
             .add_dir("/b")
             .mcp_config("x.json")
             .strict_mcp_config()
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--add-dir", "/a"]));
         assert!(args.windows(2).any(|w| w == ["--add-dir", "/b"]));
         assert!(args.windows(2).any(|w| w == ["--mcp-config", "x.json"]));
@@ -2084,20 +2204,20 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_no_session_persistence() {
+    fn build_args_includes_no_session_persistence() {
         let args = DuplexOptions::default()
             .no_session_persistence()
-            .into_args();
+            .build_args();
         assert!(args.iter().any(|a| a == "--no-session-persistence"));
     }
 
     // ─── #690: parity builders promoted from QueryCommand ───
 
     #[test]
-    fn into_args_joins_tools_comma_separated() {
+    fn build_args_joins_tools_comma_separated() {
         let args = DuplexOptions::default()
             .tools(["Bash", "Read", "Edit"])
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2).any(|w| w == ["--tools", "Bash,Read,Edit"]),
             "missing joined --tools in {args:?}"
@@ -2105,21 +2225,21 @@ mod tests {
     }
 
     #[test]
-    fn into_args_repeats_file_per_spec() {
+    fn build_args_repeats_file_per_spec() {
         let args = DuplexOptions::default()
             .file("file_a:doc.txt")
             .file("file_b:notes.md")
-            .into_args();
+            .build_args();
         assert_eq!(args.iter().filter(|a| *a == "--file").count(), 2);
         assert!(args.iter().any(|a| a == "file_a:doc.txt"));
         assert!(args.iter().any(|a| a == "file_b:notes.md"));
     }
 
     #[test]
-    fn into_args_includes_settings() {
+    fn build_args_includes_settings() {
         let args = DuplexOptions::default()
             .settings("/tmp/settings.json")
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--settings", "/tmp/settings.json"])
@@ -2127,17 +2247,17 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_fork_session() {
-        let args = DuplexOptions::default().fork_session().into_args();
+    fn build_args_includes_fork_session() {
+        let args = DuplexOptions::default().fork_session().build_args();
         assert!(args.iter().any(|a| a == "--fork-session"));
     }
 
     #[test]
-    fn into_args_includes_debug_filter_and_file() {
+    fn build_args_includes_debug_filter_and_file() {
         let args = DuplexOptions::default()
             .debug_filter("api,hooks")
             .debug_file("/tmp/debug.log")
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--debug", "api,hooks"]));
         assert!(
             args.windows(2)
@@ -2146,18 +2266,18 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_betas() {
-        let args = DuplexOptions::default().betas("feature-x").into_args();
+    fn build_args_includes_betas() {
+        let args = DuplexOptions::default().betas("feature-x").build_args();
         assert!(args.windows(2).any(|w| w == ["--betas", "feature-x"]));
     }
 
     #[test]
-    fn into_args_repeats_plugin_dir_and_url() {
+    fn build_args_repeats_plugin_dir_and_url() {
         let args = DuplexOptions::default()
             .plugin_dir("/plugins/a")
             .plugin_dir("/plugins/b")
             .plugin_url("https://example.com/p.zip")
-            .into_args();
+            .build_args();
         assert_eq!(args.iter().filter(|a| *a == "--plugin-dir").count(), 2);
         assert!(
             args.windows(2)
@@ -2166,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_bare_family_bool_flags() {
+    fn build_args_includes_bare_family_bool_flags() {
         let args = DuplexOptions::default()
             .tmux()
             .bare()
@@ -2174,7 +2294,7 @@ mod tests {
             .disable_slash_commands()
             .include_hook_events()
             .exclude_dynamic_system_prompt_sections()
-            .into_args();
+            .build_args();
         for flag in [
             "--tmux",
             "--bare",
@@ -2188,14 +2308,14 @@ mod tests {
     }
 
     #[test]
-    fn into_args_includes_name() {
-        let args = DuplexOptions::default().name("my session").into_args();
+    fn build_args_includes_name() {
+        let args = DuplexOptions::default().name("my session").build_args();
         assert!(args.windows(2).any(|w| w == ["--name", "my session"]));
     }
 
     #[test]
-    fn into_args_omits_promoted_parity_flags_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_promoted_parity_flags_by_default() {
+        let args = DuplexOptions::default().build_args();
         for flag in [
             "--tools",
             "--file",
@@ -2229,7 +2349,7 @@ mod tests {
             .json_schema("{}")
             .arg("--")
             .arg("trailing")
-            .into_args();
+            .build_args();
         let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
         for flag in ["--max-turns", "--json-schema"] {
             let pos = args.iter().position(|a| a == flag).unwrap();
@@ -2241,8 +2361,8 @@ mod tests {
     }
 
     #[test]
-    fn into_args_omits_parity_flags_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_parity_flags_by_default() {
+        let args = DuplexOptions::default().build_args();
         for flag in [
             "--session-id",
             "--json-schema",
@@ -2274,7 +2394,7 @@ mod tests {
             .resume("xyz")
             .arg("--")
             .arg("trailing")
-            .into_args();
+            .build_args();
         let resume_pos = args.iter().position(|a| a == "--resume").unwrap();
         let dash_dash_pos = args.iter().position(|a| a == "--").unwrap();
         assert!(
@@ -2452,21 +2572,23 @@ mod tests {
     }
 
     #[test]
-    fn into_args_does_not_emit_subscriber_capacity_flag() {
+    fn build_args_does_not_emit_subscriber_capacity_flag() {
         // subscriber_capacity is runtime config, not a CLI arg.
-        let args = DuplexOptions::default().subscriber_capacity(64).into_args();
+        let args = DuplexOptions::default()
+            .subscriber_capacity(64)
+            .build_args();
         assert!(!args.iter().any(|a| a.contains("subscriber")));
         assert!(!args.iter().any(|a| a.contains("capacity")));
     }
 
     #[test]
-    fn into_args_includes_permission_prompt_tool_when_handler_set() {
+    fn build_args_includes_permission_prompt_tool_when_handler_set() {
         let handler = PermissionHandler::new(|_req| async move {
             PermissionDecision::Allow {
                 updated_input: None,
             }
         });
-        let args = DuplexOptions::default().on_permission(handler).into_args();
+        let args = DuplexOptions::default().on_permission(handler).build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--permission-prompt-tool", "stdio"])
@@ -2474,16 +2596,16 @@ mod tests {
     }
 
     #[test]
-    fn into_args_omits_permission_prompt_tool_without_handler() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_permission_prompt_tool_without_handler() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
     }
 
     #[test]
-    fn into_args_emits_permission_mode_flag() {
+    fn build_args_emits_permission_mode_flag() {
         let args = DuplexOptions::default()
             .permission_mode(PermissionMode::AcceptEdits)
-            .into_args();
+            .build_args();
         assert!(
             args.windows(2)
                 .any(|w| w == ["--permission-mode", "acceptEdits"]),
@@ -2492,30 +2614,30 @@ mod tests {
     }
 
     #[test]
-    fn into_args_emits_plan_mode() {
+    fn build_args_emits_plan_mode() {
         let args = DuplexOptions::default()
             .permission_mode(PermissionMode::Plan)
-            .into_args();
+            .build_args();
         assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
     }
 
     #[test]
-    fn into_args_omits_permission_mode_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_permission_mode_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--permission-mode"));
     }
 
     #[test]
-    fn into_args_emits_dangerously_skip_permissions_flag() {
+    fn build_args_emits_dangerously_skip_permissions_flag() {
         let args = DuplexOptions::default()
             .dangerously_skip_permissions()
-            .into_args();
+            .build_args();
         assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
     #[test]
-    fn into_args_omits_dangerously_skip_by_default() {
-        let args = DuplexOptions::default().into_args();
+    fn build_args_omits_dangerously_skip_by_default() {
+        let args = DuplexOptions::default().build_args();
         assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
