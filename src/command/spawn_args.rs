@@ -268,6 +268,20 @@ impl SharedSpawnArgs {
     }
 }
 
+/// Shell-quote an argument if it contains spaces or special characters.
+///
+/// Shared by [`QueryCommand::to_command_string`](crate::QueryCommand::to_command_string)
+/// and [`DuplexOptions::to_command_string`](crate::duplex::DuplexOptions::to_command_string).
+pub(crate) fn shell_quote(arg: &str) -> String {
+    // Check if the argument needs quoting (contains whitespace or shell metacharacters)
+    if arg.contains(|c: char| c.is_whitespace() || "\"'$\\`|;<>&()[]{}".contains(c)) {
+        // Use single quotes and escape any existing single quotes
+        format!("'{}'", arg.replace("'", "'\\''"))
+    } else {
+        arg.to_string()
+    }
+}
+
 /// Join tool patterns into the comma-separated form the CLI's
 /// `--allowed-tools` / `--disallowed-tools` flags expect.
 pub(crate) fn join_patterns(patterns: &[ToolPattern]) -> String {
@@ -434,5 +448,38 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(args, vec!["--worktree".to_string(), "wt1".to_string()]);
+    }
+
+    // ─── shell_quote unit tests (#455) ───
+
+    #[test]
+    fn shell_quote_plain_word_is_unchanged() {
+        assert_eq!(shell_quote("simple"), "simple");
+        assert_eq!(shell_quote(""), "");
+        assert_eq!(shell_quote("file.rs"), "file.rs");
+    }
+
+    #[test]
+    fn shell_quote_whitespace_gets_single_quoted() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("a\tb"), "'a\tb'");
+    }
+
+    #[test]
+    fn shell_quote_metacharacters_get_quoted() {
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("$VAR"), "'$VAR'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+        assert_eq!(shell_quote("(x)"), "'(x)'");
+    }
+
+    #[test]
+    fn shell_quote_embedded_single_quote_is_escaped() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_double_quote_gets_single_quoted() {
+        assert_eq!(shell_quote(r#"say "hi""#), r#"'say "hi"'"#);
     }
 }

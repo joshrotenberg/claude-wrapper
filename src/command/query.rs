@@ -10,7 +10,7 @@
 
 use crate::Claude;
 use crate::command::ClaudeCommand;
-use crate::command::spawn_args::SharedSpawnArgs;
+use crate::command::spawn_args::{SharedSpawnArgs, shell_quote};
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
 use crate::tool_pattern::ToolPattern;
@@ -839,17 +839,6 @@ impl ClaudeCommand for QueryCommand {
     }
 }
 
-/// Shell-quote an argument if it contains spaces or special characters.
-fn shell_quote(arg: &str) -> String {
-    // Check if the argument needs quoting (contains whitespace or shell metacharacters)
-    if arg.contains(|c: char| c.is_whitespace() || "\"'$\\`|;<>&()[]{}".contains(c)) {
-        // Use single quotes and escape any existing single quotes
-        format!("'{}'", arg.replace("'", "'\\''"))
-    } else {
-        arg.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,38 +1400,5 @@ mod tests {
         let cmd = QueryCommand::new("test").tmux();
         let args = cmd.args();
         assert!(args.contains(&"--tmux".to_string()));
-    }
-
-    // ─── shell_quote unit tests (#455) ───
-
-    #[test]
-    fn shell_quote_plain_word_is_unchanged() {
-        assert_eq!(shell_quote("simple"), "simple");
-        assert_eq!(shell_quote(""), "");
-        assert_eq!(shell_quote("file.rs"), "file.rs");
-    }
-
-    #[test]
-    fn shell_quote_whitespace_gets_single_quoted() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-        assert_eq!(shell_quote("a\tb"), "'a\tb'");
-    }
-
-    #[test]
-    fn shell_quote_metacharacters_get_quoted() {
-        assert_eq!(shell_quote("a|b"), "'a|b'");
-        assert_eq!(shell_quote("$VAR"), "'$VAR'");
-        assert_eq!(shell_quote("a;b"), "'a;b'");
-        assert_eq!(shell_quote("(x)"), "'(x)'");
-    }
-
-    #[test]
-    fn shell_quote_embedded_single_quote_is_escaped() {
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-    }
-
-    #[test]
-    fn shell_quote_double_quote_gets_single_quoted() {
-        assert_eq!(shell_quote(r#"say "hi""#), r#"'say "hi"'"#);
     }
 }
