@@ -19,6 +19,18 @@ use tracing::{debug, warn};
 use crate::Claude;
 use crate::error::{Error, Result};
 
+/// Assemble the full argv passed to the CLI binary: the client's
+/// global args followed by the command's own args.
+///
+/// Single assembly path shared by every exec entry point and
+/// [`QueryCommand::to_command_string`](crate::QueryCommand::to_command_string),
+/// so a rendered preview cannot drift from what actually spawns.
+pub(crate) fn full_command_args(claude: &Claude, args: Vec<String>) -> Vec<String> {
+    let mut command_args = claude.global_args.clone();
+    command_args.extend(args);
+    command_args
+}
+
 /// Raw output from a claude CLI invocation.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -79,9 +91,7 @@ async fn run_claude_with_stdin_prompt_internal(
     args: Vec<String>,
     stdin_content: String,
 ) -> Result<CommandOutput> {
-    let mut command_args = Vec::new();
-    command_args.extend(claude.global_args.clone());
-    command_args.extend(args);
+    let command_args = full_command_args(claude, args);
 
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt)");
 
@@ -297,13 +307,7 @@ async fn run_with_timeout_stdin(
 
 #[cfg(feature = "async")]
 async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
-    let mut command_args = Vec::new();
-
-    // Global args first (before subcommand)
-    command_args.extend(claude.global_args.clone());
-
-    // Then command-specific args
-    command_args.extend(args);
+    let command_args = full_command_args(claude, args);
 
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command");
 
@@ -634,9 +638,7 @@ pub fn run_claude_with_stdin_prompt_sync(
     args: Vec<String>,
     stdin_content: String,
 ) -> Result<CommandOutput> {
-    let mut command_args = Vec::new();
-    command_args.extend(claude.global_args.clone());
-    command_args.extend(args);
+    let command_args = full_command_args(claude, args);
 
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt, sync)");
 
@@ -845,9 +847,7 @@ fn run_with_timeout_stdin_sync(
 
 #[cfg(feature = "sync")]
 fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
-    let mut command_args = Vec::new();
-    command_args.extend(claude.global_args.clone());
-    command_args.extend(args);
+    let command_args = full_command_args(claude, args);
 
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (sync)");
 
@@ -1184,6 +1184,28 @@ mod tests {
             .binary(path)
             .build()
             .expect("build client")
+    }
+
+    #[test]
+    fn full_command_args_puts_global_args_first() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .arg("--debug")
+            .arg("--verbose")
+            .build()
+            .expect("build client");
+        let args = full_command_args(&claude, vec!["--print".to_string(), "hi".to_string()]);
+        assert_eq!(args, ["--debug", "--verbose", "--print", "hi"]);
+    }
+
+    #[test]
+    fn full_command_args_without_global_args_is_passthrough() {
+        let claude = Claude::builder()
+            .binary("/usr/local/bin/claude")
+            .build()
+            .expect("build client");
+        let args = full_command_args(&claude, vec!["--print".to_string()]);
+        assert_eq!(args, ["--print"]);
     }
 
     // Serializes the env-scrub tests, which mutate process-global env.
