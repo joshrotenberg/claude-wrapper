@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.3](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.2...v0.13.3) - 2026-07-17
+
+### Added
+
+- *(duplex)* DuplexOptions::to_command_string preview (parity with QueryCommand) ([#704](https://github.com/joshrotenberg/claude-wrapper/pull/704))
+- *(cr)* streaming output, auto by TTY ([#702](https://github.com/joshrotenberg/claude-wrapper/pull/702))
+- *(cr)* CR_PROFILE env, --session-id, and a config subcommand ([#701](https://github.com/joshrotenberg/claude-wrapper/pull/701))
+
+### Fixed
+
+- *(query)* include global args in to_command_string ([#706](https://github.com/joshrotenberg/claude-wrapper/pull/706))
+- route all spawn paths through a widened ETXTBSY retry ([#697](https://github.com/joshrotenberg/claude-wrapper/pull/697))
+
+### Other
+
+- cr, a minimal config-driven CLI over the wrapper (evaluation, do not merge) ([#699](https://github.com/joshrotenberg/claude-wrapper/pull/699))
+
 ## [0.13.2](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.1...v0.13.2) - 2026-07-13
 
 ### Added
