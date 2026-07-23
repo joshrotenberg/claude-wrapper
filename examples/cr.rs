@@ -7,14 +7,19 @@
 //!
 //! What it demonstrates:
 //! - the mocked `cr` flag surface, rendered by clap (`cr --help`)
-//! - TOML profiles with `defaults < profile < CLI` layering
+//! - per-option layering `defaults < profile < CR_<KEY> env < CLI flag`
+//! - alias profiles: a `[profiles.NAME]` that carries a `prompt` template is
+//!   invocable positionally (`cr review foo.rs`), with `{{args}}`/`{{1}}`/
+//!   `{{stdin}}` substitution
+//! - `-e` editor compose ($VISUAL/$EDITOR on a `.md` scratch file)
 //! - `--explain` (dry-run: print the exact `claude` command), no spawn
-//! - `--save NAME` (creation-by-use: capture resolved flags into a profile)
+//! - `--save NAME` (creation-by-use: capture resolved flags, and a supplied
+//!   prompt, into a profile)
 //! - the cost/turns footer, from the parsed `QueryResult`
 //!
-//! Deliberately NOT in the spike: `-e` editor compose, worktree lifecycle, the
-//! composition family (`--attach`/`--git-*`). Wiring those is a one-liner each
-//! against the wrapper; they're omitted to keep the surface honest.
+//! Deliberately NOT in the spike: worktree lifecycle, and the composition
+//! family (`--attach`/`--git-*`, file prepend/append) -- cr stays passthrough-
+//! thin and does no host-side prompt assembly beyond template substitution.
 //!
 //! Run:
 //!   cargo run --example cr --no-default-features \
@@ -55,8 +60,14 @@ enum Command {
 
 #[derive(clap::Args, Debug, Default)]
 struct RunArgs {
-    /// Prompt text. Omit to read stdin; or use -f / -e.
+    /// Prompt text, or an alias-profile name (see `cr profiles`). Omit to read
+    /// stdin; or use -f / -e.
+    #[arg(value_name = "PROMPT_OR_ALIAS")]
     prompt: Option<String>,
+
+    /// Template arguments for an alias profile (`{{args}}`, `{{1}}`, ...).
+    #[arg(value_name = "ARG", help_heading = "Prompt")]
+    extra: Vec<String>,
 
     /// Read the prompt from a file.
     #[arg(short = 'f', long, value_name = "PATH", help_heading = "Prompt")]
@@ -154,6 +165,11 @@ struct RunArgs {
 /// flags (prompt, session, cwd, output mode) are not profile state.
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 struct Settings {
+    /// A saved prompt template. A profile with a `prompt` is an *alias*:
+    /// invocable positionally (`cr NAME [args]`) with `{{args}}`/`{{N}}`/
+    /// `{{stdin}}` substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +192,9 @@ impl Settings {
     /// Overlay `over` onto `self`: any field set in `over` wins. This is the
     /// whole layering mechanism -- `defaults.overlay(profile).overlay(cli)`.
     fn overlay(mut self, over: &Settings) -> Settings {
+        if over.prompt.is_some() {
+            self.prompt = over.prompt.clone();
+        }
         if over.model.is_some() {
             self.model = over.model.clone();
         }
@@ -231,6 +250,146 @@ fn config_paths() -> (Option<PathBuf>, PathBuf) {
     (user, PathBuf::from("cr.toml"))
 }
 
+/// The `CR_<KEY>` env layer: a partial `Settings` read from the environment,
+/// overlaid between the config file and the CLI flags (so `file < env < flag`).
+/// Every profile-able option has a mirror; `CR_PROFILE` is separate (it selects
+/// a profile, it is not an option value).
+fn env_settings() -> Settings {
+    let max_budget_usd = match env_str("CR_MAX_BUDGET_USD") {
+        Some(v) => match v.parse() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("cr: ignoring non-numeric CR_MAX_BUDGET_USD={v:?}");
+                None
+            }
+        },
+        None => None,
+    };
+    let allowed_tools = env_str("CR_ALLOWED_TOOLS")
+        .map(|v| {
+            v.split([',', ' '])
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Settings {
+        prompt: None,
+        model: env_str("CR_MODEL"),
+        effort: env_str("CR_EFFORT"),
+        hermetic: env_bool("CR_HERMETIC"),
+        worktree: env_bool("CR_WORKTREE"),
+        agent: env_str("CR_AGENT"),
+        append_system_prompt: env_str("CR_APPEND_SYSTEM_PROMPT"),
+        max_budget_usd,
+        allowed_tools,
+    }
+}
+
+fn env_str(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// Parse a boolean env var. `1|true|yes|on` -> true, `0|false|no|off` -> false;
+/// anything else (or unset) is treated as unset, with a warning for garbage.
+fn env_bool(key: &str) -> Option<bool> {
+    let v = env_str(key)?;
+    match v.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            eprintln!("cr: ignoring non-boolean {key}={v:?}");
+            None
+        }
+    }
+}
+
+/// The CLI-flag layer as a partial `Settings` (the top of `file < env < flag`).
+/// Only the flags that map to a profile-able option appear here; `hermetic` and
+/// `worktree` are one-way (a flag can turn them on, env/file can set either).
+fn cli_settings(args: &RunArgs) -> Settings {
+    Settings {
+        prompt: None,
+        model: args.model.clone(),
+        effort: args.effort.clone(),
+        hermetic: if args.hermetic { Some(true) } else { None },
+        worktree: if args.worktree || args.worktree_name.is_some() {
+            Some(true)
+        } else {
+            None
+        },
+        agent: None,
+        append_system_prompt: None,
+        max_budget_usd: None,
+        allowed_tools: Vec::new(),
+    }
+}
+
+/// Look up a profile by name: project profiles shadow user profiles.
+fn lookup_profile<'a>(
+    project: &'a ConfigFile,
+    user: &'a ConfigFile,
+    name: &str,
+) -> Option<&'a Settings> {
+    project
+        .profiles
+        .get(name)
+        .or_else(|| user.profiles.get(name))
+}
+
+/// Substitute a profile's prompt template. `{{args}}` -> all args joined,
+/// `{{1}}`..`{{9}}` -> the Nth arg, `{{stdin}}` -> piped stdin (read only when
+/// referenced). A template with no `{{...}}` placeholder appends the args.
+fn render_template(template: &str, args: &[String]) -> anyhow::Result<String> {
+    if !template.contains("{{") {
+        return Ok(if args.is_empty() {
+            template.to_string()
+        } else {
+            format!("{template}\n\n{}", args.join(" "))
+        });
+    }
+    let mut out = template.replace("{{args}}", &args.join(" "));
+    for (i, a) in args.iter().enumerate() {
+        out = out.replace(&format!("{{{{{}}}}}", i + 1), a);
+    }
+    if out.contains("{{stdin}}") {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        out = out.replace("{{stdin}}", buf.trim_end_matches('\n'));
+    }
+    Ok(out)
+}
+
+/// Compose a prompt in `$VISUAL`/`$EDITOR` (fallback `vi`) on a `.md` scratch
+/// file. Errors on a non-zero editor exit or an empty buffer.
+fn compose_in_editor() -> anyhow::Result<String> {
+    let tmp = tempfile::Builder::new()
+        .prefix("cr-prompt-")
+        .suffix(".md")
+        .tempfile()?;
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty $EDITOR"))?;
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(tmp.path())
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("editor exited with {status}");
+    }
+    let body = std::fs::read_to_string(tmp.path())?;
+    let trimmed = body.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("editor returned an empty prompt");
+    }
+    Ok(trimmed)
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let (user_path, project_path) = config_paths();
@@ -276,7 +435,11 @@ fn cmd_profiles(user: &ConfigFile, project: &ConfigFile) -> std::process::ExitCo
         } else {
             ""
         };
-        println!("{name}  [{source}]{star}");
+        let alias = lookup_profile(project, user, name)
+            .filter(|p| p.prompt.is_some())
+            .map(|_| " (alias)")
+            .unwrap_or("");
+        println!("{name}  [{source}]{star}{alias}");
     }
     std::process::ExitCode::SUCCESS
 }
@@ -314,7 +477,31 @@ fn run(
     project: &ConfigFile,
     project_path: &Path,
 ) -> anyhow::Result<std::process::ExitCode> {
-    // 1. Resolve settings: defaults < profile < CLI.
+    // 1. Alias dispatch: a bare first positional that names a profile carrying
+    //    a `prompt` template runs that profile, with the rest as template args.
+    //    Only when nothing else already fixes the prompt or the profile.
+    let alias = if args.no_profile || args.profile.is_some() || args.file.is_some() || args.editor {
+        None
+    } else if let Some(word) = &args.prompt {
+        lookup_profile(project, user, word)
+            .filter(|p| p.prompt.is_some())
+            .map(|_| word.clone())
+    } else {
+        None
+    };
+
+    // Extra positionals are template args; they only make sense in alias mode.
+    if alias.is_none() && !args.extra.is_empty() {
+        let joined = args.extra.join(" ");
+        match &args.prompt {
+            Some(w) => anyhow::bail!(
+                "unexpected arguments after {w:?}: {joined} ({w:?} is not an alias profile)"
+            ),
+            None => anyhow::bail!("unexpected arguments: {joined}"),
+        }
+    }
+
+    // 2. Resolve settings, low to high: defaults < profile < CR_<KEY> env < flag.
     let mut settings = Settings::default();
     if let Some(d) = &user.defaults {
         settings = settings.overlay(d);
@@ -323,8 +510,11 @@ fn run(
         settings = settings.overlay(d);
     }
 
-    // Profile selection: --profile > CR_PROFILE > project default > user default.
-    let active = if args.no_profile {
+    // Profile selection: alias name > --profile > CR_PROFILE > project default
+    // > user default. (An alias invocation is an explicit selection.)
+    let active = if let Some(name) = &alias {
+        Some(name.clone())
+    } else if args.no_profile {
         None
     } else {
         args.profile
@@ -334,39 +524,35 @@ fn run(
             .or_else(|| user.default_profile.clone())
     };
     if let Some(name) = &active {
-        let p = project
-            .profiles
-            .get(name)
-            .or_else(|| user.profiles.get(name));
-        match p {
+        match lookup_profile(project, user, name) {
             Some(p) => settings = settings.overlay(p),
             None => anyhow::bail!("unknown profile: {name}"),
         }
     }
 
-    // CLI flags override the profile.
-    if args.model.is_some() {
-        settings.model = args.model.clone();
-    }
-    if args.effort.is_some() {
-        settings.effort = args.effort.clone();
-    }
-    if args.hermetic {
-        settings.hermetic = Some(true);
-    }
-    if args.worktree || args.worktree_name.is_some() {
-        settings.worktree = Some(true);
-    }
+    // Env then flags: each wins over the layer below it, per option.
+    settings = settings.overlay(&env_settings());
+    settings = settings.overlay(&cli_settings(&args));
 
-    // 2. --save: capture and exit before doing any work.
+    // 3. --save: capture and exit before doing any work. A supplied prompt (a
+    //    positional string or -f file, but never stdin) is saved as the alias
+    //    `prompt`, so `cr "Review {{args}}" --save review` mints an alias.
     if let Some(name) = &args.save {
-        save_profile(project_path, name, &settings)?;
+        let mut to_save = settings.clone();
+        if let Some(p) = &args.prompt {
+            to_save.prompt = Some(p.clone());
+        } else if let Some(f) = &args.file {
+            to_save.prompt = Some(std::fs::read_to_string(f)?);
+        }
+        save_profile(project_path, name, &to_save)?;
         println!("saved [profiles.{name}] to {}", project_path.display());
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    // 3. Resolve the prompt (file > positional > stdin).
-    let prompt = resolve_prompt(&args)?;
+    // 4. Resolve the prompt. Explicit sources (editor, -f, positional) win;
+    //    otherwise an active profile's `prompt` template is the default;
+    //    otherwise stdin. In alias mode the template is rendered with the args.
+    let prompt = resolve_prompt(&args, &settings, alias.is_some())?;
 
     // 4. Build the Claude client (cwd) and the query.
     let mut builder = Claude::builder();
@@ -509,21 +695,30 @@ fn stream_run(claude: &Claude, cmd: &QueryCommand) -> anyhow::Result<claude_wrap
     }
 }
 
-fn resolve_prompt(args: &RunArgs) -> anyhow::Result<String> {
+fn resolve_prompt(args: &RunArgs, settings: &Settings, alias: bool) -> anyhow::Result<String> {
     if args.editor {
-        anyhow::bail!("-e/--editor is not wired in this spike; pass a prompt or pipe stdin");
+        return compose_in_editor();
     }
     if let Some(f) = &args.file {
         return Ok(std::fs::read_to_string(f)?);
     }
+    if alias {
+        // The positional was the alias name; render its template with the args.
+        let template = settings.prompt.as_deref().unwrap_or_default();
+        return render_template(template, &args.extra);
+    }
     if let Some(p) = &args.prompt {
         return Ok(p.clone());
+    }
+    // No explicit prompt: an active profile's template is the default.
+    if let Some(template) = &settings.prompt {
+        return render_template(template, &args.extra);
     }
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
     if buf.trim().is_empty() {
-        anyhow::bail!("no prompt: pass a positional prompt, -f FILE, or pipe stdin");
+        anyhow::bail!("no prompt: pass a positional prompt, -f FILE, -e, or pipe stdin");
     }
     Ok(buf)
 }
