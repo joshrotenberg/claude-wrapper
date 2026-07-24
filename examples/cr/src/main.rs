@@ -1,13 +1,11 @@
-//! `cr` -- a spike of a minimal, config-driven CLI over `claude-wrapper`.
+//! `cr` -- a config-driven CLI over `claude-wrapper`.
 //!
-//! This is an EVALUATION PROTOTYPE, not a shipped binary. It exists to answer
-//! one question: is a curated "profiles + a handful of flags" front door over
-//! the wrapper genuinely simpler than the full roba surface, or does it just
-//! move the complexity around?
+//! A saved `claude -p` you can re-run: name a bundle of flags (and optionally a
+//! prompt) as a profile, then repeat it with a word. One concept -- the profile
+//! -- carries the whole surface.
 //!
-//! What it demonstrates:
-//! - the mocked `cr` flag surface, rendered by clap (`cr --help`)
-//! - per-option layering `defaults < profile < CR_<KEY> env < CLI flag`
+//! - per-option layering `defaults < profile < CR_<KEY> env < CLI flag`; an
+//!   explicit flag always wins
 //! - alias profiles: a `[profiles.NAME]` that carries a `prompt` template is
 //!   invocable positionally (`cr review foo.rs`), with `{{args}}`/`{{1}}`/
 //!   `{{stdin}}` substitution
@@ -17,14 +15,11 @@
 //!   prompt, into a profile)
 //! - the cost/turns footer, from the parsed `QueryResult`
 //!
-//! Deliberately NOT in the spike: worktree lifecycle, and the composition
-//! family (`--attach`/`--git-*`, file prepend/append) -- cr stays passthrough-
-//! thin and does no host-side prompt assembly beyond template substitution.
+//! Stays passthrough-thin: no host-side prompt assembly beyond template
+//! substitution (no file/git composition).
 //!
-//! Run:
-//!   cargo run --example cr --no-default-features \
-//!     --features sync,json,tempfile -- --help
-//!   cargo run --example cr ... -- --profile cheap --explain "summarize this"
+//! Install:  `cargo install claude-cr`  (installs the `cr` binary)
+//! Run:      `cr --help`  /  `cr --profile cheap --explain "summarize this"`
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -242,7 +237,7 @@ fn load_config(path: &Path) -> ConfigFile {
 }
 
 /// User config (`~/.config/cr/config.toml`) is the base; project (`./cr.toml`)
-/// layers on top. Two files, no walk-up in the spike.
+/// layers on top. Two files, no walk-up.
 fn config_paths() -> (Option<PathBuf>, PathBuf) {
     let user = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".config/cr/config.toml"))
