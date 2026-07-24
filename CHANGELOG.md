@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.4](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.3...v0.13.4) - 2026-07-24
+
+### Added
+
+- *(cr)* env precedence, alias profiles, editor compose; ship as installable crate claude-cr ([#715](https://github.com/joshrotenberg/claude-wrapper/pull/715))
+
+### Other
+
+- bump the serde-ecosystem group across 1 directory with 2 updates ([#708](https://github.com/joshrotenberg/claude-wrapper/pull/708))
+- bump toml from 0.8.23 to 1.1.3+spec-1.1.0 ([#712](https://github.com/joshrotenberg/claude-wrapper/pull/712))
+
 ## [0.13.3](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.2...v0.13.3) - 2026-07-17
 
 ### Added
