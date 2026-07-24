@@ -6,18 +6,24 @@ Guidance for AI assistants working on this repo.
 
 `claude-wrapper` is a type-safe Rust wrapper around the Claude Code CLI. Each subcommand is a builder that produces a typed result. Execution is via tokio (default) or `std::thread` (with the `sync` feature). Built in: long-lived `DuplexSession` for hosts (one child held open across turns; mid-turn interrupts, permission handlers, broadcast subscribers), transient `Session` for short-lived processes (subprocess-per-turn with `--resume`, cumulative cost + history, optional `BudgetTracker` hard-stops, streaming), typed tool-permission patterns (`ToolPattern`), retry policy, and an `McpConfigBuilder` for programmatic `.mcp.json` generation. It also exposes a read-side introspection layer that parses Claude Code's on-disk state (sessions, agents, skills, custom commands, settings, background jobs, worktrees) directly, without spawning the CLI.
 
-This is the only crate in the repo.
+The repo is a Cargo workspace: the root `claude-wrapper` library plus one member,
+`examples/cr` (the `cr` CLI), which is built on the library and published separately.
 
 ## Layout
 
-Flat single-crate layout:
+Cargo workspace; the root library crate keeps a flat layout:
 
 ```
-Cargo.toml        # package + deps + feature flags
+Cargo.toml        # workspace root + claude-wrapper package + deps + feature flags
 src/              # library
 tests/            # integration tests + fake-claude.sh
-examples/         # runnable examples (async-only)
+examples/         # runnable examples (async-only, single-file)
+examples/cr/      # member crate `claude-cr`: the `cr` CLI (sync API); own Cargo.toml + README
 ```
+
+The workspace has a root package, so bare `cargo <cmd>` operates on `claude-wrapper`
+only. Target the CLI explicitly with `-p claude-cr` (CI runs a dedicated clippy/build
+step for it).
 
 ## Build and test
 
@@ -199,9 +205,11 @@ There is no sync twin of `Session` yet. Sync callers compose `Session`-like stat
 
 Releases are driven by [`release-plz`](https://github.com/release-plz/release-plz):
 
-- `release-plz.toml` at the repo root configures the release for `claude-wrapper`
-- On every push to `main`, the `release-plz` workflow updates a long-running "chore: release" PR with the pending version bump + changelog
-- Merging that PR tags `v{version}`, creates a GitHub release, and publishes to crates.io
+- `release-plz.toml` at the repo root configures the release for both workspace
+  crates: `claude-wrapper` (tag `v{version}`, changelog `CHANGELOG.md`) and
+  `claude-cr` (tag `cr-v{version}`, changelog `examples/cr/CHANGELOG.md`)
+- On every push to `main`, the `release-plz` workflow updates a long-running "chore: release" PR with the pending version bump + changelog, per crate
+- Merging that PR tags the released crate(s), creates GitHub release(s), and publishes to crates.io. The two crates version independently; `claude-cr` depends on `claude-wrapper` by version, so a library release it needs must land first
 
 ## CLI coverage
 
