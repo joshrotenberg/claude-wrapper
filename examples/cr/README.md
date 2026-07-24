@@ -51,6 +51,10 @@ defaults  <  profile  <  CR_<KEY> env var  <  CLI flag
 An explicit flag always wins. `cr config` prints the two paths; `cr config
 --edit` opens the project file in `$EDITOR`.
 
+A fully documented starter config with a handful of useful profiles and aliases
+is in [`cr.sample.toml`](cr.sample.toml). Copy it to `./cr.toml` or
+`~/.config/cr/config.toml` and edit.
+
 ```toml
 # cr.toml
 default_profile = "cheap"
