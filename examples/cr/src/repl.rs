@@ -9,8 +9,8 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use claude_wrapper::Claude;
 use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
+use claude_wrapper::{Claude, ClaudeCommand};
 use nu_ansi_term::Color;
 use reedline::{
     ColumnarMenu, Completer, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
@@ -356,8 +356,50 @@ impl Repl {
         if let Some(rest) = line.strip_prefix('/') {
             return self.command(rest).await;
         }
+        // Shell-style backgrounding: `<prompt> &` launches a detached job.
+        if let Some(bg) = line.strip_suffix('&') {
+            let prompt = bg.trim();
+            if prompt.is_empty() {
+                anyhow::bail!("nothing to run before &");
+            }
+            self.launch_detached(prompt)?;
+            return Ok(false);
+        }
         self.turn(line.to_string()).await?;
         Ok(false)
+    }
+
+    /// Launch the current session's prompt as a detached job (the `&` suffix).
+    /// Inherits the session's settings; if it carries no cap, a conservative
+    /// default is applied since the job runs unattended with tool access.
+    fn launch_detached(&self, prompt: &str) -> anyhow::Result<()> {
+        let s = self.cur();
+        let mut settings = s.settings.clone();
+        let cap = match crate::cap_note(&settings) {
+            Some(c) => c,
+            None => {
+                settings.max_turns = Some(30);
+                "30 turns (default)".to_string()
+            }
+        };
+        let cmd = crate::build_detach_query(prompt, &settings)?;
+        let record = crate::jobs::launch(
+            &self.claude,
+            cmd.args(),
+            None,
+            prompt,
+            Some(s.name.clone()),
+            settings.model.clone(),
+            Some(cap.clone()),
+        )?;
+        eprintln!(
+            "{}",
+            Color::DarkGray.paint(format!(
+                "(job {} launched [{}], cap {}; `cr job {}` to check)",
+                record.id, s.name, cap, record.id
+            ))
+        );
+        Ok(())
     }
 
     async fn loop_(&mut self) -> anyhow::Result<std::process::ExitCode> {
@@ -854,7 +896,8 @@ sessions (run several conversations at once):
   /close [name]                   close a session (current by default)
   /all <prompt>                   send one prompt to every session
 
-Anything not starting with / is sent as a prompt. Ctrl-C cancels a running
-turn; Ctrl-D exits."
+Anything not starting with / is sent as a prompt; end it with ` &` to run it
+as a detached background job (see `cr jobs`). Ctrl-C cancels a running turn;
+Ctrl-D exits."
     );
 }

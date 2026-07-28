@@ -276,12 +276,8 @@ pub fn resolve(selector: &str) -> anyhow::Result<JobRecord> {
     }
 }
 
-/// Render the job list as a table.
+/// Render cr's jobs as rows (no header, no empty message; the caller frames it).
 pub fn render_list(jobs: &[JobRecord]) {
-    if jobs.is_empty() {
-        println!("no jobs (launch one with `cr -d \"<prompt>\"`)");
-        return;
-    }
     for j in jobs {
         let st = status(j);
         let name = j.session_name.as_deref().unwrap_or("-");
@@ -293,6 +289,38 @@ pub fn render_list(jobs: &[JobRecord]) {
             Color::DarkGray.paint(ago(j.created_secs)),
             first_line(&j.prompt),
         );
+    }
+}
+
+/// Also list Claude Code's own background jobs (read-only, via the library's
+/// `jobs` introspection). Best-effort: returns the count printed, or 0 if the
+/// daemon store is absent or unreadable. Marked `(claude)` to distinguish them.
+pub fn render_daemon() -> usize {
+    let Ok(root) = claude_wrapper::jobs::JobsRoot::home() else {
+        return 0;
+    };
+    let Ok(list) = root.list() else {
+        return 0;
+    };
+    for s in &list {
+        let intent = s.intent.as_deref().or(s.name.as_deref()).unwrap_or("");
+        println!(
+            "{:<10} {:<8} {:<10} {}  {}",
+            s.short_id,
+            daemon_state_label(&s.state),
+            "(claude)",
+            Color::DarkGray.paint(s.created_at.clone().unwrap_or_default()),
+            first_line(intent),
+        );
+    }
+    list.len()
+}
+
+fn daemon_state_label(state: &str) -> nu_ansi_term::AnsiString<'static> {
+    match state {
+        "running" => Color::Yellow.paint(state.to_string()),
+        "done" | "completed" => Color::Green.paint(state.to_string()),
+        _ => Color::Red.paint(state.to_string()),
     }
 }
 

@@ -735,16 +735,14 @@ fn cmd_config(user_path: Option<&Path>, project_path: &Path, edit: bool) -> std:
 }
 
 fn cmd_jobs() -> std::process::ExitCode {
-    match jobs::list() {
-        Ok(list) => {
-            jobs::render_list(&list);
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("cr: {e}");
-            std::process::ExitCode::from(1)
-        }
+    let cr_jobs = jobs::list().unwrap_or_default();
+    jobs::render_list(&cr_jobs);
+    // Also surface Claude Code's own background jobs (read-only).
+    let daemon = jobs::render_daemon();
+    if cr_jobs.is_empty() && daemon == 0 {
+        println!("no jobs (launch one with `cr -d \"<prompt>\"`)");
     }
+    std::process::ExitCode::SUCCESS
 }
 
 fn cmd_job(selector: &str, follow: bool, json: bool) -> std::process::ExitCode {

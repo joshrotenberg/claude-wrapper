@@ -76,6 +76,39 @@ cr repl -m haiku -e "explain this crate in one line" -e /cost
 On a pipe (no TTY) the editor is skipped and lines are read from stdin, so
 `printf '...\n/exit\n' | cr repl` also scripts a session.
 
+## Background jobs
+
+A job is a `claude` run that keeps going after cr exits, so you can fire
+long-running, mostly-mechanical agent work, disconnect, and check on it later.
+There is no daemon: cr spawns the run detached (its own process group, stdout
+captured to a journal) and records it under `~/.config/cr/jobs/<id>/`.
+
+```bash
+# Launch and return immediately.
+cr -d --max-turns 40 "find all the bugs in the codebase and file an issue for each"
+# -> job cr-1a2b3c launched, cap 40 turns
+
+# List jobs (cr's, plus Claude Code's own background jobs, read-only).
+cr jobs
+
+# Watch one to completion; --json dumps the raw stream-json.
+cr job cr-1a2b3c --follow
+
+# Reconnect to the finished session and ask about it.
+cr repl --resume <session-id>   # the id `cr job` prints
+```
+
+Because a job runs unattended with tool access, launching requires a cap:
+`--max-budget-usd` or `--max-turns` (from a flag, profile, or config), unless
+you pass `--uncapped`. Jobs are addressed by id, a unique id-prefix, or a
+`--session NAME` label (`cr -d --session nightly "..."`, then `cr --check
+--session nightly`). Inside the REPL, a trailing `&` backgrounds a prompt:
+
+```text
+main:haiku> find and fix the flaky test &
+(job cr-9f2e launched [main], cap 30 turns (default); `cr job cr-9f2e` to check)
+```
+
 ## Config and precedence
 
 `cr` reads two TOML files, low to high:

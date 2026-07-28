@@ -24,6 +24,13 @@ All notable changes to this project will be documented in this file.
   `--disallow-tool`, `--add-dir`, `--mcp-config`, `--fallback-model`,
   `--max-turns`.
 - `cr profiles NAME` prints what a profile resolves to (defaults plus profile).
+- Background jobs: `cr -d "<prompt>"` launches a detached `claude` run (no
+  daemon; own process group, stdout journaled under `~/.config/cr/jobs/`) and
+  returns. `cr jobs` lists them (including Claude Code's own daemon jobs,
+  read-only); `cr job <id>` renders/tails one (`--follow`, `--json`); the REPL
+  `<prompt> &` backgrounds a turn; reconnect with `cr repl --resume <id>`.
+  Launching requires a budget or turn cap (unattended tool access) unless
+  `--uncapped`.
 - `cr repl`: an interactive multi-turn session over `DuplexSession`. Assistant
   text streams live; `/model`, `/effort`, `/profile` retune and respawn with
   `--resume`; `/session new`, `/use`, `/close`, `/all` run several
