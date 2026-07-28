@@ -26,9 +26,11 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, stream_query_sync};
+use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, stream_query};
 use claude_wrapper::{Claude, Effort, OutputFormat, PermissionMode, QueryCommand};
 use serde::{Deserialize, Serialize};
+
+mod repl;
 
 /// A saved `claude -p` you can re-run: isolated, typed, repeatable.
 #[derive(Parser, Debug)]
@@ -54,6 +56,34 @@ enum Command {
         #[arg(long)]
         edit: bool,
     },
+    /// Open an interactive multi-turn session (one `claude` child held open).
+    Repl(ReplArgs),
+}
+
+/// Options that seed the initial REPL session. Everything else (tools,
+/// permissions, budget, ...) comes from the resolved profile/config/env, and
+/// can be retuned live with `/model`, `/effort`, `/profile`.
+#[derive(clap::Args, Debug, Default)]
+struct ReplArgs {
+    /// Apply a named profile to the opening session.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Ignore the auto-applied default profile.
+    #[arg(long)]
+    no_profile: bool,
+
+    /// sonnet | opus | haiku | full model id.
+    #[arg(short = 'm', long, value_name = "MODEL")]
+    model: Option<String>,
+
+    /// low | medium | high | xhigh | max.
+    #[arg(long, value_name = "LEVEL")]
+    effort: Option<String>,
+
+    /// Run as if from PATH (git -C style).
+    #[arg(short = 'C', long, value_name = "PATH")]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Default)]
@@ -321,7 +351,7 @@ impl Settings {
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Default, Clone)]
 struct ConfigFile {
     default_profile: Option<String>,
     defaults: Option<Settings>,
@@ -528,6 +558,8 @@ fn main() -> std::process::ExitCode {
     let user = user_path.as_deref().map(load_config).unwrap_or_default();
     let project = load_config(&project_path);
 
+    // Profiles/config are synchronous; the run and repl paths need the async
+    // runtime (the library's execute/stream/duplex API is tokio-backed).
     match cli.command {
         Some(Command::Profiles { name }) => {
             return cmd_profiles(&user, &project, name.as_deref());
@@ -535,10 +567,25 @@ fn main() -> std::process::ExitCode {
         Some(Command::Config { edit }) => {
             return cmd_config(user_path.as_deref(), &project_path, edit);
         }
-        None => {}
+        _ => {}
     }
 
-    match run(cli.run, &user, &project, &project_path) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cr: failed to start async runtime: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+
+    let result = rt.block_on(async {
+        match cli.command {
+            Some(Command::Repl(args)) => repl::run(args, &user, &project, &project_path).await,
+            _ => run(cli.run, &user, &project, &project_path).await,
+        }
+    });
+
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("cr: {e}");
@@ -636,7 +683,7 @@ fn cmd_config(user_path: Option<&Path>, project_path: &Path, edit: bool) -> std:
     std::process::ExitCode::SUCCESS
 }
 
-fn run(
+async fn run(
     args: RunArgs,
     user: &ConfigFile,
     project: &ConfigFile,
@@ -812,9 +859,9 @@ fn run(
 
     // 6. Run and render.
     let result = if streaming {
-        stream_run(&claude, &cmd)?
+        stream_run(&claude, &cmd).await?
     } else {
-        cmd.execute_json_sync(&claude)?
+        cmd.execute_json(&claude).await?
     };
 
     // Streaming already wrote the answer live; buffered/JSON prints it now.
@@ -840,14 +887,17 @@ fn run(
 
 /// Stream a run, writing assistant text deltas to stdout as they arrive, and
 /// return the final `result` event decoded as a `QueryResult` (for the footer).
-fn stream_run(claude: &Claude, cmd: &QueryCommand) -> anyhow::Result<claude_wrapper::QueryResult> {
+async fn stream_run(
+    claude: &Claude,
+    cmd: &QueryCommand,
+) -> anyhow::Result<claude_wrapper::QueryResult> {
     use std::io::Write;
 
     let mut out = std::io::stdout();
     let mut final_result: Option<claude_wrapper::QueryResult> = None;
     let mut wrote_any = false;
 
-    stream_query_sync(claude, cmd, |ev| {
+    stream_query(claude, cmd, |ev| {
         if let Some(PartialMessageEvent::BlockDelta {
             delta: BlockDelta::Text(t),
             ..
@@ -860,7 +910,8 @@ fn stream_run(claude: &Claude, cmd: &QueryCommand) -> anyhow::Result<claude_wrap
         if ev.is_result() {
             final_result = serde_json::from_value(ev.data.clone()).ok();
         }
-    })?;
+    })
+    .await?;
 
     if wrote_any {
         let _ = writeln!(out);
