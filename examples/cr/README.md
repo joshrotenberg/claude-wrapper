@@ -70,16 +70,25 @@ effort = "low"
 Every profile-able option has a `CR_<KEY>` environment mirror, so CI and
 scripts can override a config value without editing files:
 
-| Env var                    | Sets                    |
-| -------------------------- | ----------------------- |
-| `CR_MODEL`                 | model                   |
-| `CR_EFFORT`                | effort                  |
-| `CR_HERMETIC`              | seal ambient config     |
-| `CR_WORKTREE`              | run in a git worktree   |
-| `CR_AGENT`                 | pin a subagent          |
-| `CR_APPEND_SYSTEM_PROMPT`  | append to system prompt |
-| `CR_MAX_BUDGET_USD`        | per-run budget ceiling  |
-| `CR_ALLOWED_TOOLS`         | allowed tool patterns   |
+| Env var                    | Sets                      |
+| -------------------------- | ------------------------- |
+| `CR_MODEL`                 | model                     |
+| `CR_EFFORT`                | effort                    |
+| `CR_FALLBACK_MODEL`        | model to fall back to     |
+| `CR_HERMETIC`              | seal ambient config       |
+| `CR_WORKTREE`              | run in a git worktree     |
+| `CR_AGENT`                 | pin a subagent            |
+| `CR_APPEND_SYSTEM_PROMPT`  | append to system prompt   |
+| `CR_PERMISSION_MODE`       | permission mode           |
+| `CR_ALLOWED_TOOLS`         | allowed tool patterns     |
+| `CR_DISALLOWED_TOOLS`      | denied tool patterns      |
+| `CR_ADD_DIR`               | extra accessible dirs     |
+| `CR_MCP_CONFIG`            | MCP server config file    |
+| `CR_MAX_TURNS`             | agentic-turn cap          |
+| `CR_MAX_BUDGET_USD`        | per-run budget ceiling    |
+
+List-valued vars (`CR_ALLOWED_TOOLS`, `CR_DISALLOWED_TOOLS`, `CR_ADD_DIR`) split
+on commas or spaces.
 
 `CR_PROFILE` is separate: it selects which profile is active (below an explicit
 `--profile`, above the config's `default_profile`).
@@ -88,11 +97,13 @@ scripts can override a config value without editing files:
 
 A profile is a named bundle of settings. Select one with `--profile NAME`, or
 set `default_profile` to apply it automatically. `cr profiles` lists them and
-marks the default.
+marks the default; `cr profiles NAME` prints what one resolves to (config
+defaults plus that profile) as TOML.
 
 ```bash
 cr --profile cheap "quick question"
 cr profiles
+cr profiles cheap
 ```
 
 `--no-profile` ignores the auto-applied default for one run.
@@ -164,6 +175,30 @@ positional argument, an alias template, or stdin.
 - `-C/--cwd PATH` runs as if from another directory.
 - `--worktree` / `--worktree-name NAME` runs in a fresh git worktree.
 - `--hermetic` seals ambient `~/.claude` config for a reproducible run.
+
+## Tools, permissions, and limits
+
+These are profile-able (config key + `CR_*` env mirror + flag), so a profile can
+be a self-contained, bounded toolkit rather than just a model choice.
+
+- `--permission-mode MODE` sets what the agent may do: `default`, `acceptEdits`,
+  `plan` (read-only), `auto`, `dontAsk`. `--accept-edits` and `--plan` are
+  shortcuts. The `bypassPermissions` mode is deliberately not exposed here.
+- `--allow-tool PATTERN` / `--disallow-tool PATTERN` (each repeatable) gate the
+  toolset. A flag-provided list replaces any from config or env.
+- `--add-dir PATH` (repeatable) grants access to directories outside the cwd.
+- `--mcp-config PATH` loads MCP servers from a config file.
+- `--agent NAME` pins a subagent; `--append-system-prompt TEXT` appends to the
+  system prompt; `--fallback-model MODEL` retries on an overloaded primary.
+- `--max-turns N` caps the agentic loop; `--max-budget-usd USD` caps spend.
+
+```bash
+# A read-only reviewer that can look outside the repo but not run anything.
+cr --plan --disallow-tool Bash --add-dir ../shared "audit this module"
+
+# An editor profile that may apply changes with a spend ceiling.
+cr --profile edit --accept-edits --max-budget-usd 0.50 "rename Foo to Bar"
+```
 
 ## Meta
 

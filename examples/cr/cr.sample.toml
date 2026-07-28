@@ -8,8 +8,10 @@
 # PRECEDENCE  per option, highest wins:
 #               defaults  <  active profile  <  CR_<KEY> env var  <  CLI flag
 # ENV MIRROR  every profile-able key has a CR_<KEY> env var (CR_MODEL,
-#             CR_EFFORT, CR_HERMETIC, CR_WORKTREE, CR_AGENT,
-#             CR_APPEND_SYSTEM_PROMPT, CR_MAX_BUDGET_USD, CR_ALLOWED_TOOLS).
+#             CR_EFFORT, CR_FALLBACK_MODEL, CR_HERMETIC, CR_WORKTREE, CR_AGENT,
+#             CR_APPEND_SYSTEM_PROMPT, CR_PERMISSION_MODE, CR_ALLOWED_TOOLS,
+#             CR_DISALLOWED_TOOLS, CR_ADD_DIR, CR_MCP_CONFIG, CR_MAX_TURNS,
+#             CR_MAX_BUDGET_USD). List vars split on commas or spaces.
 #             CR_PROFILE is separate: it selects which profile is active.
 
 # Auto-apply this profile when none is given on the CLI. Override per run with
@@ -39,12 +41,24 @@ model = "opus"
 effort = "high"
 
 # A sandboxed profile: seal ambient ~/.claude config for a reproducible run,
-# and cap spend. Handy for CI or sharing a repeatable prompt.
+# cap spend and turns, and stay read-only. Handy for CI or sharing a repeatable
+# prompt.
 [profiles.ci]
 model = "sonnet"
 hermetic = true
-max_budget_usd = 0.50
+permission_mode = "plan"          # read-only: no edits, no commands
+max_turns = 12                    # bound the agentic loop
+max_budget_usd = 0.50             # hard spend ceiling
 allowed_tools = ["Read", "Grep", "Glob"]
+
+# An editing profile: auto-accept edits, allow the write tools, but deny the
+# shell, and cap spend. `cr --profile edit "rename Foo to Bar"`.
+[profiles.edit]
+model = "opus"
+permission_mode = "acceptEdits"
+allowed_tools = ["Read", "Edit", "Write"]
+disallowed_tools = ["Bash"]
+max_budget_usd = 1.00
 
 # ===========================================================================
 # Alias profiles: a profile with a `prompt` template. Invoke it by name and

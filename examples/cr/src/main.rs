@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, stream_query_sync};
-use claude_wrapper::{Claude, Effort, OutputFormat, QueryCommand};
+use claude_wrapper::{Claude, Effort, OutputFormat, PermissionMode, QueryCommand};
 use serde::{Deserialize, Serialize};
 
 /// A saved `claude -p` you can re-run: isolated, typed, repeatable.
@@ -43,8 +43,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// List profiles and show what one resolves to.
-    Profiles,
+    /// List profiles, or show what NAME resolves to (defaults + profile).
+    Profiles {
+        /// Print the resolved settings for one profile, as TOML.
+        name: Option<String>,
+    },
     /// Show the config file paths, or open the project one in $EDITOR.
     Config {
         /// Open the project cr.toml in $EDITOR (creating it if absent).
@@ -80,6 +83,18 @@ struct RunArgs {
     #[arg(long, value_name = "LEVEL", help_heading = "Model")]
     effort: Option<String>,
 
+    /// Fall back to this model if the primary is overloaded.
+    #[arg(long, value_name = "MODEL", help_heading = "Model")]
+    fallback_model: Option<String>,
+
+    /// Pin a subagent / persona by name.
+    #[arg(long, value_name = "NAME", help_heading = "Model")]
+    agent: Option<String>,
+
+    /// Append text to the system prompt.
+    #[arg(long, value_name = "TEXT", help_heading = "Model")]
+    append_system_prompt: Option<String>,
+
     /// Full structured result (JSON) instead of prose.
     #[arg(long, help_heading = "Output")]
     json: bool,
@@ -99,6 +114,62 @@ struct RunArgs {
     /// Force buffered output.
     #[arg(long, help_heading = "Output")]
     no_stream: bool,
+
+    /// Allow a tool pattern (repeatable). Replaces any from config/env.
+    #[arg(
+        long = "allow-tool",
+        value_name = "PATTERN",
+        help_heading = "Tools & permissions"
+    )]
+    allow_tool: Vec<String>,
+
+    /// Deny a tool pattern (repeatable). Replaces any from config/env.
+    #[arg(
+        long = "disallow-tool",
+        value_name = "PATTERN",
+        help_heading = "Tools & permissions"
+    )]
+    disallow_tool: Vec<String>,
+
+    /// Permission mode: default | acceptEdits | plan | auto | dontAsk.
+    #[arg(long, value_name = "MODE", help_heading = "Tools & permissions")]
+    permission_mode: Option<String>,
+
+    /// Shortcut for --permission-mode acceptEdits.
+    #[arg(
+        long,
+        help_heading = "Tools & permissions",
+        conflicts_with = "permission_mode"
+    )]
+    accept_edits: bool,
+
+    /// Shortcut for --permission-mode plan (read-only).
+    #[arg(
+        long,
+        help_heading = "Tools & permissions",
+        conflicts_with_all = ["permission_mode", "accept_edits"]
+    )]
+    plan: bool,
+
+    /// Extra directory the agent may access (repeatable).
+    #[arg(
+        long = "add-dir",
+        value_name = "PATH",
+        help_heading = "Tools & permissions"
+    )]
+    add_dir: Vec<String>,
+
+    /// Load MCP servers from a config file.
+    #[arg(long, value_name = "PATH", help_heading = "Tools & permissions")]
+    mcp_config: Option<PathBuf>,
+
+    /// Cap the number of agentic turns.
+    #[arg(long, value_name = "N", help_heading = "Limits")]
+    max_turns: Option<u32>,
+
+    /// Per-run budget ceiling in USD.
+    #[arg(long, value_name = "USD", help_heading = "Limits")]
+    max_budget_usd: Option<f64>,
 
     /// Continue the most recent session in this dir.
     #[arg(long, help_heading = "Session")]
@@ -181,6 +252,20 @@ struct Settings {
     max_budget_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disallowed_tools: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_turns: Option<u32>,
+    /// Permission mode string (`default`/`acceptEdits`/`plan`/`auto`/`dontAsk`);
+    /// validated at command-build time, like `effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_config: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    add_dir: Vec<String>,
 }
 
 impl Settings {
@@ -213,6 +298,24 @@ impl Settings {
         }
         if !over.allowed_tools.is_empty() {
             self.allowed_tools = over.allowed_tools.clone();
+        }
+        if !over.disallowed_tools.is_empty() {
+            self.disallowed_tools = over.disallowed_tools.clone();
+        }
+        if over.max_turns.is_some() {
+            self.max_turns = over.max_turns;
+        }
+        if over.permission_mode.is_some() {
+            self.permission_mode = over.permission_mode.clone();
+        }
+        if over.fallback_model.is_some() {
+            self.fallback_model = over.fallback_model.clone();
+        }
+        if over.mcp_config.is_some() {
+            self.mcp_config = over.mcp_config.clone();
+        }
+        if !over.add_dir.is_empty() {
+            self.add_dir = over.add_dir.clone();
         }
         self
     }
@@ -260,14 +363,16 @@ fn env_settings() -> Settings {
         },
         None => None,
     };
-    let allowed_tools = env_str("CR_ALLOWED_TOOLS")
-        .map(|v| {
-            v.split([',', ' '])
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let max_turns = match env_str("CR_MAX_TURNS") {
+        Some(v) => match v.parse() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("cr: ignoring non-numeric CR_MAX_TURNS={v:?}");
+                None
+            }
+        },
+        None => None,
+    };
     Settings {
         prompt: None,
         model: env_str("CR_MODEL"),
@@ -277,12 +382,30 @@ fn env_settings() -> Settings {
         agent: env_str("CR_AGENT"),
         append_system_prompt: env_str("CR_APPEND_SYSTEM_PROMPT"),
         max_budget_usd,
-        allowed_tools,
+        allowed_tools: env_list("CR_ALLOWED_TOOLS"),
+        disallowed_tools: env_list("CR_DISALLOWED_TOOLS"),
+        max_turns,
+        permission_mode: env_str("CR_PERMISSION_MODE"),
+        fallback_model: env_str("CR_FALLBACK_MODEL"),
+        mcp_config: env_str("CR_MCP_CONFIG"),
+        add_dir: env_list("CR_ADD_DIR"),
     }
 }
 
 fn env_str(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// A comma/space-separated list env var (`CR_ALLOWED_TOOLS`, `CR_ADD_DIR`, ...).
+fn env_list(key: &str) -> Vec<String> {
+    env_str(key)
+        .map(|v| {
+            v.split([',', ' '])
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse a boolean env var. `1|true|yes|on` -> true, `0|false|no|off` -> false;
@@ -300,9 +423,17 @@ fn env_bool(key: &str) -> Option<bool> {
 }
 
 /// The CLI-flag layer as a partial `Settings` (the top of `file < env < flag`).
-/// Only the flags that map to a profile-able option appear here; `hermetic` and
-/// `worktree` are one-way (a flag can turn them on, env/file can set either).
+/// Every profile-able option has a flag here, so an explicit flag always wins.
+/// `hermetic` and `worktree` are one-way (a flag can turn them on, env/file can
+/// set either). `--accept-edits`/`--plan` are shortcuts for `--permission-mode`.
 fn cli_settings(args: &RunArgs) -> Settings {
+    let permission_mode = if args.plan {
+        Some("plan".to_string())
+    } else if args.accept_edits {
+        Some("acceptEdits".to_string())
+    } else {
+        args.permission_mode.clone()
+    };
     Settings {
         prompt: None,
         model: args.model.clone(),
@@ -313,10 +444,16 @@ fn cli_settings(args: &RunArgs) -> Settings {
         } else {
             None
         },
-        agent: None,
-        append_system_prompt: None,
-        max_budget_usd: None,
-        allowed_tools: Vec::new(),
+        agent: args.agent.clone(),
+        append_system_prompt: args.append_system_prompt.clone(),
+        max_budget_usd: args.max_budget_usd,
+        allowed_tools: args.allow_tool.clone(),
+        disallowed_tools: args.disallow_tool.clone(),
+        max_turns: args.max_turns,
+        permission_mode,
+        fallback_model: args.fallback_model.clone(),
+        mcp_config: args.mcp_config.as_ref().map(|p| p.display().to_string()),
+        add_dir: args.add_dir.clone(),
     }
 }
 
@@ -392,7 +529,9 @@ fn main() -> std::process::ExitCode {
     let project = load_config(&project_path);
 
     match cli.command {
-        Some(Command::Profiles) => return cmd_profiles(&user, &project),
+        Some(Command::Profiles { name }) => {
+            return cmd_profiles(&user, &project, name.as_deref());
+        }
         Some(Command::Config { edit }) => {
             return cmd_config(user_path.as_deref(), &project_path, edit);
         }
@@ -408,7 +547,38 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cmd_profiles(user: &ConfigFile, project: &ConfigFile) -> std::process::ExitCode {
+fn cmd_profiles(
+    user: &ConfigFile,
+    project: &ConfigFile,
+    name: Option<&str>,
+) -> std::process::ExitCode {
+    // `cr profiles NAME`: show what that profile resolves to. Env and per-run
+    // flags are deliberately excluded; this is the profile in isolation, over
+    // the config defaults.
+    if let Some(name) = name {
+        let Some(profile) = lookup_profile(project, user, name) else {
+            eprintln!("unknown profile: {name}");
+            return std::process::ExitCode::from(1);
+        };
+        let mut resolved = Settings::default();
+        if let Some(d) = &user.defaults {
+            resolved = resolved.overlay(d);
+        }
+        if let Some(d) = &project.defaults {
+            resolved = resolved.overlay(d);
+        }
+        resolved = resolved.overlay(profile);
+        match toml::to_string_pretty(&resolved) {
+            Ok(t) if t.trim().is_empty() => println!("{name}: (no settings)"),
+            Ok(t) => print!("{t}"),
+            Err(e) => {
+                eprintln!("cr: {e}");
+                return std::process::ExitCode::from(1);
+            }
+        }
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let mut names: BTreeMap<&str, &str> = BTreeMap::new();
     for n in user.profiles.keys() {
         names.insert(n, "user");
@@ -602,6 +772,24 @@ fn run(
     if !settings.allowed_tools.is_empty() {
         cmd = cmd.allowed_tools(settings.allowed_tools.iter().map(String::as_str));
     }
+    if !settings.disallowed_tools.is_empty() {
+        cmd = cmd.disallowed_tools(settings.disallowed_tools.iter().map(String::as_str));
+    }
+    if let Some(n) = settings.max_turns {
+        cmd = cmd.max_turns(n);
+    }
+    if let Some(pm) = &settings.permission_mode {
+        cmd = cmd.permission_mode(parse_permission_mode(pm)?);
+    }
+    if let Some(fm) = &settings.fallback_model {
+        cmd = cmd.fallback_model(fm);
+    }
+    if let Some(mc) = &settings.mcp_config {
+        cmd = cmd.mcp_config(mc);
+    }
+    for dir in &settings.add_dir {
+        cmd = cmd.add_dir(dir);
+    }
     if args.r#continue {
         cmd = cmd.continue_session();
     }
@@ -726,6 +914,22 @@ fn parse_effort(s: &str) -> anyhow::Result<Effort> {
         "xhigh" => Effort::Xhigh,
         "max" => Effort::Max,
         other => anyhow::bail!("unknown effort '{other}' (low|medium|high|xhigh|max)"),
+    })
+}
+
+/// Parse a permission-mode string. Accepts the CLI's camelCase spellings and
+/// kebab-case aliases. `bypassPermissions` is intentionally omitted: it is the
+/// library's gated dangerous path, not a routine flag.
+fn parse_permission_mode(s: &str) -> anyhow::Result<PermissionMode> {
+    Ok(match s {
+        "default" => PermissionMode::Default,
+        "acceptEdits" | "accept-edits" => PermissionMode::AcceptEdits,
+        "plan" => PermissionMode::Plan,
+        "auto" => PermissionMode::Auto,
+        "dontAsk" | "dont-ask" => PermissionMode::DontAsk,
+        other => anyhow::bail!(
+            "unknown permission mode '{other}' (default|acceptEdits|plan|auto|dontAsk)"
+        ),
     })
 }
 
