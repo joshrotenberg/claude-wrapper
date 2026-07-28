@@ -89,6 +89,32 @@ impl Session {
     }
 }
 
+/// Resolve `defaults < profile < CR_<KEY> env` into a `Settings` for a session.
+/// (CLI-flag overrides are layered on by the caller.) A saved prompt template
+/// is dropped, since an interactive session has no template to render.
+fn resolve_settings(
+    user: &ConfigFile,
+    project: &ConfigFile,
+    active: Option<&str>,
+) -> anyhow::Result<Settings> {
+    let mut s = Settings::default();
+    if let Some(d) = &user.defaults {
+        s = s.overlay(d);
+    }
+    if let Some(d) = &project.defaults {
+        s = s.overlay(d);
+    }
+    if let Some(name) = active {
+        match crate::lookup_profile(project, user, name) {
+            Some(p) => s = s.overlay(p),
+            None => anyhow::bail!("unknown profile: {name}"),
+        }
+    }
+    s = s.overlay(&crate::env_settings());
+    s.prompt = None;
+    Ok(s)
+}
+
 /// Map a resolved `Settings` onto a `DuplexOptions`. Mirrors the one-shot
 /// command build in `main::run`, minus the per-run/output knobs.
 fn duplex_options(settings: &Settings) -> anyhow::Result<DuplexOptions> {
@@ -154,20 +180,7 @@ pub async fn run(
             .or_else(|| project.default_profile.clone())
             .or_else(|| user.default_profile.clone())
     };
-    let mut settings = Settings::default();
-    if let Some(d) = &user.defaults {
-        settings = settings.overlay(d);
-    }
-    if let Some(d) = &project.defaults {
-        settings = settings.overlay(d);
-    }
-    if let Some(name) = &active {
-        match crate::lookup_profile(project, user, name) {
-            Some(p) => settings = settings.overlay(p),
-            None => anyhow::bail!("unknown profile: {name}"),
-        }
-    }
-    settings = settings.overlay(&crate::env_settings());
+    let mut settings = resolve_settings(user, project, active.as_deref())?;
     // Repl flag overrides (only the seed knobs are exposed as flags here).
     if args.model.is_some() {
         settings.model = args.model.clone();
@@ -175,8 +188,6 @@ pub async fn run(
     if args.effort.is_some() {
         settings.effort = args.effort.clone();
     }
-    // A saved prompt template is meaningless for an interactive session.
-    settings.prompt = None;
 
     let mut builder = Claude::builder();
     if let Some(cwd) = &args.cwd {
@@ -414,20 +425,13 @@ impl Repl {
                 if arg.is_empty() {
                     anyhow::bail!("usage: /profile <name>");
                 }
-                let profile = crate::lookup_profile(&self.project, &self.user, arg)
-                    .ok_or_else(|| anyhow::anyhow!("unknown profile: {arg}"))?
-                    .clone();
-                let mut s = Settings::default();
-                if let Some(d) = &self.user.defaults {
-                    s = s.overlay(d);
-                }
-                if let Some(d) = &self.project.defaults {
-                    s = s.overlay(d);
-                }
-                s = s.overlay(&profile);
-                s.prompt = None;
+                let s = resolve_settings(&self.user, &self.project, Some(arg))?;
                 self.reconfigure(s, false).await?;
             }
+            "session" => self.cmd_session_new(arg).await?,
+            "use" => self.cmd_use(arg)?,
+            "close" => self.cmd_close(arg).await?,
+            "all" => self.cmd_all(arg).await?,
             "editor" => {
                 let prompt = crate::compose_in_editor()?;
                 self.turn(prompt).await?;
@@ -499,6 +503,96 @@ impl Repl {
             );
         }
     }
+
+    /// `/session new <name> [profile]`: open a second (or Nth) conversation and
+    /// select it. With a profile, seed from it; otherwise clone the current
+    /// session's settings.
+    async fn cmd_session_new(&mut self, arg: &str) -> anyhow::Result<()> {
+        let mut it = arg.split_whitespace();
+        match it.next() {
+            Some("new") => {}
+            Some(other) => anyhow::bail!("unknown: /session {other} (only `/session new`)"),
+            None => anyhow::bail!("usage: /session new <name> [profile]"),
+        }
+        let name = it
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("usage: /session new <name> [profile]"))?
+            .to_string();
+        if self.sessions.iter().any(|s| s.name == name) {
+            anyhow::bail!("session {name:?} already exists");
+        }
+        let settings = match it.next() {
+            Some(profile) => resolve_settings(&self.user, &self.project, Some(profile))?,
+            None => self.cur().settings.clone(),
+        };
+        let session = Session::spawn(&self.claude, name.clone(), settings).await?;
+        self.sessions.push(session);
+        self.current = self.sessions.len() - 1;
+        eprintln!(
+            "{}",
+            Color::DarkGray.paint(format!("(opened {name} and selected it)"))
+        );
+        Ok(())
+    }
+
+    /// `/use <name>`: make an existing session current.
+    fn cmd_use(&mut self, arg: &str) -> anyhow::Result<()> {
+        if arg.is_empty() {
+            anyhow::bail!("usage: /use <name>");
+        }
+        let idx = self
+            .sessions
+            .iter()
+            .position(|s| s.name == arg)
+            .ok_or_else(|| anyhow::anyhow!("no session named {arg:?} (see /sessions)"))?;
+        self.current = idx;
+        Ok(())
+    }
+
+    /// `/close [name]`: close a session (the current one by default). The last
+    /// open session cannot be closed; use `/exit` to leave.
+    async fn cmd_close(&mut self, arg: &str) -> anyhow::Result<()> {
+        if self.sessions.len() == 1 {
+            anyhow::bail!("can't close the last session; use /exit to leave");
+        }
+        let idx = if arg.is_empty() {
+            self.current
+        } else {
+            self.sessions
+                .iter()
+                .position(|s| s.name == arg)
+                .ok_or_else(|| anyhow::anyhow!("no session named {arg:?}"))?
+        };
+        let s = self.sessions.remove(idx);
+        let name = s.name.clone();
+        let _ = s.inner.close().await;
+        if idx < self.current {
+            self.current -= 1;
+        }
+        if self.current >= self.sessions.len() {
+            self.current = self.sessions.len() - 1;
+        }
+        eprintln!("{}", Color::DarkGray.paint(format!("(closed {name})")));
+        Ok(())
+    }
+
+    /// `/all <prompt>`: send the same prompt to every session in turn.
+    async fn cmd_all(&mut self, arg: &str) -> anyhow::Result<()> {
+        if arg.is_empty() {
+            anyhow::bail!("usage: /all <prompt>");
+        }
+        let saved = self.current;
+        for i in 0..self.sessions.len() {
+            self.current = i;
+            let name = self.sessions[i].name.clone();
+            eprintln!("{}", Color::Cyan.bold().paint(format!("── {name} ──")));
+            if let Err(e) = self.turn(arg.to_string()).await {
+                eprintln!("{}: {e}", Color::Red.paint("cr"));
+            }
+        }
+        self.current = saved.min(self.sessions.len().saturating_sub(1));
+        Ok(())
+    }
 }
 
 fn build_editor() -> Reedline {
@@ -564,8 +658,14 @@ commands:
   /editor               compose a prompt in $EDITOR
   /cost                 turns and cost for this session
   /history              prompts and answers so far
-  /sessions             list open sessions
   /explain              print the `claude` command this session was spawned with
+
+sessions (run several conversations at once):
+  /session new <name> [profile]   open another session and select it
+  /use <name>                     switch to a session
+  /sessions                       list open sessions
+  /close [name]                   close a session (current by default)
+  /all <prompt>                   send one prompt to every session
 
 Anything not starting with / is sent as a prompt. Ctrl-C cancels a running
 turn; Ctrl-D exits."
