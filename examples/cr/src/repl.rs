@@ -48,14 +48,24 @@ struct Session {
 }
 
 impl Session {
-    async fn spawn(claude: &Claude, name: String, settings: Settings) -> anyhow::Result<Self> {
-        let inner = DuplexSession::spawn(claude, duplex_options(&settings)?).await?;
+    async fn spawn(
+        claude: &Claude,
+        name: String,
+        settings: Settings,
+        resume: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let mut opts = duplex_options(&settings)?;
+        if let Some(id) = &resume {
+            opts = opts.resume(id);
+        }
+        let inner = DuplexSession::spawn(claude, opts).await?;
         Ok(Session {
             name,
             settings,
             inner,
-            session_id: None,
-            resume_id: None,
+            // A resumed session keeps its id so a later /model respawn re-resumes.
+            session_id: resume.clone(),
+            resume_id: resume,
             cost: 0.0,
             turns: 0,
             history: Vec::new(),
@@ -209,7 +219,8 @@ pub async fn run(
     }
     let claude = builder.build()?;
 
-    let session = Session::spawn(&claude, "main".to_string(), settings).await?;
+    let session =
+        Session::spawn(&claude, "main".to_string(), settings, args.resume.clone()).await?;
 
     // -e/--exec: run the given commands in order, then exit. No editor, no
     // banner, so output stays scriptable.
@@ -607,7 +618,7 @@ impl Repl {
             Some(profile) => resolve_settings(&self.user, &self.project, Some(profile))?,
             None => self.cur().settings.clone(),
         };
-        let session = Session::spawn(&self.claude, name.clone(), settings).await?;
+        let session = Session::spawn(&self.claude, name.clone(), settings, None).await?;
         self.sessions.push(session);
         self.current = self.sessions.len() - 1;
         eprintln!(

@@ -27,9 +27,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, stream_query};
-use claude_wrapper::{Claude, Effort, OutputFormat, PermissionMode, QueryCommand};
+use claude_wrapper::{Claude, ClaudeCommand, Effort, OutputFormat, PermissionMode, QueryCommand};
 use serde::{Deserialize, Serialize};
 
+mod jobs;
 mod repl;
 
 /// A saved `claude -p` you can re-run: isolated, typed, repeatable.
@@ -58,6 +59,19 @@ enum Command {
     },
     /// Open an interactive multi-turn session (one `claude` child held open).
     Repl(ReplArgs),
+    /// List background jobs (cr's detached jobs and Claude Code's own).
+    Jobs,
+    /// Show one background job: its progress, cost, and resume command.
+    Job {
+        /// Job id (or a unique prefix), or a session name.
+        selector: String,
+        /// Tail the journal until the job finishes.
+        #[arg(short, long)]
+        follow: bool,
+        /// Print the raw stream-json journal instead of a rendered view.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Options that seed the initial REPL session. Everything else (tools,
@@ -84,6 +98,10 @@ struct ReplArgs {
     /// Run as if from PATH (git -C style).
     #[arg(short = 'C', long, value_name = "PATH")]
     cwd: Option<PathBuf>,
+
+    /// Reconnect to an existing session id (e.g. a finished job's session).
+    #[arg(long, value_name = "ID")]
+    resume: Option<String>,
 
     /// Run a command (a prompt or a /command) then exit; repeatable, in order.
     /// Suppresses the banner. Exit status is non-zero if any command errored.
@@ -251,6 +269,27 @@ struct RunArgs {
     /// Ignore the auto-applied default profile.
     #[arg(long, help_heading = "Profile")]
     no_profile: bool,
+
+    /// Launch this run as a detached background job, then exit (see `cr jobs`).
+    #[arg(short = 'd', long, help_heading = "Background")]
+    detach: bool,
+
+    /// Name/label a detached job, or address one for --check.
+    #[arg(long, value_name = "NAME", help_heading = "Background")]
+    session: Option<String>,
+
+    /// Allow a detached job with no budget or turn cap (unattended, risky).
+    #[arg(long, help_heading = "Background")]
+    uncapped: bool,
+
+    /// Show a background job instead of running: by --session NAME or a
+    /// positional id, or list all if neither is given.
+    #[arg(long, help_heading = "Background")]
+    check: bool,
+
+    /// With --check or a detached run, tail the job until it finishes.
+    #[arg(long, help_heading = "Background")]
+    follow: bool,
 
     /// Print the exact `claude` command it would run, then exit.
     #[arg(long, help_heading = "Meta")]
@@ -572,6 +611,13 @@ fn main() -> std::process::ExitCode {
         Some(Command::Config { edit }) => {
             return cmd_config(user_path.as_deref(), &project_path, edit);
         }
+        // Job inspection reads the on-disk store; no async runtime needed.
+        Some(Command::Jobs) => return cmd_jobs(),
+        Some(Command::Job {
+            ref selector,
+            follow,
+            json,
+        }) => return cmd_job(selector, follow, json),
         _ => {}
     }
 
@@ -688,12 +734,115 @@ fn cmd_config(user_path: Option<&Path>, project_path: &Path, edit: bool) -> std:
     std::process::ExitCode::SUCCESS
 }
 
+fn cmd_jobs() -> std::process::ExitCode {
+    match jobs::list() {
+        Ok(list) => {
+            jobs::render_list(&list);
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cr: {e}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+fn cmd_job(selector: &str, follow: bool, json: bool) -> std::process::ExitCode {
+    match jobs::resolve(selector).and_then(|rec| jobs::render_job(&rec, follow, json)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("cr: {e}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+/// Build the profile-able subset of a `QueryCommand` for a detached job:
+/// stream-json output (the journal), plus the resolved settings.
+fn build_detach_query(prompt: &str, s: &Settings) -> anyhow::Result<QueryCommand> {
+    let mut cmd = QueryCommand::new(prompt.to_string())
+        .output_format(OutputFormat::StreamJson)
+        .verbose(true);
+    if let Some(m) = &s.model {
+        cmd = cmd.model(m);
+    }
+    if let Some(e) = &s.effort {
+        cmd = cmd.effort(parse_effort(e)?);
+    }
+    if s.hermetic == Some(true) {
+        cmd = cmd.hermetic();
+    }
+    if s.worktree == Some(true) {
+        cmd = cmd.worktree();
+    }
+    if let Some(a) = &s.agent {
+        cmd = cmd.agent(a);
+    }
+    if let Some(sp) = &s.append_system_prompt {
+        cmd = cmd.append_system_prompt(sp);
+    }
+    if let Some(b) = s.max_budget_usd {
+        cmd = cmd.max_budget_usd(b);
+    }
+    if !s.allowed_tools.is_empty() {
+        cmd = cmd.allowed_tools(s.allowed_tools.iter().map(String::as_str));
+    }
+    if !s.disallowed_tools.is_empty() {
+        cmd = cmd.disallowed_tools(s.disallowed_tools.iter().map(String::as_str));
+    }
+    if let Some(n) = s.max_turns {
+        cmd = cmd.max_turns(n);
+    }
+    if let Some(pm) = &s.permission_mode {
+        cmd = cmd.permission_mode(parse_permission_mode(pm)?);
+    }
+    if let Some(fm) = &s.fallback_model {
+        cmd = cmd.fallback_model(fm);
+    }
+    if let Some(mc) = &s.mcp_config {
+        cmd = cmd.mcp_config(mc);
+    }
+    for d in &s.add_dir {
+        cmd = cmd.add_dir(d);
+    }
+    Ok(cmd)
+}
+
+/// A human note of the cap in force, for the job record and the launch line.
+fn cap_note(s: &Settings) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(b) = s.max_budget_usd {
+        parts.push(format!("${b:.2}"));
+    }
+    if let Some(n) = s.max_turns {
+        parts.push(format!("{n} turns"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 async fn run(
     args: RunArgs,
     user: &ConfigFile,
     project: &ConfigFile,
     project_path: &Path,
 ) -> anyhow::Result<std::process::ExitCode> {
+    // 0. --check: show a background job (by --session/positional) instead of
+    //    running, or list all if no selector was given.
+    if args.check {
+        let selector = args.session.clone().or_else(|| args.prompt.clone());
+        return match selector {
+            Some(sel) => {
+                let rec = jobs::resolve(&sel)?;
+                jobs::render_job(&rec, args.follow, args.json)?;
+                Ok(std::process::ExitCode::SUCCESS)
+            }
+            None => {
+                jobs::render_list(&jobs::list()?);
+                Ok(std::process::ExitCode::SUCCESS)
+            }
+        };
+    }
+
     // 1. Alias dispatch: a bare first positional that names a profile carrying
     //    a `prompt` template runs that profile, with the rest as template args.
     //    Only when nothing else already fixes the prompt or the profile.
@@ -777,6 +926,43 @@ async fn run(
         builder = builder.working_dir(cwd);
     }
     let claude = builder.build()?;
+
+    // 4b. --detach: launch a background job and exit. Unattended agent work
+    //     with tool access, so require a cap unless --uncapped.
+    if args.detach {
+        let cap = cap_note(&settings);
+        if cap.is_none() && !args.uncapped {
+            anyhow::bail!(
+                "detached jobs run unattended: set a cap (--max-budget-usd or --max-turns, \
+                 or a profile/config default), or pass --uncapped to override"
+            );
+        }
+        let cmd = build_detach_query(&prompt, &settings)?;
+        let record = jobs::launch(
+            &claude,
+            cmd.args(),
+            args.cwd.as_deref(),
+            &prompt,
+            args.session.clone(),
+            settings.model.clone(),
+            cap.clone(),
+        )?;
+        let label = record
+            .session_name
+            .as_deref()
+            .map(|n| format!(" [{n}]"))
+            .unwrap_or_default();
+        let cap_str = match &cap {
+            Some(c) => format!(", cap {c}"),
+            None => " (uncapped)".to_string(),
+        };
+        println!("job {}{label} launched{cap_str}", record.id);
+        eprintln!(
+            "  cr job {}   (add --follow to tail; cr jobs to list)",
+            record.id
+        );
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
 
     // Streaming vs buffered. Structured output can't token-stream, and
     // --no-stream forces buffered; otherwise --stream forces it on, else auto

@@ -227,6 +227,7 @@ dependencies = [
  "anyhow",
  "clap",
  "claude-wrapper",
+ "libc",
  "nu-ansi-term",
  "reedline",
  "serde",
