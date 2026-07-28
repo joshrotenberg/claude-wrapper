@@ -43,6 +43,8 @@ struct Session {
     cost: f64,
     turns: u32,
     history: Vec<(String, String)>,
+    /// The raw `result` JSON of the last turn, for `/json`.
+    last_result: Option<serde_json::Value>,
 }
 
 impl Session {
@@ -57,6 +59,7 @@ impl Session {
             cost: 0.0,
             turns: 0,
             history: Vec::new(),
+            last_result: None,
         })
     }
 
@@ -75,6 +78,7 @@ impl Session {
             cost,
             turns,
             history,
+            last_result,
             inner,
             ..
         } = self;
@@ -94,6 +98,7 @@ impl Session {
             cost: if reset { 0.0 } else { cost },
             turns: if reset { 0 } else { turns },
             history: if reset { Vec::new() } else { history },
+            last_result: if reset { None } else { last_result },
         })
     }
 }
@@ -368,6 +373,9 @@ impl Repl {
     async fn turn(&mut self, prompt: String) -> anyhow::Result<()> {
         use std::io::Write;
         let idx = self.current;
+        if !self.sessions[idx].inner.is_alive() {
+            anyhow::bail!("this session's child has exited; /new to restart it");
+        }
         let echo = prompt.clone();
         let mut printed_any = false;
         let result = {
@@ -436,6 +444,7 @@ impl Repl {
             s.session_id = Some(id.to_string());
         }
         s.history.push((echo, answer));
+        s.last_result = Some(turn.result.clone());
         eprintln!("{}", Color::DarkGray.paint(turn_footer(&turn)));
         Ok(())
     }
@@ -449,6 +458,7 @@ impl Repl {
             "help" | "?" => print_help(),
             "exit" | "quit" | "q" => return Ok(true),
             "cost" => self.cmd_cost(),
+            "json" => self.cmd_json()?,
             "history" => self.cmd_history(),
             "sessions" => self.cmd_sessions(),
             "explain" => {
@@ -539,6 +549,14 @@ impl Repl {
             let total: f64 = self.sessions.iter().map(|s| s.cost).sum();
             println!("total across {} sessions: ${total:.4}", self.sessions.len());
         }
+    }
+
+    fn cmd_json(&self) -> anyhow::Result<()> {
+        match &self.cur().last_result {
+            Some(v) => println!("{}", serde_json::to_string_pretty(v)?),
+            None => println!("(no turns yet)"),
+        }
+        Ok(())
     }
 
     fn cmd_history(&self) {
@@ -661,8 +679,8 @@ impl Repl {
 
 /// The meta-command words, for did-you-mean and completion.
 const COMMANDS: &[&str] = &[
-    "help", "exit", "quit", "cost", "history", "sessions", "explain", "new", "model", "effort",
-    "profile", "session", "use", "close", "all", "editor",
+    "help", "exit", "quit", "cost", "json", "history", "sessions", "explain", "new", "model",
+    "effort", "profile", "session", "use", "close", "all", "editor",
 ];
 
 /// Tab-completion: command words after `/`, and profile names after `/profile`.
@@ -814,6 +832,7 @@ commands:
   /new                  reset the conversation (same settings, empty context)
   /editor               compose a prompt in $EDITOR
   /cost                 turns and cost for this session
+  /json                 the last turn's full result as JSON
   /history              prompts and answers so far
   /explain              print the `claude` command this session was spawned with
 

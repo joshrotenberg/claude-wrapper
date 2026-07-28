@@ -29,4 +29,5 @@ All notable changes to this project will be documented in this file.
   `--resume`; `/session new`, `/use`, `/close`, `/all` run several
   conversations at once; Ctrl-C interrupts a turn. reedline editor on a TTY,
   plain stdin for scripting. Tab-completes commands and profile names, suggests
-  the nearest command on a typo, and `-e/--exec` runs commands then exits.
+  the nearest command on a typo, `/json` prints the last turn's full result, and
+  `-e/--exec` runs commands then exits.
