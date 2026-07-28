@@ -35,6 +35,38 @@ cr --explain "summarize this"
 Every run ends with a footer on stderr: the model that actually billed, turns,
 cost, and wall time. `-q/--quiet` drops it.
 
+## Interactive session
+
+`cr repl` opens a multi-turn session: one `claude` child held open across turns,
+seeded from the same resolved settings a one-shot run uses (`cr repl --profile
+deep`, `cr repl -m opus`). Plain lines are prompts and stream as they arrive;
+lines starting with `/` are meta-commands. Ctrl-C cancels a running turn, Ctrl-D
+exits.
+
+```text
+$ cr repl -m haiku
+cr interactive session (main), model haiku. /help for commands, /exit to quit.
+main:haiku> summarize what this repo does
+...
+main:haiku> /model opus          # respawns, keeps the conversation
+main:opus> /cost
+main: 3 turns, $0.0412
+```
+
+- `/model`, `/effort`, `/profile <name>` retune the session; it respawns with
+  `--resume` so history carries over. `/new` resets to an empty context.
+- `/editor` composes a prompt in `$EDITOR`; `/history`, `/cost`, and `/explain`
+  (the exact spawn command) inspect the session.
+- Several conversations at once: `/session new <name> [profile]` opens another
+  (seeded from a profile, or cloned from the current one), `/use <name>`
+  switches, `/sessions` lists them with per-session cost, `/close [name]` ends
+  one, and `/all <prompt>` fans one prompt across every session. Each is its own
+  child, so they can run different models, tools, and permission modes in
+  parallel.
+
+On a pipe (no TTY) the editor is skipped and lines are read from stdin, so
+`printf '...\n/exit\n' | cr repl` scripts a session.
+
 ## Config and precedence
 
 `cr` reads two TOML files, low to high:

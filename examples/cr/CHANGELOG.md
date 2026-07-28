@@ -24,3 +24,8 @@ All notable changes to this project will be documented in this file.
   `--disallow-tool`, `--add-dir`, `--mcp-config`, `--fallback-model`,
   `--max-turns`.
 - `cr profiles NAME` prints what a profile resolves to (defaults plus profile).
+- `cr repl`: an interactive multi-turn session over `DuplexSession`. Assistant
+  text streams live; `/model`, `/effort`, `/profile` retune and respawn with
+  `--resume`; `/session new`, `/use`, `/close`, `/all` run several
+  conversations at once; Ctrl-C interrupts a turn. reedline editor on a TTY,
+  plain stdin for scripting.
