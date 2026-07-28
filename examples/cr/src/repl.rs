@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use claude_wrapper::Claude;
-use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
 use nu_ansi_term::Color;
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 
@@ -294,27 +294,70 @@ impl Repl {
         Ok(std::process::ExitCode::SUCCESS)
     }
 
-    /// Run one prompt turn against the current session, cancellable with Ctrl-C.
+    /// Run one prompt turn against the current session. Assistant text streams
+    /// to stdout as it arrives; Ctrl-C cancels the turn via `interrupt()`.
     async fn turn(&mut self, prompt: String) -> anyhow::Result<()> {
+        use std::io::Write;
         let idx = self.current;
         let echo = prompt.clone();
+        let mut printed_any = false;
         let result = {
             let session = &self.sessions[idx].inner;
-            tokio::select! {
-                res = session.send(prompt) => Some(res?),
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\n{}", Color::DarkGray.paint("(interrupting...)"));
-                    let _ = session.interrupt().await;
-                    None
+            // Subscribe before the send is polled so no early delta is missed.
+            let mut rx = session.subscribe();
+            let send_fut = session.send(prompt);
+            tokio::pin!(send_fut);
+            let mut out = std::io::stdout();
+            let mut turn = None;
+            loop {
+                tokio::select! {
+                    // Prefer draining text deltas over taking the result, so the
+                    // streamed output is complete before the turn is finalized.
+                    biased;
+                    ev = rx.recv() => {
+                        if let Ok(ev) = ev
+                            && let Some(t) = stream_text_delta(&ev)
+                        {
+                            let _ = write!(out, "{t}");
+                            let _ = out.flush();
+                            printed_any = true;
+                        }
+                    }
+                    res = &mut send_fut => {
+                        turn = Some(res?);
+                        while let Ok(ev) = rx.try_recv() {
+                            if let Some(t) = stream_text_delta(&ev) {
+                                let _ = write!(out, "{t}");
+                                let _ = out.flush();
+                                printed_any = true;
+                            }
+                        }
+                        break;
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n{}", Color::DarkGray.paint("(interrupting...)"));
+                        let _ = session.interrupt().await;
+                        break;
+                    }
                 }
             }
+            turn
         };
         let Some(turn) = result else {
+            if printed_any {
+                println!();
+            }
             return Ok(());
         };
 
         let answer = turn.result_text().unwrap_or("").to_string();
-        println!("{answer}");
+        if printed_any {
+            // Terminate the streamed line.
+            println!();
+        } else {
+            // No partial deltas were emitted; print the buffered answer.
+            println!("{answer}");
+        }
         let s = &mut self.sessions[idx];
         s.turns += 1;
         if let Some(c) = turn.total_cost_usd() {
@@ -467,6 +510,24 @@ fn build_editor() -> Reedline {
         }
     }
     editor
+}
+
+/// Extract an assistant text delta from a streaming event, if it is one.
+/// The duplex spawn runs with partial messages on, so a turn's assistant text
+/// arrives as a run of `content_block_delta`/`text_delta` stream events.
+fn stream_text_delta(ev: &InboundEvent) -> Option<String> {
+    let InboundEvent::StreamEvent(v) = ev else {
+        return None;
+    };
+    let event = v.get("event")?;
+    if event.get("type")?.as_str()? != "content_block_delta" {
+        return None;
+    }
+    let delta = event.get("delta")?;
+    if delta.get("type")?.as_str()? != "text_delta" {
+        return None;
+    }
+    Some(delta.get("text")?.as_str()?.to_string())
 }
 
 fn turn_footer(turn: &claude_wrapper::duplex::TurnResult) -> String {
