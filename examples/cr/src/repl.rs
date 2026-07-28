@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 use claude_wrapper::Claude;
 use claude_wrapper::duplex::{DuplexOptions, DuplexSession, InboundEvent};
 use nu_ansi_term::Color;
-use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
+use reedline::{
+    ColumnarMenu, Completer, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
+    KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span,
+    Suggestion, default_emacs_keybindings,
+};
 
 use crate::{ConfigFile, ReplArgs, Settings};
 
@@ -33,6 +37,9 @@ struct Session {
     /// The CLI-assigned session id from the last turn, for `--resume` on a
     /// respawn. `None` until the first turn completes.
     session_id: Option<String>,
+    /// The `--resume <id>` the live child was actually spawned with, if any, so
+    /// `/explain` reflects the running command rather than a fresh spawn.
+    resume_id: Option<String>,
     cost: f64,
     turns: u32,
     history: Vec<(String, String)>,
@@ -46,6 +53,7 @@ impl Session {
             settings,
             inner,
             session_id: None,
+            resume_id: None,
             cost: 0.0,
             turns: 0,
             history: Vec::new(),
@@ -82,6 +90,7 @@ impl Session {
             settings: new_settings,
             inner,
             session_id: if reset { None } else { session_id },
+            resume_id: resume,
             cost: if reset { 0.0 } else { cost },
             turns: if reset { 0 } else { turns },
             history: if reset { Vec::new() } else { history },
@@ -197,8 +206,40 @@ pub async fn run(
 
     let session = Session::spawn(&claude, "main".to_string(), settings).await?;
 
+    // -e/--exec: run the given commands in order, then exit. No editor, no
+    // banner, so output stays scriptable.
+    if !args.exec.is_empty() {
+        let mut state = Repl {
+            claude,
+            user: user.clone(),
+            project: project.clone(),
+            sessions: vec![session],
+            current: 0,
+            input: Input::Plain,
+        };
+        let mut had_err = false;
+        for cmd in &args.exec {
+            match state.handle_line(cmd).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("{}: {e}", Color::Red.paint("cr"));
+                    had_err = true;
+                }
+            }
+        }
+        for s in state.sessions.drain(..) {
+            let _ = s.inner.close().await;
+        }
+        return Ok(if had_err {
+            std::process::ExitCode::from(1)
+        } else {
+            std::process::ExitCode::SUCCESS
+        });
+    }
+
     let input = if std::io::stdin().is_terminal() {
-        Input::Editor(Box::new(build_editor()))
+        Input::Editor(Box::new(build_editor(profile_names(user, project))))
     } else {
         Input::Plain
     };
@@ -214,6 +255,19 @@ pub async fn run(
 
     state.banner();
     state.loop_().await
+}
+
+/// Every profile name known to either config, for command completion.
+fn profile_names(user: &ConfigFile, project: &ConfigFile) -> Vec<String> {
+    let mut names: Vec<String> = user
+        .profiles
+        .keys()
+        .chain(project.profiles.keys())
+        .cloned()
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The interactive state: the client, a snapshot of config for `/profile`
@@ -276,26 +330,30 @@ impl Repl {
         }
     }
 
+    /// Handle one input line: a `/command` (returns `Ok(true)` to exit) or a
+    /// prompt turn. Shared by the interactive loop and `-e/--exec`.
+    async fn handle_line(&mut self, line: &str) -> anyhow::Result<bool> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(false);
+        }
+        if let Some(rest) = line.strip_prefix('/') {
+            return self.command(rest).await;
+        }
+        self.turn(line.to_string()).await?;
+        Ok(false)
+    }
+
     async fn loop_(&mut self) -> anyhow::Result<std::process::ExitCode> {
         loop {
             let prompt = self.prompt();
             let Some(line) = self.next_line(&prompt) else {
                 break;
             };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix('/') {
-                match self.command(rest).await {
-                    Ok(true) => break,
-                    Ok(false) => {}
-                    Err(e) => eprintln!("{}: {e}", Color::Red.paint("cr")),
-                }
-                continue;
-            }
-            if let Err(e) = self.turn(line.to_string()).await {
-                eprintln!("{}: {e}", Color::Red.paint("cr"));
+            match self.handle_line(&line).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => eprintln!("{}: {e}", Color::Red.paint("cr")),
             }
         }
         // Close every session cleanly on the way out.
@@ -394,10 +452,13 @@ impl Repl {
             "history" => self.cmd_history(),
             "sessions" => self.cmd_sessions(),
             "explain" => {
-                // Rebuild the options from the current settings; this is the
-                // spawn command for a fresh child (a live respawn also adds
-                // --resume <id>).
-                let opts = duplex_options(&self.cur().settings)?;
+                // Rebuild the options from the current settings and reflect the
+                // live child's --resume, so this matches what is actually running.
+                let s = self.cur();
+                let mut opts = duplex_options(&s.settings)?;
+                if let Some(id) = &s.resume_id {
+                    opts = opts.resume(id);
+                }
                 println!("{}", opts.to_command_string(&self.claude));
             }
             "new" => {
@@ -436,7 +497,10 @@ impl Repl {
                 let prompt = crate::compose_in_editor()?;
                 self.turn(prompt).await?;
             }
-            other => anyhow::bail!("unknown command: /{other} (try /help)"),
+            other => match nearest_command(other) {
+                Some(sug) => anyhow::bail!("unknown command: /{other} (did you mean /{sug}?)"),
+                None => anyhow::bail!("unknown command: /{other} (try /help)"),
+            },
         }
         Ok(false)
     }
@@ -595,15 +659,108 @@ impl Repl {
     }
 }
 
-fn build_editor() -> Reedline {
-    let editor = Reedline::create();
+/// The meta-command words, for did-you-mean and completion.
+const COMMANDS: &[&str] = &[
+    "help", "exit", "quit", "cost", "history", "sessions", "explain", "new", "model", "effort",
+    "profile", "session", "use", "close", "all", "editor",
+];
+
+/// Tab-completion: command words after `/`, and profile names after `/profile`.
+struct CrCompleter {
+    profiles: Vec<String>,
+}
+
+impl Completer for CrCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let end = pos.min(line.len());
+        let prefix = &line[..end];
+        let Some(rest) = prefix.strip_prefix('/') else {
+            return Vec::new();
+        };
+        match rest.split_once(char::is_whitespace) {
+            // No space yet: complete the command word (span starts after '/').
+            None => COMMANDS
+                .iter()
+                .filter(|c| c.starts_with(rest))
+                .map(|c| suggestion(c, 1, end))
+                .collect(),
+            // `/profile <partial>`: complete profile names on the last word.
+            Some(("profile", _)) => {
+                let start = prefix.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+                let word = &prefix[start..];
+                self.profiles
+                    .iter()
+                    .filter(|p| p.starts_with(word))
+                    .map(|p| suggestion(p, start, end))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn suggestion(value: &str, start: usize, end: usize) -> Suggestion {
+    Suggestion {
+        value: value.to_string(),
+        span: Span { start, end },
+        append_whitespace: true,
+        ..Suggestion::default()
+    }
+}
+
+fn build_editor(profiles: Vec<String>) -> Reedline {
+    let completer = Box::new(CrCompleter { profiles });
+    let menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    let mut editor = Reedline::create()
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(menu))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)));
     if let Some(home) = std::env::var_os("HOME") {
         let path = PathBuf::from(home).join(".cr_history");
         if let Ok(history) = FileBackedHistory::with_file(2000, path) {
-            return editor.with_history(Box::new(history));
+            editor = editor.with_history(Box::new(history));
         }
     }
     editor
+}
+
+/// The nearest command word to `input` by edit distance, if close enough to be
+/// a plausible typo (scaled to the input length).
+fn nearest_command(input: &str) -> Option<&'static str> {
+    let mut best: Option<(&'static str, usize)> = None;
+    for &c in COMMANDS {
+        let d = levenshtein(input, c);
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((c, d));
+        }
+    }
+    best.filter(|(_, d)| *d <= 2.max(input.len() / 3))
+        .map(|(c, _)| c)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Extract an assistant text delta from a streaming event, if it is one.

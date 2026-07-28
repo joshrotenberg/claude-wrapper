@@ -84,6 +84,11 @@ struct ReplArgs {
     /// Run as if from PATH (git -C style).
     #[arg(short = 'C', long, value_name = "PATH")]
     cwd: Option<PathBuf>,
+
+    /// Run a command (a prompt or a /command) then exit; repeatable, in order.
+    /// Suppresses the banner. Exit status is non-zero if any command errored.
+    #[arg(short = 'e', long = "exec", value_name = "CMD")]
+    exec: Vec<String>,
 }
 
 #[derive(clap::Args, Debug, Default)]

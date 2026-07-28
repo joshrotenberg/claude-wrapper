@@ -64,8 +64,17 @@ main: 3 turns, $0.0412
   child, so they can run different models, tools, and permission modes in
   parallel.
 
+On a TTY, Tab completes `/command` names and (after `/profile`) profile names.
+Unknown commands suggest the nearest match. `-e/--exec <cmd>` runs a command
+(a prompt or a `/command`) then exits, repeatable and in order, with a non-zero
+status if any errored, so a session scripts:
+
+```bash
+cr repl -m haiku -e "explain this crate in one line" -e /cost
+```
+
 On a pipe (no TTY) the editor is skipped and lines are read from stdin, so
-`printf '...\n/exit\n' | cr repl` scripts a session.
+`printf '...\n/exit\n' | cr repl` also scripts a session.
 
 ## Config and precedence
 
