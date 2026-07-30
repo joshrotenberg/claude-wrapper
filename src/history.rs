@@ -41,6 +41,17 @@
 //! Claude Code internal state (observed against CLI 2.1.219) and can
 //! change across CLI versions.
 //!
+//! # Global prompt history
+//!
+//! Separate from per-session transcripts, Claude Code appends one
+//! record per typed prompt (across all projects) to
+//! `~/.claude/history.jsonl`, a sibling of the projects root.
+//! [`HistoryRoot::prompt_history`] reads it as typed
+//! [`PromptHistoryEntry`] values: a pre-filtered stream of human
+//! input with project and session join keys. Its retention differs
+//! from session transcripts; transcripts remain the ground truth
+//! for attribution.
+//!
 //! # Liberal parsing
 //!
 //! Each line is parsed independently; malformed lines are skipped
@@ -562,6 +573,68 @@ impl HistoryRoot {
         })
     }
 
+    /// Read the global prompt history: one entry per typed prompt,
+    /// across all projects, in file (chronological) order.
+    ///
+    /// Claude Code appends to `~/.claude/history.jsonl`, a sibling
+    /// of the projects root, each time the user submits a typed
+    /// prompt. Only typed prompts land there, so this is a
+    /// pre-filtered human-input stream with project and session
+    /// join keys. Retention differs from session transcripts, and
+    /// transcripts remain the ground truth for attribution.
+    ///
+    /// Returns an empty vector when the file does not exist.
+    pub fn prompt_history(&self) -> Result<Vec<PromptHistoryEntry>> {
+        self.prompt_history_with(&ListOptions::default())
+    }
+
+    /// [`Self::prompt_history`] with pagination. Only `offset` and
+    /// `limit` apply; the other [`ListOptions`] fields are ignored.
+    /// Malformed lines are skipped with a tracing warning.
+    pub fn prompt_history_with(&self, opts: &ListOptions) -> Result<Vec<PromptHistoryEntry>> {
+        let Some(parent) = self.path.parent() else {
+            return Ok(Vec::new());
+        };
+        let file_path = parent.join("history.jsonl");
+        if !file_path.is_file() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&file_path)?;
+        let reader = BufReader::new(file);
+        let mut entries = Vec::new();
+        for (lineno, line) in reader.lines().enumerate() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %file_path.display(),
+                        line = lineno + 1,
+                        error = %e,
+                        "history: skipping unreadable prompt-history line",
+                    );
+                    continue;
+                }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match parse_prompt_history_line(trimmed) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %file_path.display(),
+                        line = lineno + 1,
+                        error = %e,
+                        "history: skipping malformed prompt-history line",
+                    );
+                }
+            }
+        }
+        apply_offset_limit(&mut entries, opts);
+        Ok(entries)
+    }
+
     /// The session subdirectory (`projects/<slug>/<session_id>/`),
     /// or `None` when the session exists but has no subdirectory.
     /// Errors with [`Error::History`] when the session id is
@@ -717,6 +790,27 @@ pub struct WorkflowSummary {
     pub script_path: Option<PathBuf>,
     /// Journal file size in bytes.
     pub size_bytes: u64,
+}
+
+/// One record from the global prompt history file
+/// (`~/.claude/history.jsonl`): a prompt the user typed, in any
+/// project. See [`HistoryRoot::prompt_history`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptHistoryEntry {
+    /// The prompt text as displayed.
+    pub display: Option<String>,
+    /// Epoch milliseconds when the prompt was submitted. Note this
+    /// file uses numeric timestamps, unlike the ISO-8601 strings in
+    /// session transcripts.
+    pub timestamp_ms: Option<u64>,
+    /// Absolute path of the project the prompt was typed in.
+    pub project: Option<String>,
+    /// Session the prompt belongs to.
+    pub session_id: Option<String>,
+    /// Any additional fields (e.g. `pastedContents`), keyed as
+    /// Claude Code wrote them.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, Value>,
 }
 
 /// One parsed line from a session `.jsonl`.
@@ -1085,6 +1179,30 @@ fn list_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn parse_prompt_history_line(
+    line: &str,
+) -> std::result::Result<PromptHistoryEntry, serde_json::Error> {
+    let value: Value = serde_json::from_str(line)?;
+    let mut rest = into_map(value);
+    let timestamp_ms = match rest.remove("timestamp") {
+        Some(v) => {
+            let n = v.as_u64();
+            if n.is_none() {
+                rest.insert("timestamp".to_string(), v);
+            }
+            n
+        }
+        None => None,
+    };
+    Ok(PromptHistoryEntry {
+        display: take_string(&mut rest, "display"),
+        timestamp_ms,
+        project: take_string(&mut rest, "project"),
+        session_id: take_string(&mut rest, "sessionId"),
+        rest,
+    })
 }
 
 /// Read and parse the `.meta.json` next to a subagent transcript.
@@ -1551,6 +1669,84 @@ mod tests {
         let v = serde_json::to_value(&entry).expect("serialize");
         assert_eq!(v["kind"], "user");
         assert_eq!(v["promptSource"], "typed");
+    }
+
+    // Prompt-history fixture: `<tmp>/projects` is the root and
+    // `<tmp>/history.jsonl` sits next to it, mirroring ~/.claude.
+    fn prompt_history_fixture(lines: &[&str]) -> (tempfile::TempDir, HistoryRoot) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let mut f = fs::File::create(tmp.path().join("history.jsonl")).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        let root = HistoryRoot::at(projects);
+        (tmp, root)
+    }
+
+    #[test]
+    fn prompt_history_parses_fields_and_keeps_rest() {
+        let (_tmp, root) = prompt_history_fixture(&[
+            r#"{"display":"fix the tests","pastedContents":{"1":"snippet"},"timestamp":1781804723955,"project":"/Users/me/Code/projA","sessionId":"s1","futureField":true}"#,
+        ]);
+        let entries = root.prompt_history().expect("read");
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.display.as_deref(), Some("fix the tests"));
+        assert_eq!(e.timestamp_ms, Some(1781804723955));
+        assert_eq!(e.project.as_deref(), Some("/Users/me/Code/projA"));
+        assert_eq!(e.session_id.as_deref(), Some("s1"));
+        assert_eq!(e.rest["pastedContents"]["1"], "snippet");
+        assert_eq!(e.rest["futureField"], true);
+        for consumed in ["display", "timestamp", "project", "sessionId"] {
+            assert!(
+                !e.rest.contains_key(consumed),
+                "{consumed} leaked into rest"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_history_keeps_mistyped_timestamp_in_rest() {
+        let (_tmp, root) =
+            prompt_history_fixture(&[r#"{"display":"x","timestamp":"not-a-number"}"#]);
+        let entries = root.prompt_history().expect("read");
+        assert_eq!(entries[0].timestamp_ms, None);
+        assert_eq!(entries[0].rest["timestamp"], "not-a-number");
+    }
+
+    #[test]
+    fn prompt_history_skips_malformed_lines_and_paginates() {
+        let (_tmp, root) = prompt_history_fixture(&[
+            r#"{"display":"one","timestamp":1}"#,
+            r#"NOT JSON"#,
+            r#"{"display":"two","timestamp":2}"#,
+            r#"{"display":"three","timestamp":3}"#,
+        ]);
+        let all = root.prompt_history().expect("read");
+        assert_eq!(all.len(), 3);
+        // File (chronological) order preserved.
+        assert_eq!(all[0].display.as_deref(), Some("one"));
+        let page = root
+            .prompt_history_with(&ListOptions {
+                offset: 1,
+                limit: Some(1),
+                ..ListOptions::default()
+            })
+            .expect("read");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].display.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn prompt_history_missing_file_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        // No history.jsonl next to the projects root.
+        let root = HistoryRoot::at(projects);
+        assert!(root.prompt_history().expect("ok").is_empty());
     }
 
     #[test]
