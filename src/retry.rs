@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+#[cfg(any(feature = "async", feature = "sync"))]
 use tracing::warn;
 
 use crate::error::Error;
@@ -119,6 +120,7 @@ impl RetryPolicy {
     }
 
     /// Calculate the delay for a given attempt (0-indexed).
+    #[allow(dead_code)] // unused with neither `async` nor `sync` feature; unit tests cover it
     pub(crate) fn delay_for_attempt(&self, attempt: u32) -> Duration {
         let delay = match self.backoff_strategy {
             BackoffStrategy::Fixed => self.initial_backoff,
@@ -130,6 +132,7 @@ impl RetryPolicy {
     }
 
     /// Check if the given error should be retried.
+    #[allow(dead_code)] // unused with neither `async` nor `sync` feature; unit tests cover it
     pub(crate) fn should_retry(&self, error: &Error) -> bool {
         match error {
             Error::Timeout { .. } => self.retry_on_timeout,

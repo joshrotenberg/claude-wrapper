@@ -17,7 +17,9 @@ pub mod version;
 #[cfg(feature = "async")]
 use std::future::Future;
 
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::Claude;
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::error::Result;
 
 /// Trait implemented by all claude CLI command builders.
