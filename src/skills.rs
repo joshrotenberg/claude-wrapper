@@ -68,6 +68,9 @@
 //! [`SkillsRoot::at`] to point at a different directory -- a tempdir
 //! in tests, a non-default Claude Code install. The on-disk layout
 //! (`<root>/<stem>/SKILL.md`) is the same regardless of root.
+//! [`SkillsRoot::scheduled_tasks_home`] points the same reader at
+//! `~/.claude/scheduled-tasks`, whose entries share the SKILL.md
+//! format.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -102,6 +105,25 @@ impl SkillsRoot {
     /// (point at a tempdir) and for non-default installs.
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
+    }
+
+    /// Resolve `~/.claude/scheduled-tasks` as the root.
+    ///
+    /// Scheduled-task definitions use the same on-disk shape as
+    /// skills (`<name>/SKILL.md` with `name` / `description`
+    /// frontmatter and a prompt body), so the skills reader serves
+    /// them with a different root instead of a duplicate module.
+    /// Scheduling metadata (cron expression, enablement) is NOT in
+    /// these files; only the definition is exposed here. The layout
+    /// is undocumented Claude Code internal state (observed against
+    /// CLI 2.1.219).
+    pub fn scheduled_tasks_home() -> Result<Self> {
+        let home = home_dir().ok_or_else(|| Error::Artifacts {
+            message: "could not determine user home directory".to_string(),
+        })?;
+        Ok(Self {
+            path: home.join(".claude").join("scheduled-tasks"),
+        })
     }
 
     /// The configured root directory.
@@ -464,6 +486,13 @@ mod tests {
         let root = SkillsRoot::at(tmp.path());
         let skill = root.get("empty-name").expect("get");
         assert_eq!(skill.name, "empty-name");
+    }
+
+    #[test]
+    fn scheduled_tasks_home_points_at_scheduled_tasks() {
+        if let Ok(root) = SkillsRoot::scheduled_tasks_home() {
+            assert!(root.path().ends_with(".claude/scheduled-tasks"));
+        }
     }
 
     #[test]

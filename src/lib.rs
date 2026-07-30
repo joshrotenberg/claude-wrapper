@@ -341,10 +341,14 @@ pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
 #[cfg(feature = "json")]
+pub mod sessions;
+#[cfg(feature = "json")]
 pub mod settings;
 pub mod skills;
 pub mod slash;
 pub mod streaming;
+#[cfg(feature = "json")]
+pub mod tasks;
 pub mod tool_pattern;
 pub mod types;
 pub mod version;
