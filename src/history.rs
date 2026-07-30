@@ -672,9 +672,8 @@ pub struct ProjectSummary {
     /// anchored on the live filesystem. See module docs for caveats.
     ///
     /// Reconstructed, not recorded: for exact project attribution
-    /// prefer the `cwd` field on
-    /// [`HistoryEntry::User`](crate::history::HistoryEntry::User),
-    /// which survives the project directory being renamed or deleted.
+    /// prefer the `cwd` field on [`HistoryEntry::User`], which
+    /// survives the project directory being renamed or deleted.
     pub decoded_path: PathBuf,
     /// Whether `decoded_path` was verified against the real filesystem.
     ///
