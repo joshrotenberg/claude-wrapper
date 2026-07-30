@@ -7,10 +7,11 @@
 //! attribution), plus recurrence signals: exact-duplicate templates and
 //! prefix-template coverage.
 //!
-//! The parse is line-level and independent of `HistoryRoot::read_session`
-//! because `HistoryEntry` currently drops the attribution fields (see
-//! issue #721); `HistoryRoot` is used for root resolution and the
-//! project inventory.
+//! The parse is line-level and independent of `HistoryRoot::read_session`,
+//! trading the typed entry shape for a single streaming pass over each
+//! file; `HistoryRoot` is used for root resolution and the project
+//! inventory. The attribution fields are also available through the
+//! typed API (`HistoryEntry::prompt_source` and friends) since #721.
 //!
 //! Transcripts are pruned on a retention window, so the aggregates this
 //! prints are exactly the numbers worth persisting: pass `--digest` to

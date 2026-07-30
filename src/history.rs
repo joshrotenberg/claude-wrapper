@@ -483,7 +483,10 @@ pub enum HistoryEntry {
         git_branch: Option<String>,
         /// The raw `message` payload as Claude Code wrote it.
         message: Value,
-        /// Any additional fields not modeled above.
+        /// Every remaining field of the record, keyed as Claude Code
+        /// wrote it (camelCase, e.g. `promptSource`). See
+        /// [`HistoryEntry::field`] and the typed accessors for common
+        /// lookups.
         #[serde(flatten)]
         rest: serde_json::Map<String, Value>,
     },
@@ -495,7 +498,10 @@ pub enum HistoryEntry {
         timestamp: Option<String>,
         /// The raw `message` payload as Claude Code wrote it.
         message: Value,
-        /// Any additional fields not modeled above.
+        /// Every remaining field of the record, keyed as Claude Code
+        /// wrote it (camelCase, e.g. `requestId`). See
+        /// [`HistoryEntry::field`] and the typed accessors for common
+        /// lookups.
         #[serde(flatten)]
         rest: serde_json::Map<String, Value>,
     },
@@ -506,6 +512,65 @@ pub enum HistoryEntry {
         /// The full raw entry.
         raw: Value,
     },
+}
+
+impl HistoryEntry {
+    /// Raw access to a field by its name as Claude Code wrote it
+    /// (camelCase, e.g. `"permissionMode"`).
+    ///
+    /// For [`Self::User`] and [`Self::Assistant`] this resolves
+    /// against `rest`, so the fields promoted to struct fields
+    /// (`uuid`, `timestamp`, `cwd`, `gitBranch`, `message`) are not
+    /// reachable here. For [`Self::Other`] it resolves against the
+    /// full raw entry.
+    ///
+    /// These records are Claude Code's data, not this crate's: a CLI
+    /// update can add, drop, or retype any field, which is why this
+    /// returns raw JSON and the typed accessors below are all
+    /// `Option`-shaped.
+    pub fn field(&self, key: &str) -> Option<&Value> {
+        match self {
+            Self::User { rest, .. } | Self::Assistant { rest, .. } => rest.get(key),
+            Self::Other { raw, .. } => raw.get(key),
+        }
+    }
+
+    /// How the prompt reached the session (`typed`, `queued`, `sdk`,
+    /// `system`, `suggestion_accepted`), when recorded. Only user
+    /// entries carrying an actual prompt have this; tool-result user
+    /// turns generally do not.
+    pub fn prompt_source(&self) -> Option<&str> {
+        self.field("promptSource").and_then(Value::as_str)
+    }
+
+    /// The surface the session was driven from (`cli`,
+    /// `claude-desktop`, `sdk-cli`), when recorded.
+    pub fn entrypoint(&self) -> Option<&str> {
+        self.field("entrypoint").and_then(Value::as_str)
+    }
+
+    /// Whether the entry is harness-injected context rather than a
+    /// real turn. `None` when the field is absent.
+    pub fn is_meta(&self) -> Option<bool> {
+        self.field("isMeta").and_then(Value::as_bool)
+    }
+
+    /// Whether the entry belongs to a subagent sidechain. `None`
+    /// when the field is absent.
+    pub fn is_sidechain(&self) -> Option<bool> {
+        self.field("isSidechain").and_then(Value::as_bool)
+    }
+
+    /// The session id recorded on the entry, when present.
+    pub fn session_id(&self) -> Option<&str> {
+        self.field("sessionId").and_then(Value::as_str)
+    }
+
+    /// The uuid of the parent entry, when present. Root entries carry
+    /// `parentUuid: null`, which also reads as `None` here.
+    pub fn parent_uuid(&self) -> Option<&str> {
+        self.field("parentUuid").and_then(Value::as_str)
+    }
 }
 
 // -- helpers --------------------------------------------------------
@@ -744,36 +809,35 @@ fn parse_session(path: &Path, session_id: String, project_slug: String) -> Resul
 }
 
 fn parse_entry(line: &str) -> std::result::Result<HistoryEntry, serde_json::Error> {
-    let mut value: Value = serde_json::from_str(line)?;
+    let value: Value = serde_json::from_str(line)?;
     let ty = value
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
     match ty.as_str() {
-        "user" => Ok(HistoryEntry::User {
-            uuid: value.get("uuid").and_then(Value::as_str).map(String::from),
-            timestamp: value
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .map(String::from),
-            cwd: value.get("cwd").and_then(Value::as_str).map(String::from),
-            git_branch: value
-                .get("gitBranch")
-                .and_then(Value::as_str)
-                .map(String::from),
-            message: value.get("message").cloned().unwrap_or(Value::Null),
-            rest: take_object(&mut value),
-        }),
-        "assistant" => Ok(HistoryEntry::Assistant {
-            uuid: value.get("uuid").and_then(Value::as_str).map(String::from),
-            timestamp: value
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .map(String::from),
-            message: value.get("message").cloned().unwrap_or(Value::Null),
-            rest: take_object(&mut value),
-        }),
+        "user" => {
+            let mut rest = into_map(value);
+            rest.remove("type");
+            Ok(HistoryEntry::User {
+                uuid: take_string(&mut rest, "uuid"),
+                timestamp: take_string(&mut rest, "timestamp"),
+                cwd: take_string(&mut rest, "cwd"),
+                git_branch: take_string(&mut rest, "gitBranch"),
+                message: rest.remove("message").unwrap_or(Value::Null),
+                rest,
+            })
+        }
+        "assistant" => {
+            let mut rest = into_map(value);
+            rest.remove("type");
+            Ok(HistoryEntry::Assistant {
+                uuid: take_string(&mut rest, "uuid"),
+                timestamp: take_string(&mut rest, "timestamp"),
+                message: rest.remove("message").unwrap_or(Value::Null),
+                rest,
+            })
+        }
         other => Ok(HistoryEntry::Other {
             type_tag: other.to_string(),
             raw: value,
@@ -781,12 +845,28 @@ fn parse_entry(line: &str) -> std::result::Result<HistoryEntry, serde_json::Erro
     }
 }
 
-fn take_object(_value: &mut Value) -> serde_json::Map<String, Value> {
-    // Currently we don't bother carrying "everything else" through;
-    // callers needing the full raw form can re-read via Other or
-    // file-level access. Keeps the typed surface small. Reserved
-    // for future use if a typed-with-all-fields shape is wanted.
-    serde_json::Map::new()
+/// Unwrap a JSON value into its object map. The typed arms of
+/// [`parse_entry`] only see objects (a non-object has no `type`
+/// field and lands in `Other`), but stay defensive anyway.
+fn into_map(value: Value) -> serde_json::Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// Remove `key` from the map when it holds a string. A value of any
+/// other type is left in place so it surfaces through `rest` instead
+/// of being silently dropped.
+fn take_string(map: &mut serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    match map.remove(key) {
+        Some(Value::String(s)) => Some(s),
+        Some(other) => {
+            map.insert(key.to_string(), other);
+            None
+        }
+        None => None,
+    }
 }
 
 /// Decode a project slug back to a filesystem path, anchoring on the
@@ -1045,6 +1125,90 @@ mod tests {
             }
             other => panic!("expected User entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_entry_populates_rest_with_unmodeled_fields() {
+        let line = r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","cwd":"/w","gitBranch":"main","message":{"role":"user","content":"hi"},"promptSource":"typed","entrypoint":"cli","isSidechain":false,"sessionId":"s1","parentUuid":null,"permissionMode":"default","version":"2.1.0"}"#;
+        let entry = parse_entry(line).expect("parse");
+        match &entry {
+            HistoryEntry::User { rest, .. } => {
+                assert_eq!(rest["promptSource"], "typed");
+                assert_eq!(rest["permissionMode"], "default");
+                assert_eq!(rest["version"], "2.1.0");
+                // Consumed fields must not reappear in rest.
+                for consumed in ["type", "uuid", "timestamp", "cwd", "gitBranch", "message"] {
+                    assert!(!rest.contains_key(consumed), "{consumed} leaked into rest");
+                }
+            }
+            other => panic!("expected User entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_entry_keeps_mistyped_field_in_rest() {
+        // A `uuid` that isn't a string can't fill the typed field, but
+        // it must survive in rest rather than being dropped.
+        let line = r#"{"type":"assistant","uuid":42,"message":{"role":"assistant","content":"y"}}"#;
+        let entry = parse_entry(line).expect("parse");
+        match &entry {
+            HistoryEntry::Assistant { uuid, rest, .. } => {
+                assert_eq!(uuid.as_deref(), None);
+                assert_eq!(rest["uuid"], 42);
+            }
+            other => panic!("expected Assistant entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_accessors_resolve_from_rest() {
+        let line = r#"{"type":"user","uuid":"u1","message":{},"promptSource":"sdk","entrypoint":"sdk-cli","isSidechain":true,"isMeta":true,"sessionId":"s1","parentUuid":"p1"}"#;
+        let entry = parse_entry(line).expect("parse");
+        assert_eq!(entry.prompt_source(), Some("sdk"));
+        assert_eq!(entry.entrypoint(), Some("sdk-cli"));
+        assert_eq!(entry.is_sidechain(), Some(true));
+        assert_eq!(entry.is_meta(), Some(true));
+        assert_eq!(entry.session_id(), Some("s1"));
+        assert_eq!(entry.parent_uuid(), Some("p1"));
+        assert_eq!(
+            entry.field("promptSource").and_then(Value::as_str),
+            Some("sdk")
+        );
+    }
+
+    #[test]
+    fn typed_accessors_return_none_when_fields_absent() {
+        let line = r#"{"type":"assistant","uuid":"a1","message":{},"parentUuid":null}"#;
+        let entry = parse_entry(line).expect("parse");
+        assert_eq!(entry.prompt_source(), None);
+        assert_eq!(entry.entrypoint(), None);
+        assert_eq!(entry.is_meta(), None);
+        assert_eq!(entry.is_sidechain(), None);
+        assert_eq!(entry.session_id(), None);
+        // parentUuid: null reads as None, same as absent.
+        assert_eq!(entry.parent_uuid(), None);
+        assert_eq!(entry.field("noSuchField"), None);
+    }
+
+    #[test]
+    fn field_and_accessors_resolve_on_other_variant() {
+        let line = r#"{"type":"queue-operation","operation":"enqueue","sessionId":"s9"}"#;
+        let entry = parse_entry(line).expect("parse");
+        assert_eq!(
+            entry.field("operation").and_then(Value::as_str),
+            Some("enqueue")
+        );
+        assert_eq!(entry.session_id(), Some("s9"));
+        assert_eq!(entry.prompt_source(), None);
+    }
+
+    #[test]
+    fn serialized_entry_reemits_rest_fields_at_top_level() {
+        let line = r#"{"type":"user","uuid":"u1","message":{},"promptSource":"typed"}"#;
+        let entry = parse_entry(line).expect("parse");
+        let v = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(v["kind"], "user");
+        assert_eq!(v["promptSource"], "typed");
     }
 
     #[test]
