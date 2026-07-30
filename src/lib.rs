@@ -418,9 +418,16 @@ pub use version::{CliVersion, CliVersionStatus, VersionParseError};
 pub struct Claude {
     pub(crate) binary: PathBuf,
     pub(crate) working_dir: Option<PathBuf>,
+    // env, timeout, and retry_policy are written by the builder under
+    // every feature combination but read only by the feature-gated
+    // exec paths, so they are "never read" with neither `async` nor
+    // `sync` feature.
+    #[allow(dead_code)]
     pub(crate) env: HashMap<String, String>,
     pub(crate) global_args: Vec<String>,
+    #[allow(dead_code)]
     pub(crate) timeout: Option<Duration>,
+    #[allow(dead_code)]
     pub(crate) retry_policy: Option<RetryPolicy>,
     pub(crate) tested_cli_version_range: Option<(CliVersion, CliVersion)>,
 }

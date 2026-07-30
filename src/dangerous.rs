@@ -53,9 +53,12 @@
 use crate::Claude;
 #[cfg(feature = "async")]
 use crate::command::ClaudeCommand;
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::command::query::QueryCommand;
 use crate::error::{Error, Result};
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::exec::CommandOutput;
+#[cfg(any(feature = "async", feature = "sync"))]
 #[allow(deprecated)]
 use crate::types::PermissionMode;
 

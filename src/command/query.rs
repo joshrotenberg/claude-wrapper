@@ -11,6 +11,7 @@
 use crate::Claude;
 use crate::command::ClaudeCommand;
 use crate::command::spawn_args::{SharedSpawnArgs, shell_quote};
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::error::Result;
 use crate::exec::{self, CommandOutput};
 use crate::tool_pattern::ToolPattern;

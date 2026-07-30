@@ -285,6 +285,8 @@ impl TempMcpConfig {
 
 #[cfg(test)]
 mod tests {
+    // Every test in this module requires `json`.
+    #[cfg(feature = "json")]
     use super::*;
 
     #[test]

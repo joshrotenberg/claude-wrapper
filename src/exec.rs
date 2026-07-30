@@ -8,15 +8,18 @@
 //! [`from_command_failure`](crate::error::Error::from_command_failure).
 //! Both the async (tokio) and blocking (`sync` feature) paths live here.
 
+#[cfg(any(feature = "async", feature = "sync"))]
 use std::time::Duration;
 
 #[cfg(feature = "async")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "async")]
 use tokio::process::Command;
+#[cfg(any(feature = "async", feature = "sync"))]
 use tracing::{debug, warn};
 
 use crate::Claude;
+#[cfg(any(feature = "async", feature = "sync"))]
 use crate::error::{Error, Result};
 
 /// Assemble the full argv passed to the CLI binary: the client's
