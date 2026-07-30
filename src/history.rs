@@ -17,6 +17,30 @@
 //! - [`HistoryRoot::read_session`] -- parse a session into typed
 //!   [`HistoryEntry`] values.
 //!
+//! # Session subdirectories
+//!
+//! Next to a session's `.jsonl`, Claude Code may write a directory
+//! named after the session id holding sidechain state:
+//!
+//! ```text
+//! projects/<slug>/<session_id>/
+//!   subagents/agent-<id>.jsonl       subagent transcript
+//!   subagents/agent-<id>.meta.json   per-agent metadata
+//!   workflows/wf_<id>.json           workflow journal
+//!   workflows/scripts/<name>-wf_<id>.js
+//!   tool-results/<tool_use_id>.txt   spilled large tool output
+//! ```
+//!
+//! [`HistoryRoot::list_subagents`] / [`HistoryRoot::read_subagent`]
+//! parse sidechain transcripts with the same entry machinery as
+//! [`HistoryRoot::read_session`]; [`HistoryRoot::list_tool_results`],
+//! [`HistoryRoot::read_tool_result`], [`HistoryRoot::list_workflows`],
+//! and [`HistoryRoot::read_workflow`] expose the rest. A session
+//! without the subdirectory is the common case: the list methods
+//! return empty vectors, not errors. This layout is undocumented
+//! Claude Code internal state (observed against CLI 2.1.219) and can
+//! change across CLI versions.
+//!
 //! # Liberal parsing
 //!
 //! Each line is parsed independently; malformed lines are skipped
@@ -381,6 +405,183 @@ impl HistoryRoot {
         }
         Ok(None)
     }
+
+    /// List the subagent (sidechain) transcripts recorded under a
+    /// session's subdirectory, sorted by agent id.
+    ///
+    /// Returns an empty vector when the session has no subdirectory
+    /// or no `subagents/` entries -- the common case. Errors with
+    /// [`Error::History`] if the session id itself is unknown.
+    pub fn list_subagents(&self, session_id: &str) -> Result<Vec<SubagentSummary>> {
+        let Some(dir) = self.session_dir(session_id)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for path in list_files_with_extension(&dir.join("subagents"), "jsonl") {
+            // `agent-<id>.jsonl`; tolerate files without the prefix.
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let agent_id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
+            let meta = read_subagent_meta(&path);
+            out.push(SubagentSummary {
+                agent_id,
+                path,
+                meta,
+            });
+        }
+        out.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        Ok(out)
+    }
+
+    /// Parse one subagent transcript into typed [`HistoryEntry`]
+    /// values, with the same liberal line-level parsing as
+    /// [`Self::read_session`]. Subagent records carry the extra
+    /// fields `agentId` and `isSidechain: true`, reachable through
+    /// [`HistoryEntry::field`] / [`HistoryEntry::is_sidechain`].
+    ///
+    /// Errors with [`Error::History`] if the session id or agent id
+    /// is unknown.
+    pub fn read_subagent(&self, session_id: &str, agent_id: &str) -> Result<Vec<HistoryEntry>> {
+        let found = self
+            .list_subagents(session_id)?
+            .into_iter()
+            .find(|s| s.agent_id == agent_id)
+            .ok_or_else(|| Error::History {
+                message: format!("no subagent with id `{agent_id}` for session `{session_id}`"),
+            })?;
+        parse_jsonl_entries(&found.path)
+    }
+
+    /// List the spilled tool-result files recorded under a session's
+    /// subdirectory, sorted by tool-use id.
+    ///
+    /// Claude Code spills large tool outputs to
+    /// `tool-results/<tool_use_id>.txt` and references them from the
+    /// transcript. Returns an empty vector when there are none.
+    /// Errors with [`Error::History`] if the session id is unknown.
+    pub fn list_tool_results(&self, session_id: &str) -> Result<Vec<ToolResultSummary>> {
+        let Some(dir) = self.session_dir(session_id)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for path in list_files_with_extension(&dir.join("tool-results"), "txt") {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            out.push(ToolResultSummary {
+                tool_use_id: stem.to_string(),
+                path,
+                size_bytes,
+            });
+        }
+        out.sort_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id));
+        Ok(out)
+    }
+
+    /// Read one spilled tool result's content.
+    ///
+    /// Errors with [`Error::History`] if the session id or tool-use
+    /// id is unknown.
+    pub fn read_tool_result(&self, session_id: &str, tool_use_id: &str) -> Result<String> {
+        let found = self
+            .list_tool_results(session_id)?
+            .into_iter()
+            .find(|t| t.tool_use_id == tool_use_id)
+            .ok_or_else(|| Error::History {
+                message: format!(
+                    "no tool result with id `{tool_use_id}` for session `{session_id}`"
+                ),
+            })?;
+        Ok(fs::read_to_string(&found.path)?)
+    }
+
+    /// List the workflow journals recorded under a session's
+    /// subdirectory, sorted by workflow id.
+    ///
+    /// Each journal is a `workflows/wf_<id>.json` file; when a
+    /// matching script (`workflows/scripts/<name>-wf_<id>.js`)
+    /// exists its path is included. Returns an empty vector when
+    /// there are none. Errors with [`Error::History`] if the
+    /// session id is unknown.
+    pub fn list_workflows(&self, session_id: &str) -> Result<Vec<WorkflowSummary>> {
+        let Some(dir) = self.session_dir(session_id)? else {
+            return Ok(Vec::new());
+        };
+        let workflows_dir = dir.join("workflows");
+        let scripts: Vec<PathBuf> = list_files_with_extension(&workflows_dir.join("scripts"), "js");
+        let mut out = Vec::new();
+        for path in list_files_with_extension(&workflows_dir, "json") {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let workflow_id = stem.to_string();
+            let script_suffix = format!("-{workflow_id}.js");
+            let script_path = scripts
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(&script_suffix))
+                })
+                .cloned();
+            let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            out.push(WorkflowSummary {
+                workflow_id,
+                path,
+                script_path,
+                size_bytes,
+            });
+        }
+        out.sort_by(|a, b| a.workflow_id.cmp(&b.workflow_id));
+        Ok(out)
+    }
+
+    /// Read one workflow journal as raw JSON.
+    ///
+    /// The journal shape is Claude Code internal state; it is
+    /// returned as a [`serde_json::Value`] rather than typed.
+    /// Errors with [`Error::History`] if the session id or workflow
+    /// id is unknown.
+    pub fn read_workflow(&self, session_id: &str, workflow_id: &str) -> Result<Value> {
+        let found = self
+            .list_workflows(session_id)?
+            .into_iter()
+            .find(|w| w.workflow_id == workflow_id)
+            .ok_or_else(|| Error::History {
+                message: format!("no workflow with id `{workflow_id}` for session `{session_id}`"),
+            })?;
+        let content = fs::read_to_string(&found.path)?;
+        serde_json::from_str(&content).map_err(|e| Error::History {
+            message: format!(
+                "workflow journal `{}` is not valid JSON: {e}",
+                found.path.display()
+            ),
+        })
+    }
+
+    /// The session subdirectory (`projects/<slug>/<session_id>/`),
+    /// or `None` when the session exists but has no subdirectory.
+    /// Errors with [`Error::History`] when the session id is
+    /// unknown, so subdirectory lookups distinguish "session has no
+    /// sidechain state" from "no such session".
+    fn session_dir(&self, session_id: &str) -> Result<Option<PathBuf>> {
+        let (jsonl_path, _slug) = self
+            .find_session(session_id)?
+            .ok_or_else(|| Error::History {
+                message: format!(
+                    "no session with id `{session_id}` under {}",
+                    self.path.display()
+                ),
+            })?;
+        let dir = match jsonl_path.parent() {
+            Some(parent) => parent.join(session_id),
+            None => return Ok(None),
+        };
+        Ok(dir.is_dir().then_some(dir))
+    }
 }
 
 /// Summary of one project directory.
@@ -460,6 +661,62 @@ pub struct SessionLog {
     pub project_slug: String,
     /// Every parsed entry, in file order.
     pub entries: Vec<HistoryEntry>,
+}
+
+/// One subagent (sidechain) transcript found under a session's
+/// subdirectory.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubagentSummary {
+    /// Agent id (the file stem with its `agent-` prefix stripped).
+    /// Matches the `agentId` field on the transcript's records.
+    pub agent_id: String,
+    /// Path to the transcript `.jsonl`.
+    pub path: PathBuf,
+    /// Parsed sibling `.meta.json`, when present and parseable.
+    pub meta: Option<SubagentMeta>,
+}
+
+/// Metadata from a subagent's `.meta.json`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubagentMeta {
+    /// Agent type (e.g. `general-purpose`), when present.
+    pub agent_type: Option<String>,
+    /// Human-readable task description, when present.
+    pub description: Option<String>,
+    /// The tool-use id of the spawning Agent/Task call, when present.
+    pub tool_use_id: Option<String>,
+    /// Nesting depth of the spawn, when present.
+    pub spawn_depth: Option<u64>,
+    /// Any additional fields, keyed as Claude Code wrote them.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, Value>,
+}
+
+/// One spilled tool-result file under a session's subdirectory.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolResultSummary {
+    /// The tool-use id (the file stem, e.g. `toolu_01...`), matching
+    /// `tool_use_id` references in the transcript.
+    pub tool_use_id: String,
+    /// Path to the spill file.
+    pub path: PathBuf,
+    /// File size in bytes.
+    pub size_bytes: u64,
+}
+
+/// One workflow journal under a session's subdirectory.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowSummary {
+    /// The workflow run id (the journal file stem, e.g.
+    /// `wf_a9a2673f-c5e`).
+    pub workflow_id: String,
+    /// Path to the journal `.json`.
+    pub path: PathBuf,
+    /// Path to the matching script under `workflows/scripts/`, when
+    /// one exists.
+    pub script_path: Option<PathBuf>,
+    /// Journal file size in bytes.
+    pub size_bytes: u64,
 }
 
 /// One parsed line from a session `.jsonl`.
@@ -768,6 +1025,17 @@ fn extract_user_text_preview(entry: &Value, max_chars: usize) -> Option<String> 
 }
 
 fn parse_session(path: &Path, session_id: String, project_slug: String) -> Result<SessionLog> {
+    let entries = parse_jsonl_entries(path)?;
+    Ok(SessionLog {
+        session_id,
+        project_slug,
+        entries,
+    })
+}
+
+/// Parse a transcript `.jsonl` (mainline or subagent) into entries,
+/// skipping unreadable and malformed lines with a tracing warning.
+fn parse_jsonl_entries(path: &Path) -> Result<Vec<HistoryEntry>> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -801,10 +1069,48 @@ fn parse_session(path: &Path, session_id: String, project_slug: String) -> Resul
             }
         }
     }
-    Ok(SessionLog {
-        session_id,
-        project_slug,
-        entries,
+    Ok(entries)
+}
+
+/// Non-recursive listing of files in `dir` with the given extension.
+/// A missing or unreadable directory yields an empty list.
+fn list_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Read and parse the `.meta.json` next to a subagent transcript.
+/// Absent or malformed metadata is `None`, not an error: the
+/// transcript is the primary artifact.
+fn read_subagent_meta(transcript_path: &Path) -> Option<SubagentMeta> {
+    let meta_path = transcript_path.with_extension("meta.json");
+    let content = fs::read_to_string(&meta_path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    let mut rest = into_map(value);
+    let spawn_depth = match rest.remove("spawnDepth") {
+        Some(v) => {
+            let n = v.as_u64();
+            if n.is_none() {
+                rest.insert("spawnDepth".to_string(), v);
+            }
+            n
+        }
+        None => None,
+    };
+    Some(SubagentMeta {
+        agent_type: take_string(&mut rest, "agentType"),
+        description: take_string(&mut rest, "description"),
+        tool_use_id: take_string(&mut rest, "toolUseId"),
+        spawn_depth,
+        rest,
     })
 }
 
@@ -1001,6 +1307,42 @@ mod tests {
                 r#"{"type":"user","uuid":"u2","timestamp":"2026-01-02T00:00:00Z","message":{"role":"user","content":"second"}}"#,
             ],
         );
+        // session-aaa also has a session subdirectory with sidechain
+        // state; session-bbb deliberately has none.
+        let sub = a.join("session-aaa");
+        fs::create_dir_all(sub.join("subagents")).unwrap();
+        write_session(
+            &sub.join("subagents"),
+            "agent-abc123",
+            &[
+                r#"{"type":"user","uuid":"su1","agentId":"abc123","isSidechain":true,"message":{"role":"user","content":"subtask"}}"#,
+                r#"{"type":"assistant","uuid":"sa1","agentId":"abc123","isSidechain":true,"message":{"role":"assistant","content":"done"}}"#,
+            ],
+        );
+        fs::write(
+            sub.join("subagents").join("agent-abc123.meta.json"),
+            r#"{"agentType":"general-purpose","description":"audit the crate","toolUseId":"toolu_spawn1","spawnDepth":1,"futureField":"kept"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(sub.join("tool-results")).unwrap();
+        fs::write(
+            sub.join("tool-results").join("toolu_r1.txt"),
+            "spilled tool output",
+        )
+        .unwrap();
+        fs::create_dir_all(sub.join("workflows").join("scripts")).unwrap();
+        fs::write(
+            sub.join("workflows").join("wf_run1.json"),
+            r#"{"runId":"wf_run1","script":"export const meta = {}"}"#,
+        )
+        .unwrap();
+        fs::write(
+            sub.join("workflows")
+                .join("scripts")
+                .join("my-task-wf_run1.js"),
+            "export const meta = {}",
+        )
+        .unwrap();
         // Project B: one session, with one malformed line we'll skip
         let b = tmp.path().join("-private-tmp-projB");
         fs::create_dir_all(&b).unwrap();
@@ -1209,6 +1551,99 @@ mod tests {
         let v = serde_json::to_value(&entry).expect("serialize");
         assert_eq!(v["kind"], "user");
         assert_eq!(v["promptSource"], "typed");
+    }
+
+    #[test]
+    fn list_subagents_parses_ids_and_meta() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let subs = root.list_subagents("session-aaa").expect("list");
+        assert_eq!(subs.len(), 1);
+        let sub = &subs[0];
+        assert_eq!(sub.agent_id, "abc123");
+        let meta = sub.meta.as_ref().expect("meta parsed");
+        assert_eq!(meta.agent_type.as_deref(), Some("general-purpose"));
+        assert_eq!(meta.description.as_deref(), Some("audit the crate"));
+        assert_eq!(meta.tool_use_id.as_deref(), Some("toolu_spawn1"));
+        assert_eq!(meta.spawn_depth, Some(1));
+        assert_eq!(meta.rest["futureField"], "kept");
+    }
+
+    #[test]
+    fn read_subagent_entries_carry_sidechain_attribution() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let entries = root.read_subagent("session-aaa", "abc123").expect("read");
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0], HistoryEntry::User { .. }));
+        assert_eq!(entries[0].is_sidechain(), Some(true));
+        assert_eq!(
+            entries[0].field("agentId").and_then(Value::as_str),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn read_subagent_unknown_agent_errors() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let err = root.read_subagent("session-aaa", "nope").unwrap_err();
+        assert!(format!("{err}").contains("no subagent with id"));
+    }
+
+    #[test]
+    fn session_without_subdirectory_lists_empty() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        assert!(root.list_subagents("session-bbb").expect("ok").is_empty());
+        assert!(
+            root.list_tool_results("session-bbb")
+                .expect("ok")
+                .is_empty()
+        );
+        assert!(root.list_workflows("session-bbb").expect("ok").is_empty());
+    }
+
+    #[test]
+    fn subdirectory_lookups_error_on_unknown_session() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let err = root.list_subagents("not-a-session").unwrap_err();
+        assert!(matches!(err, Error::History { .. }));
+        assert!(format!("{err}").contains("no session with id"));
+    }
+
+    #[test]
+    fn tool_result_list_and_read_round_trip() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let results = root.list_tool_results("session-aaa").expect("list");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_use_id, "toolu_r1");
+        assert_eq!(results[0].size_bytes, "spilled tool output".len() as u64);
+        let content = root
+            .read_tool_result("session-aaa", "toolu_r1")
+            .expect("read");
+        assert_eq!(content, "spilled tool output");
+        let err = root
+            .read_tool_result("session-aaa", "toolu_nope")
+            .unwrap_err();
+        assert!(format!("{err}").contains("no tool result with id"));
+    }
+
+    #[test]
+    fn workflow_list_links_script_and_read_parses_json() {
+        let tmp = fixture_root();
+        let root = HistoryRoot::at(tmp.path());
+        let flows = root.list_workflows("session-aaa").expect("list");
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].workflow_id, "wf_run1");
+        let script = flows[0].script_path.as_ref().expect("script linked");
+        assert!(script.ends_with("my-task-wf_run1.js"));
+        let journal = root.read_workflow("session-aaa", "wf_run1").expect("read");
+        assert_eq!(journal["runId"], "wf_run1");
+        let err = root.read_workflow("session-aaa", "wf_nope").unwrap_err();
+        assert!(format!("{err}").contains("no workflow with id"));
     }
 
     #[test]
