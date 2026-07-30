@@ -86,6 +86,10 @@ name = "mcp_config"
 required-features = ["async"]
 
 [[example]]
+name = "mine_stats"
+required-features = ["json"]
+
+[[example]]
 name = "oneshot"
 required-features = ["async"]
 
