@@ -757,6 +757,7 @@ impl QueryCommand {
     /// the end, so the late flag becomes positional and is eaten as
     /// part of the prompt. We clone-and-set instead so the flag
     /// lands in its proper slot before `--`.
+    #[allow(dead_code)] // unused without `json` plus `async` or `sync`; tests always call it
     fn build_args_with_forced_json(&self) -> Vec<String> {
         if self.output_format.is_some() {
             return self.build_args();
