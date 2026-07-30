@@ -866,6 +866,38 @@ pub enum HistoryEntry {
 }
 
 impl HistoryEntry {
+    /// Parse a single transcript line into a typed entry.
+    ///
+    /// The per-line counterpart to [`HistoryRoot::read_session`]: use
+    /// this when you already hold the line -- typically a consumer
+    /// tailing append-only transcript files by byte offset, reading
+    /// only the new bytes on each pass instead of re-reading whole
+    /// session files.
+    ///
+    /// Parsing is liberal, matching `read_session`: entry types other
+    /// than `user` and `assistant` come through as [`Self::Other`]
+    /// carrying the raw value. A line that is not valid JSON is the
+    /// one `Err` case -- the same lines `read_session` skips with a
+    /// warning, left to the caller here.
+    ///
+    /// ```
+    /// use claude_wrapper::history::HistoryEntry;
+    ///
+    /// let line = r#"{"type":"user","uuid":"u1","cwd":"/work/repo","promptSource":"typed","message":{"role":"user"}}"#;
+    /// let entry = HistoryEntry::from_line(line)?;
+    /// match &entry {
+    ///     HistoryEntry::User { cwd, .. } => {
+    ///         assert_eq!(cwd.as_deref(), Some("/work/repo"));
+    ///     }
+    ///     _ => unreachable!(),
+    /// }
+    /// assert_eq!(entry.prompt_source(), Some("typed"));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    pub fn from_line(line: &str) -> std::result::Result<Self, serde_json::Error> {
+        parse_entry(line)
+    }
+
     /// Raw access to a field by its name as Claude Code wrote it
     /// (camelCase, e.g. `"permissionMode"`).
     ///
@@ -1618,6 +1650,31 @@ mod tests {
             }
             other => panic!("expected Assistant entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_line_is_the_public_face_of_parse_entry() {
+        // Typed, unknown-type, and malformed lines all behave exactly
+        // as they do through read_session's internal parser.
+        let user = r#"{"type":"user","uuid":"u1","cwd":"/w","message":{"role":"user"}}"#;
+        match HistoryEntry::from_line(user).expect("parse") {
+            HistoryEntry::User { uuid, cwd, .. } => {
+                assert_eq!(uuid.as_deref(), Some("u1"));
+                assert_eq!(cwd.as_deref(), Some("/w"));
+            }
+            other => panic!("expected User entry, got {other:?}"),
+        }
+
+        let unknown = r#"{"type":"ai-title","title":"t"}"#;
+        match HistoryEntry::from_line(unknown).expect("parse") {
+            HistoryEntry::Other { type_tag, raw } => {
+                assert_eq!(type_tag, "ai-title");
+                assert_eq!(raw["title"], "t");
+            }
+            other => panic!("expected Other entry, got {other:?}"),
+        }
+
+        assert!(HistoryEntry::from_line("not json").is_err());
     }
 
     #[test]
