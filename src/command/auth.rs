@@ -5,10 +5,14 @@
 //! [`SetupTokenCommand`]. For detecting which auth strategy the CLI
 //! will use without invoking it, see [`crate::auth`].
 
+#[cfg(any(feature = "async", all(feature = "sync", feature = "json")))]
 use crate::Claude;
 use crate::command::ClaudeCommand;
+#[cfg(any(feature = "async", all(feature = "sync", feature = "json")))]
 use crate::error::Result;
-use crate::exec::{self, CommandOutput};
+#[cfg(any(feature = "async", all(feature = "sync", feature = "json")))]
+use crate::exec;
+use crate::exec::CommandOutput;
 
 /// Check authentication status.
 ///
