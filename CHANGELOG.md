@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.4](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.3...v0.13.4) - 2026-07-30
+
+### Added
+
+- read-side modules for task state, live sessions, and scheduled tasks ([#734](https://github.com/joshrotenberg/claude-wrapper/pull/734))
+- read-side module for plan documents ([#733](https://github.com/joshrotenberg/claude-wrapper/pull/733))
+- read-side module for per-project memory directories ([#732](https://github.com/joshrotenberg/claude-wrapper/pull/732))
+- *(history)* read the global prompt history file ([#731](https://github.com/joshrotenberg/claude-wrapper/pull/731))
+- *(history)* enumerate session subdirectories (subagents, workflows, tool results) ([#730](https://github.com/joshrotenberg/claude-wrapper/pull/730))
+- transcript mining spike (mine_stats example) ([#720](https://github.com/joshrotenberg/claude-wrapper/pull/720))
+- *(cr)* env precedence, alias profiles, editor compose; ship as installable crate claude-cr ([#715](https://github.com/joshrotenberg/claude-wrapper/pull/715))
+
+### Fixed
+
+- remove remaining no-default-features build warnings ([#736](https://github.com/joshrotenberg/claude-wrapper/pull/736))
+- gate feature-dependent imports so all feature combos build warning-free ([#735](https://github.com/joshrotenberg/claude-wrapper/pull/735))
+- *(history)* populate HistoryEntry rest and add attribution accessors ([#722](https://github.com/joshrotenberg/claude-wrapper/pull/722))
+
+### Other
+
+- bump tokio from 1.53.0 to 1.53.1 in the tokio-ecosystem group ([#716](https://github.com/joshrotenberg/claude-wrapper/pull/716))
+- bump clap from 4.6.2 to 4.6.4 ([#717](https://github.com/joshrotenberg/claude-wrapper/pull/717))
+- bump the serde-ecosystem group across 1 directory with 2 updates ([#708](https://github.com/joshrotenberg/claude-wrapper/pull/708))
+- bump toml from 0.8.23 to 1.1.3+spec-1.1.0 ([#712](https://github.com/joshrotenberg/claude-wrapper/pull/712))
+
 ## [0.13.3](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.2...v0.13.3) - 2026-07-17
 
 ### Added
