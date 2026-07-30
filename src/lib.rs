@@ -336,6 +336,7 @@ pub mod history;
 pub mod jobs;
 pub mod mcp_config;
 pub mod memory;
+pub mod plans;
 pub mod retry;
 #[cfg(all(feature = "json", feature = "async"))]
 pub mod session;
