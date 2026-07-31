@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.5](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.4...v0.13.5) - 2026-07-30
+
+### Added
+
+- *(history)* make single-line entry parsing public ([#739](https://github.com/joshrotenberg/claude-wrapper/pull/739))
+
 ## [0.13.4](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.3...v0.13.4) - 2026-07-30
 
 ### Added
