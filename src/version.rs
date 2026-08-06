@@ -141,10 +141,11 @@ impl Ord for CliVersion {
 /// Lowest `claude` CLI version this crate supports.
 ///
 /// Below this the wrapper emits flags the CLI does not have. This is measured,
-/// not assumed: the contract suite bisected it. 2.1.20 and 2.1.36 lack
-/// `--effort` and `--worktree`; 2.1.50 onward has the full set this crate
-/// emits. (2.1.45 is not the boundary despite sitting lower, because it
-/// reproducibly lacks even flags 2.1.36 had, which reads as a bad publish.)
+/// not assumed: the contract suite (`tests/contract.rs`) bisected it. 2.1.97
+/// lacks `--exclude-dynamic-system-prompt-sections`, one of the three flags a
+/// hermetic seal emits, and 2.1.98 has it. That was the last flag of the
+/// emitted set to land, so 2.1.98 is the lowest version every builder is
+/// valid against.
 ///
 /// Raising this is a support decision. Lowering it is a claim that must be
 /// re-measured, because the failure it prevents is silent: an invocation that
@@ -152,7 +153,7 @@ impl Ord for CliVersion {
 pub const TESTED_CLI_VERSION_MIN: CliVersion = CliVersion {
     major: 2,
     minor: 1,
-    patch: 50,
+    patch: 98,
 };
 
 /// Highest `claude` CLI version this crate has been exercised against.
