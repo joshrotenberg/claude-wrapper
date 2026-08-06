@@ -7,6 +7,12 @@
 //! maps failures onto [`Error`] via
 //! [`from_command_failure`](crate::error::Error::from_command_failure).
 //! Both the async (tokio) and blocking (`sync` feature) paths live here.
+//!
+//! Every async spawn sets `kill_on_drop(true)`: dropping an in-flight
+//! execute future (a lost `tokio::select!` race, a caller-side timeout)
+//! kills the child rather than leaving the CLI running unattended with
+//! nobody reading the result. The blocking paths cannot be dropped
+//! mid-flight, so they need no equivalent.
 
 #[cfg(any(feature = "async", feature = "sync"))]
 use std::time::Duration;
@@ -52,12 +58,18 @@ pub struct CommandOutput {
 /// If the [`Claude`] client has a retry policy set, transient errors will be
 /// retried according to that policy. A per-command retry policy can be passed
 /// to override the client default.
+///
+/// Dropping the returned future mid-flight kills the spawned `claude`
+/// process (SIGKILL): an abandoned run does not keep executing in the
+/// background.
 #[cfg(feature = "async")]
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     run_claude_with_retry(claude, args, None).await
 }
 
 /// Run a claude command with an optional per-command retry policy override.
+///
+/// Dropping the returned future kills the child; see [`run_claude`].
 #[cfg(feature = "async")]
 pub async fn run_claude_with_retry(
     claude: &Claude,
@@ -79,6 +91,8 @@ pub async fn run_claude_with_retry(
 ///
 /// stdin mode does not retry -- the stdin pipe is consumed after the first
 /// attempt and cannot be rewound for a subsequent try.
+///
+/// Dropping the returned future kills the child; see [`run_claude`].
 #[cfg(feature = "async")]
 pub async fn run_claude_with_stdin_prompt(
     claude: &Claude,
@@ -132,6 +146,9 @@ async fn run_internal_stdin(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Dropping the in-flight future must kill the child, not leave the
+    // CLI running unattended (see the module docs).
+    cmd.kill_on_drop(true);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -215,6 +232,9 @@ async fn run_with_timeout_stdin(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Dropping the in-flight future must kill the child, not leave the
+    // CLI running unattended (see the module docs).
+    cmd.kill_on_drop(true);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -337,6 +357,8 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
 }
 
 /// Run a claude command and allow specific non-zero exit codes.
+///
+/// Dropping the returned future kills the child; see [`run_claude`].
 #[cfg(feature = "async")]
 pub async fn run_claude_allow_exit_codes(
     claude: &Claude,
@@ -373,6 +395,11 @@ async fn run_internal(
 
     // Prevent child from inheriting/blocking on parent's stdin.
     cmd.stdin(std::process::Stdio::null());
+
+    // Dropping the in-flight future must kill the child, not leave the
+    // CLI running unattended (see the module docs). The flag carries
+    // into the child spawned inside `Command::output` below.
+    cmd.kill_on_drop(true);
 
     // Remove Claude Code env vars to prevent nested session detection
     cmd.env_remove("CLAUDECODE");
@@ -440,6 +467,9 @@ async fn run_with_timeout(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Dropping the in-flight future must kill the child, not leave the
+    // CLI running unattended (see the module docs).
+    cmd.kill_on_drop(true);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1456,6 +1486,118 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+    }
+
+    /// Drive `fut` just long enough for the fake script to write its pid
+    /// file, then drop it mid-flight (on return) and hand back the pid.
+    #[cfg(feature = "async")]
+    async fn drop_in_flight_and_capture_pid<F>(fut: F, pid_path: &std::path::Path) -> u32
+    where
+        F: std::future::Future,
+        F::Output: std::fmt::Debug,
+    {
+        tokio::pin!(fut);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(pid_path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                // Returning drops the pinned future here, mid-flight.
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never wrote its pid file"
+            );
+            tokio::select! {
+                out = &mut fut => panic!("future completed before drop: {out:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+    }
+
+    /// Poll until `pid` is dead or a zombie awaiting reap. `kill_on_drop`
+    /// SIGKILLs at drop time, but reaping happens asynchronously on the
+    /// runtime's process driver, so a transient zombie counts as killed.
+    #[cfg(feature = "async")]
+    async fn assert_pid_killed(pid: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("run ps");
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !out.status.success() || stat.is_empty() || stat.starts_with('Z') {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} still alive (stat {stat}) after future drop"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    // Dropping an in-flight execute future must kill the spawned child:
+    // every async spawn site sets kill_on_drop(true), so a caller racing
+    // execute against cancellation (tokio::select!, timeout) cannot leak
+    // a headless CLI run. `exec` keeps the recorded pid the direct child,
+    // so the SIGKILL lands on the process the test watches.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_dropping_in_flight_future_kills_child() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let (_dir, path) = fake_script(&format!(
+            r#"echo $$ > "{}"; exec sleep 30"#,
+            pid_path.display()
+        ));
+        let claude = client(&path);
+        let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
+        assert_pid_killed(pid).await;
+    }
+
+    // Same guarantee on the timeout path, which holds a Child from
+    // spawn_retrying_txtbsy rather than going through Command::output.
+    // The configured timeout is far longer than the test; the drop is
+    // what kills the child.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_dropping_in_flight_future_kills_child_with_timeout() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let (_dir, path) = fake_script(&format!(
+            r#"echo $$ > "{}"; exec sleep 30"#,
+            pid_path.display()
+        ));
+        let claude = Claude::builder()
+            .binary(&path)
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("build");
+        let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
+        assert_pid_killed(pid).await;
+    }
+
+    // Same guarantee for the stdin-prompt path.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_dropping_in_flight_stdin_future_kills_child() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let (_dir, path) = fake_script(&format!(
+            r#"echo $$ > "{}"; exec sleep 30"#,
+            pid_path.display()
+        ));
+        let claude = client(&path);
+        let pid = drop_in_flight_and_capture_pid(
+            run_claude_with_stdin_prompt(&claude, vec![], "x".into()),
+            &pid_path,
+        )
+        .await;
+        assert_pid_killed(pid).await;
     }
 
     #[cfg(feature = "async")]

@@ -14,6 +14,9 @@
 #       generated in-process. Use for large-output tests: passing a big
 #       string via FAKE_CLAUDE_OUTPUT hits Linux's 128KB per-env-string
 #       limit (MAX_ARG_STRLEN) and fails execve with E2BIG.
+#   FAKE_CLAUDE_PID_FILE    - if set, write this process's pid there before
+#       any delay or output, so tests can observe the process itself
+#       (e.g. that dropping an in-flight future kills it).
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -33,6 +36,12 @@ ERROR_MSG="${FAKE_CLAUDE_ERROR_MSG:-command failed}"
 DELAY="${FAKE_CLAUDE_DELAY:-0}"
 COST_USD="${FAKE_CLAUDE_COST_USD:-0.0}"
 NUM_TURNS="${FAKE_CLAUDE_NUM_TURNS:-1}"
+
+# Record the pid before any delay so tests can watch the process from
+# the moment it starts.
+if [[ -n "${FAKE_CLAUDE_PID_FILE:-}" ]]; then
+    echo $$ > "$FAKE_CLAUDE_PID_FILE"
+fi
 
 # Optional delay before any output - used to test timeouts.
 if [[ "$DELAY" -gt 0 ]]; then

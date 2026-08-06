@@ -272,6 +272,11 @@ fn parse_block_delta(delta: &serde_json::Value) -> BlockDelta {
 /// as a JSON event and passing it to the handler. Useful for progress tracking
 /// and real-time output processing.
 ///
+/// Dropping the returned future mid-flight kills the spawned `claude`
+/// process (SIGKILL): an abandoned run does not keep executing in the
+/// background. Events already dispatched to the handler are not rolled
+/// back.
+///
 /// # Example
 ///
 /// ```no_run
@@ -346,7 +351,10 @@ where
         .envs(&claude.env)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Dropping the in-flight future must kill the child, not leave
+        // the CLI running unattended (see the `exec` module docs).
+        .kill_on_drop(true);
 
     if let Some(ref dir) = claude.working_dir {
         cmd.current_dir(dir);

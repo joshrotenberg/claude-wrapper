@@ -719,3 +719,106 @@ async fn working_dir_set_on_subprocess() {
         .expect("should succeed");
     assert!(output.success);
 }
+
+// ── Cancellation: dropping an in-flight future kills the child ──────
+
+/// Drive `fut` just long enough for fake-claude.sh to write its pid file
+/// (FAKE_CLAUDE_PID_FILE), then drop it mid-flight (on return) and hand
+/// back the pid. Unix-only helpers: the assertions shell out to `ps`.
+#[cfg(unix)]
+async fn drop_in_flight_and_capture_pid<F>(fut: F, pid_path: &std::path::Path) -> u32
+where
+    F: std::future::Future,
+    F::Output: std::fmt::Debug,
+{
+    tokio::pin!(fut);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(pid) = std::fs::read_to_string(pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            // Returning drops the pinned future here, mid-flight.
+            return pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child never wrote its pid file"
+        );
+        tokio::select! {
+            out = &mut fut => panic!("future completed before drop: {out:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+    }
+}
+
+/// Poll until `pid` is dead or a zombie awaiting reap. `kill_on_drop`
+/// SIGKILLs at drop time, but reaping happens asynchronously on the
+/// runtime's process driver, so a transient zombie counts as killed.
+#[cfg(unix)]
+async fn assert_pid_killed(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.status.success() || stat.is_empty() || stat.starts_with('Z') {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child {pid} still alive (stat {stat}) after future drop"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Dropping an in-flight execute future kills the CLI child instead of
+/// leaving it to run to completion in the background. This is the MCP
+/// server shape: execute_json raced against client cancellation with
+/// tokio::select!. FAKE_CLAUDE_DELAY keeps the child alive far longer
+/// than the test; the drop is what kills it.
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_in_flight_execute_kills_child() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_path = dir.path().join("pid");
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_DELAY", "30"),
+        (
+            "FAKE_CLAUDE_PID_FILE",
+            pid_path.to_str().expect("utf8 path"),
+        ),
+    ]);
+
+    let cmd = QueryCommand::new("slow query").no_session_persistence();
+    let pid = drop_in_flight_and_capture_pid(cmd.execute(&claude), &pid_path).await;
+    assert_pid_killed(pid).await;
+}
+
+/// Same guarantee for the streaming path.
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_in_flight_stream_query_kills_child() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_path = dir.path().join("pid");
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_DELAY", "30"),
+        (
+            "FAKE_CLAUDE_PID_FILE",
+            pid_path.to_str().expect("utf8 path"),
+        ),
+    ]);
+
+    let cmd = QueryCommand::new("slow stream")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+    let pid =
+        drop_in_flight_and_capture_pid(stream_query(&claude, &cmd, |_: StreamEvent| {}), &pid_path)
+            .await;
+    assert_pid_killed(pid).await;
+}

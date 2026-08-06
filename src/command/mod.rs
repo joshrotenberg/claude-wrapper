@@ -39,6 +39,11 @@ pub trait ClaudeCommand: Send + Sync {
     fn args(&self) -> Vec<String>;
 
     /// Execute the command using the given claude client.
+    ///
+    /// Dropping the returned future mid-flight kills the spawned CLI
+    /// process (SIGKILL): a caller that races `execute` against
+    /// cancellation (e.g. `tokio::select!`) does not leave an abandoned
+    /// run executing in the background.
     #[cfg(feature = "async")]
     fn execute(&self, claude: &Claude) -> impl Future<Output = Result<Self::Output>> + Send;
 }
