@@ -140,13 +140,19 @@ impl Ord for CliVersion {
 
 /// Lowest `claude` CLI version this crate supports.
 ///
-/// Below this the wrapper is known to behave incorrectly: flags are missing or
-/// argument shapes differ. `claude agents` was repurposed in 2.1.143, which is
-/// the kind of drift the floor exists to name.
+/// Below this the wrapper emits flags the CLI does not have. This is measured,
+/// not assumed: the contract suite bisected it. 2.1.20 and 2.1.36 lack
+/// `--effort` and `--worktree`; 2.1.50 onward has the full set this crate
+/// emits. (2.1.45 is not the boundary despite sitting lower, because it
+/// reproducibly lacks even flags 2.1.36 had, which reads as a bad publish.)
+///
+/// Raising this is a support decision. Lowering it is a claim that must be
+/// re-measured, because the failure it prevents is silent: an invocation that
+/// looks right and is rejected by the binary.
 pub const TESTED_CLI_VERSION_MIN: CliVersion = CliVersion {
     major: 2,
     minor: 1,
-    patch: 0,
+    patch: 50,
 };
 
 /// Highest `claude` CLI version this crate has been exercised against.
