@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::artifacts::{frontmatter_entries, split_frontmatter};
+use crate::artifacts::{frontmatter_entries, split_frontmatter, split_list};
 use crate::error::{Error, Result};
 
 /// Root directory of one set of slash command definitions
@@ -263,13 +263,7 @@ fn parse_command_file(path: &Path, file_stem: &str) -> Result<Command> {
             match key.as_str() {
                 "description" if !value.is_empty() => description = Some(value),
                 "argument-hint" if !value.is_empty() => argument_hint = Some(value),
-                "allowed-tools" if !value.is_empty() => {
-                    allowed_tools = value
-                        .split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
+                "allowed-tools" if !value.is_empty() => allowed_tools = split_list(&value),
                 "model" if !value.is_empty() => model = Some(value),
                 "disable-model-invocation" if !value.is_empty() => {
                     disable_model_invocation = Some(matches!(
