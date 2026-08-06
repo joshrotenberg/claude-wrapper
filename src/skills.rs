@@ -39,6 +39,13 @@
 //! body-only `SKILL.md` parses fine, with `name` defaulting to the
 //! directory stem.
 //!
+//! YAML block scalars (`>`, `>-`, `>+`, `|`, `|-`, `|+`) are
+//! supported for any key, which is how multi-line descriptions are
+//! usually written. `>` folds the block into one line, `|` preserves
+//! the line breaks, and the chomping indicator controls the trailing
+//! newline. Continuation lines are part of the value even when they
+//! contain a colon.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -78,7 +85,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::artifacts::split_frontmatter;
+use crate::artifacts::{frontmatter_entries, split_frontmatter};
 use crate::error::{Error, Result};
 
 /// Root directory of Claude Code's user-level skill definitions.
@@ -265,23 +272,13 @@ fn parse_skill_file(file_path: &Path, dir_path: &Path, dir_stem: &str) -> Result
     let mut extra = BTreeMap::new();
 
     if let Some(fm) = frontmatter {
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Some((k, v)) = trimmed.split_once(':') else {
-                continue;
-            };
-            let key = k.trim();
-            let value = v.trim().to_string();
-            match key {
+        for (key, value) in frontmatter_entries(fm) {
+            match key.as_str() {
                 "name" if !value.is_empty() => name = value,
                 "description" if !value.is_empty() => description = Some(value),
-                _ if !key.is_empty() => {
-                    extra.insert(key.to_string(), value);
+                _ => {
+                    extra.insert(key, value);
                 }
-                _ => {}
             }
         }
     }
@@ -473,6 +470,47 @@ mod tests {
             skill.extra.get("custom_key").map(String::as_str),
             Some("custom_value")
         );
+    }
+
+    #[test]
+    fn folded_description_with_colons_is_one_value() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_skill(
+            tmp.path(),
+            "folded",
+            concat!(
+                "---\n",
+                "name: folded\n",
+                "description: >-\n",
+                "  Use when surveying a codebase against a rubric. Read-only: never\n",
+                "  edits files, opens PRs, or commits.\n",
+                "---\n\nBody.\n",
+            ),
+        );
+        let root = SkillsRoot::at(tmp.path());
+        let skill = root.get("folded").expect("get");
+        assert_eq!(
+            skill.description.as_deref(),
+            Some(
+                "Use when surveying a codebase against a rubric. Read-only: never \
+                 edits files, opens PRs, or commits."
+            )
+        );
+        assert!(skill.extra.is_empty(), "extra: {:?}", skill.extra);
+        assert_eq!(skill.body, "Body.");
+    }
+
+    #[test]
+    fn literal_description_preserves_newlines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_skill(
+            tmp.path(),
+            "lit",
+            "---\nname: lit\ndescription: |-\n  one\n  two: three\n---\nbody\n",
+        );
+        let root = SkillsRoot::at(tmp.path());
+        let skill = root.get("lit").expect("get");
+        assert_eq!(skill.description.as_deref(), Some("one\ntwo: three"));
     }
 
     #[test]

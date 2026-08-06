@@ -55,6 +55,13 @@
 //! Frontmatter is optional -- a body-only file parses fine, with
 //! `description` left `None`.
 //!
+//! YAML block scalars (`>`, `>-`, `>+`, `|`, `|-`, `|+`) are
+//! supported for any key, which is how multi-line descriptions are
+//! usually written. `>` folds the block into one line, `|` preserves
+//! the line breaks, and the chomping indicator controls the trailing
+//! newline. Continuation lines are part of the value even when they
+//! contain a colon.
+//!
 //! Note the dashes in `argument-hint` / `allowed-tools` /
 //! `disable-model-invocation`: that's how Claude Code spells the
 //! keys on disk. The typed fields use Rust-friendly snake_case
@@ -80,7 +87,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::artifacts::split_frontmatter;
+use crate::artifacts::{frontmatter_entries, split_frontmatter};
 use crate::error::{Error, Result};
 
 /// Root directory of one set of slash command definitions
@@ -252,17 +259,8 @@ fn parse_command_file(path: &Path, file_stem: &str) -> Result<Command> {
     let mut extra = BTreeMap::new();
 
     if let Some(fm) = frontmatter {
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Some((k, v)) = trimmed.split_once(':') else {
-                continue;
-            };
-            let key = k.trim();
-            let value = v.trim().to_string();
-            match key {
+        for (key, value) in frontmatter_entries(fm) {
+            match key.as_str() {
                 "description" if !value.is_empty() => description = Some(value),
                 "argument-hint" if !value.is_empty() => argument_hint = Some(value),
                 "allowed-tools" if !value.is_empty() => {
@@ -275,14 +273,13 @@ fn parse_command_file(path: &Path, file_stem: &str) -> Result<Command> {
                 "model" if !value.is_empty() => model = Some(value),
                 "disable-model-invocation" if !value.is_empty() => {
                     disable_model_invocation = Some(matches!(
-                        value.to_ascii_lowercase().as_str(),
+                        value.trim().to_ascii_lowercase().as_str(),
                         "true" | "yes" | "1"
                     ));
                 }
-                _ if !key.is_empty() => {
-                    extra.insert(key.to_string(), value);
+                _ => {
+                    extra.insert(key, value);
                 }
-                _ => {}
             }
         }
     }
@@ -436,6 +433,50 @@ mod tests {
         let root = CommandsRoot::at(tmp.path());
         let cmd = root.get("weird").expect("get");
         assert_eq!(cmd.disable_model_invocation, Some(true));
+    }
+
+    #[test]
+    fn folded_description_with_colons_is_one_value() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_command(
+            tmp.path(),
+            "folded",
+            concat!(
+                "---\n",
+                "description: >-\n",
+                "  Open a PR for the current branch. Note: pushes first, then\n",
+                "  opens the PR as a draft.\n",
+                "allowed-tools: Bash(git *), Bash(gh *)\n",
+                "disable-model-invocation: true\n",
+                "---\n\nBody.\n",
+            ),
+        );
+        let root = CommandsRoot::at(tmp.path());
+        let cmd = root.get("folded").expect("get");
+        assert_eq!(
+            cmd.description.as_deref(),
+            Some(
+                "Open a PR for the current branch. Note: pushes first, then opens the PR as a draft."
+            )
+        );
+        assert!(cmd.extra.is_empty(), "extra: {:?}", cmd.extra);
+        assert_eq!(cmd.allowed_tools, vec!["Bash(git *)", "Bash(gh *)"]);
+        assert_eq!(cmd.disable_model_invocation, Some(true));
+        assert_eq!(cmd.body, "Body.");
+    }
+
+    #[test]
+    fn literal_description_preserves_newlines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_command(
+            tmp.path(),
+            "lit",
+            "---\ndescription: |-\n  one\n  two: three\nmodel: sonnet\n---\nbody\n",
+        );
+        let root = CommandsRoot::at(tmp.path());
+        let cmd = root.get("lit").expect("get");
+        assert_eq!(cmd.description.as_deref(), Some("one\ntwo: three"));
+        assert_eq!(cmd.model.as_deref(), Some("sonnet"));
     }
 
     #[test]
