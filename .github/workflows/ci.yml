@@ -54,15 +54,8 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Clippy (cr CLI)
-        if: matrix.rust == 'stable'
-        run: cargo clippy -p claude-cr --all-targets -- -D warnings
-
       - name: Build
         run: cargo build --all-features
-
-      - name: Build (cr CLI)
-        run: cargo build -p claude-cr
 
       - name: Build without default features
         run: cargo build --no-default-features
@@ -109,9 +102,6 @@ jobs:
 
       - name: Check MSRV
         run: cargo check --all-features
-
-      - name: Check MSRV (cr CLI)
-        run: cargo check -p claude-cr
 
   docs:
     name: Documentation
