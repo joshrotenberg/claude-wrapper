@@ -39,6 +39,23 @@
 //! survive a round trip. Frontmatter is optional -- a body-only file
 //! parses fine, with `name` defaulting to the file stem.
 //!
+//! YAML block scalars are supported for any key, which is how
+//! multi-line descriptions are usually written:
+//!
+//! ```text
+//! ---
+//! name: auditor
+//! description: >-
+//!   Use when surveying a codebase against a rubric. Read-only:
+//!   never edits files, opens PRs, or commits.
+//! ---
+//! ```
+//!
+//! `>` folds the block into one line (blank lines become newlines),
+//! `|` preserves the line breaks, and the chomping indicator
+//! (`-` / none / `+`) controls the trailing newline. Continuation
+//! lines are part of the value even when they contain a colon.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -242,23 +259,53 @@ pub struct AgentWriteInput {
 fn render_agent_markdown(file_stem: &str, input: &AgentWriteInput) -> String {
     let name = input.name.as_deref().unwrap_or(file_stem);
     let mut out = String::from("---\n");
-    out.push_str(&format!("name: {name}\n"));
+    push_frontmatter_field(&mut out, "name", name);
     if let Some(desc) = &input.description {
-        out.push_str(&format!("description: {desc}\n"));
+        push_frontmatter_field(&mut out, "description", desc);
     }
     if !input.tools.is_empty() {
-        out.push_str(&format!("tools: {}\n", input.tools.join(", ")));
+        push_frontmatter_field(&mut out, "tools", &input.tools.join(", "));
     }
     if let Some(model) = &input.model {
-        out.push_str(&format!("model: {model}\n"));
+        push_frontmatter_field(&mut out, "model", model);
     }
     for (k, v) in &input.extra {
-        out.push_str(&format!("{k}: {v}\n"));
+        push_frontmatter_field(&mut out, k, v);
     }
     out.push_str("---\n\n");
     out.push_str(input.body.trim());
     out.push('\n');
     out
+}
+
+/// Render one frontmatter field.
+///
+/// Single-line values are written as plain `key: value`. Multi-line
+/// values go out as a literal block scalar, with the chomping
+/// indicator chosen to preserve the exact trailing newlines: a bare
+/// `key: value` would leave the continuation lines at the top level,
+/// where the reader takes them for new keys.
+fn push_frontmatter_field(out: &mut String, key: &str, value: &str) {
+    let core = value.trim_end_matches('\n');
+    if !value.contains('\n') || core.is_empty() {
+        out.push_str(&format!("{key}: {core}\n"));
+        return;
+    }
+    let trailing = value.len() - core.len();
+    let indicator = match trailing {
+        0 => "|-",
+        1 => "|",
+        _ => "|+",
+    };
+    out.push_str(&format!("{key}: {indicator}\n"));
+    for line in core.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out.push_str(&"\n".repeat(trailing.saturating_sub(1)));
 }
 
 fn validate_stem(stem: &str) -> Result<()> {
@@ -351,17 +398,8 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
     let mut extra = BTreeMap::new();
 
     if let Some(fm) = frontmatter {
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Some((k, v)) = trimmed.split_once(':') else {
-                continue;
-            };
-            let key = k.trim();
-            let value = v.trim().to_string();
-            match key {
+        for (key, value) in frontmatter_entries(fm) {
+            match key.as_str() {
                 "name" if !value.is_empty() => name = value,
                 "description" if !value.is_empty() => description = Some(value),
                 "tools" if !value.is_empty() => {
@@ -372,10 +410,9 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
                         .collect();
                 }
                 "model" if !value.is_empty() => model = Some(value),
-                _ if !key.is_empty() => {
-                    extra.insert(key.to_string(), value);
+                _ => {
+                    extra.insert(key, value);
                 }
-                _ => {}
             }
         }
     }
@@ -390,6 +427,221 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
         body: body.trim().to_string(),
         extra,
     })
+}
+
+/// Parse a frontmatter block into ordered `(key, value)` pairs.
+///
+/// Shared by the agent, skill, and command readers so all three
+/// artifact types accept the same frontmatter shapes.
+///
+/// The parser stays permissive and flat: every `key: value` line at
+/// any indentation becomes an entry, and lines without a colon are
+/// skipped. Duplicate keys are returned in file order, so callers
+/// that fold into a map get last-wins.
+///
+/// The one structural feature it understands is the YAML block
+/// scalar. A value of `>`, `>-`, `>+`, `|`, `|-`, or `|+` (with an
+/// optional explicit indentation digit and an optional trailing
+/// comment) consumes the indented block that follows:
+///
+/// - `>` folds line breaks into spaces; a blank line becomes a
+///   newline, and more-indented lines keep their breaks.
+/// - `|` preserves line breaks verbatim.
+/// - The chomping indicator sets the trailing newline: `-` strips
+///   it, the default clips to one, `+` keeps every one.
+///
+/// Without this, a folded `description` yields the indicator itself
+/// as the value and its continuation lines leak out as bogus keys
+/// (any line containing a colon) or vanish (any line without one).
+pub(crate) fn frontmatter_entries(fm: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = fm.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        match parse_block_header(v.trim()) {
+            Some(header) => {
+                let (value, consumed) = read_block_scalar(&lines[i..], indent_width(line), header);
+                i += consumed;
+                out.push((key.to_string(), value));
+            }
+            None => out.push((key.to_string(), v.trim().to_string())),
+        }
+    }
+    out
+}
+
+/// How a block scalar treats trailing line breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chomp {
+    /// `-`: drop the trailing line break entirely.
+    Strip,
+    /// Default: keep exactly one trailing line break.
+    Clip,
+    /// `+`: keep every trailing line break.
+    Keep,
+}
+
+/// A parsed block-scalar header (`>` / `|` plus modifiers).
+#[derive(Debug, Clone, Copy)]
+struct BlockHeader {
+    /// `|` preserves line breaks; `>` folds them into spaces.
+    literal: bool,
+    chomp: Chomp,
+    /// Explicit indentation indicator, relative to the key's indent.
+    indent: Option<usize>,
+}
+
+/// Recognize a block-scalar header. Returns `None` for anything that
+/// isn't one, so plain values (including a value that merely starts
+/// with `>`) fall through to the flat path unchanged.
+fn parse_block_header(rest: &str) -> Option<BlockHeader> {
+    // A header is the indicator plus modifiers, optionally followed
+    // by whitespace and a `#` comment. Anything else is a plain value.
+    let (head, tail) = match rest.split_once(char::is_whitespace) {
+        Some((h, t)) => (h, t.trim_start()),
+        None => (rest, ""),
+    };
+    if !tail.is_empty() && !tail.starts_with('#') {
+        return None;
+    }
+
+    let mut chars = head.chars();
+    let literal = match chars.next()? {
+        '|' => true,
+        '>' => false,
+        _ => return None,
+    };
+    let mut chomp = Chomp::Clip;
+    let mut indent = None;
+    for c in chars {
+        match c {
+            '-' | '+' if chomp == Chomp::Clip => {
+                chomp = if c == '-' { Chomp::Strip } else { Chomp::Keep };
+            }
+            '1'..='9' if indent.is_none() => indent = Some(c as usize - '0' as usize),
+            _ => return None,
+        }
+    }
+    Some(BlockHeader {
+        literal,
+        chomp,
+        indent,
+    })
+}
+
+/// Read the block that follows a block-scalar header.
+///
+/// `lines` starts at the line after the header. Returns the scalar
+/// value and how many lines it consumed. The block is every
+/// following line that is blank or indented deeper than
+/// `parent_indent` (the indentation of the key line itself).
+fn read_block_scalar(lines: &[&str], parent_indent: usize, header: BlockHeader) -> (String, usize) {
+    let consumed = lines
+        .iter()
+        .take_while(|l| l.trim().is_empty() || indent_width(l) > parent_indent)
+        .count();
+    let block = &lines[..consumed];
+
+    // Content indentation: the explicit indicator if given, else the
+    // indentation of the first non-blank line.
+    let content_indent = match header.indent {
+        Some(n) => parent_indent + n,
+        None => block
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| indent_width(l))
+            .unwrap_or(parent_indent + 1),
+    };
+    let stripped: Vec<&str> = block
+        .iter()
+        .map(|l| &l[indent_width(l).min(content_indent)..])
+        .collect();
+
+    // Trailing blank lines are the chomping tail, not content.
+    let end = stripped
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let trailing_blanks = stripped.len() - end;
+    let content = &stripped[..end];
+
+    let mut value = if header.literal {
+        content
+            .iter()
+            .map(|l| l.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        fold_block(content)
+    };
+    match header.chomp {
+        Chomp::Strip => {}
+        Chomp::Clip => {
+            if !value.is_empty() {
+                value.push('\n');
+            }
+        }
+        Chomp::Keep => {
+            let n = if value.is_empty() {
+                trailing_blanks
+            } else {
+                trailing_blanks + 1
+            };
+            value.push_str(&"\n".repeat(n));
+        }
+    }
+    (value, consumed)
+}
+
+/// Fold a `>` block: line breaks between plain lines become spaces,
+/// blank lines become newlines, and breaks adjacent to a
+/// more-indented line stay newlines.
+fn fold_block(lines: &[&str]) -> String {
+    let mut out = String::new();
+    let mut blank_run = 0usize;
+    let mut have_content = false;
+    let mut prev_more_indented = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            continue;
+        }
+        let more_indented = line.starts_with([' ', '\t']);
+        if blank_run > 0 {
+            out.push_str(&"\n".repeat(blank_run));
+        } else if have_content {
+            if more_indented || prev_more_indented {
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+        }
+        out.push_str(line.trim_end());
+        blank_run = 0;
+        have_content = true;
+        prev_more_indented = more_indented;
+    }
+    out
+}
+
+/// Width of a line's leading whitespace. Spaces and tabs are one
+/// column each; YAML forbids tabs in indentation anyway.
+fn indent_width(line: &str) -> usize {
+    line.len() - line.trim_start_matches([' ', '\t']).len()
 }
 
 /// Split a markdown file into (optional frontmatter body, content
@@ -586,6 +838,174 @@ mod tests {
         assert_eq!(body, raw);
     }
 
+    // -- block scalars -------------------------------------------------
+
+    /// The exact shape that motivated block-scalar support: a folded
+    /// description whose continuation lines contain colons. Before,
+    /// the value was the `>-` indicator itself, `Read-only` leaked
+    /// into `extra`, and the colon-free line was dropped.
+    #[test]
+    fn folded_description_with_colons_is_one_value() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_agent(
+            tmp.path(),
+            "auditor",
+            concat!(
+                "---\n",
+                "name: auditor\n",
+                "description: >-\n",
+                "  Use when surveying a codebase against a rubric and generating a backlog of\n",
+                "  GitHub issues. Read-only: never edits files, opens PRs, or commits. Accepts:\n",
+                "  \"audit <domain> in <repo>\", dispatched by dispatcher for audit+remediate shape.\n",
+                "tools: Read, Glob, Grep, Bash\n",
+                "model: sonnet\n",
+                "---\n\nBody.\n",
+            ),
+        );
+        let root = AgentsRoot::at(tmp.path());
+        let agent = root.get("auditor").expect("get");
+        assert_eq!(
+            agent.description.as_deref(),
+            Some(
+                "Use when surveying a codebase against a rubric and generating a backlog of \
+                 GitHub issues. Read-only: never edits files, opens PRs, or commits. Accepts: \
+                 \"audit <domain> in <repo>\", dispatched by dispatcher for audit+remediate shape."
+            )
+        );
+        // Continuation lines must not leak out as keys.
+        assert!(agent.extra.is_empty(), "extra: {:?}", agent.extra);
+        // Keys after the block still parse.
+        assert_eq!(agent.tools, vec!["Read", "Glob", "Grep", "Bash"]);
+        assert_eq!(agent.model.as_deref(), Some("sonnet"));
+        assert_eq!(agent.body, "Body.");
+    }
+
+    #[test]
+    fn literal_block_preserves_newlines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_agent(
+            tmp.path(),
+            "lit",
+            "---\nname: lit\ndescription: |-\n  first line\n  second: line\n\n  after blank\nmodel: sonnet\n---\nbody\n",
+        );
+        let root = AgentsRoot::at(tmp.path());
+        let agent = root.get("lit").expect("get");
+        assert_eq!(
+            agent.description.as_deref(),
+            Some("first line\nsecond: line\n\nafter blank")
+        );
+        assert_eq!(agent.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn plain_single_line_values_are_unchanged() {
+        let entries = frontmatter_entries("name: x\ndescription: a: b\nmodel: sonnet\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("name".to_string(), "x".to_string()),
+                // Only the first colon splits; the rest is the value.
+                ("description".to_string(), "a: b".to_string()),
+                ("model".to_string(), "sonnet".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn values_starting_with_indicator_char_are_not_blocks() {
+        // `> not an indicator` is a plain value, not a block header.
+        let entries = frontmatter_entries("description: > plain text\nmodel: sonnet\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("description".to_string(), "> plain text".to_string()),
+                ("model".to_string(), "sonnet".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chomping_controls_trailing_newline() {
+        let cases = [
+            (">-", "one two"),
+            (">", "one two\n"),
+            (">+", "one two\n\n\n"),
+            ("|-", "one\ntwo"),
+            ("|", "one\ntwo\n"),
+            ("|+", "one\ntwo\n\n\n"),
+        ];
+        for (indicator, expected) in cases {
+            let fm = format!("description: {indicator}\n  one\n  two\n\n\nmodel: sonnet\n");
+            let entries = frontmatter_entries(&fm);
+            assert_eq!(
+                entries,
+                vec![
+                    ("description".to_string(), expected.to_string()),
+                    ("model".to_string(), "sonnet".to_string()),
+                ],
+                "indicator {indicator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_block_keeps_more_indented_lines_on_their_own_lines() {
+        let entries = frontmatter_entries(
+            "description: >-\n  intro line\n    indented literal\n  tail line\n",
+        );
+        assert_eq!(
+            entries,
+            vec![(
+                "description".to_string(),
+                "intro line\n  indented literal\ntail line".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn explicit_indentation_indicator_is_honored() {
+        // `|4` sets the content indent explicitly, so the two extra
+        // spaces on the second line are part of the value.
+        let entries = frontmatter_entries("description: |4-\n    one\n      two\n");
+        assert_eq!(
+            entries,
+            vec![("description".to_string(), "one\n  two".to_string())]
+        );
+    }
+
+    #[test]
+    fn block_scalar_at_end_of_frontmatter() {
+        let entries = frontmatter_entries("name: x\ndescription: >-\n  only value\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("name".to_string(), "x".to_string()),
+                ("description".to_string(), "only value".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_block_scalar_yields_empty_value() {
+        let entries = frontmatter_entries("description: >-\nmodel: sonnet\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("description".to_string(), String::new()),
+                ("model".to_string(), "sonnet".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn block_header_trailing_comment_is_ignored() {
+        let entries = frontmatter_entries("description: >- # why\n  folded text\n");
+        assert_eq!(
+            entries,
+            vec![("description".to_string(), "folded text".to_string())]
+        );
+    }
+
     #[test]
     fn empty_value_keys_dont_overwrite_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -760,6 +1180,46 @@ mod tests {
                 err.to_string().to_lowercase().contains("file_stem"),
                 "bad stem {bad:?} not rejected: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn write_round_trips_multi_line_description() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        // A description with embedded newlines and a colon: written
+        // as a plain `key: value` it would corrupt the frontmatter.
+        let desc = "first line\nsecond: line\n\nafter blank";
+        let input = AgentWriteInput {
+            description: Some(desc.into()),
+            model: Some("sonnet".into()),
+            body: "b".into(),
+            ..Default::default()
+        };
+        root.write("multi", input).expect("write");
+
+        let raw = std::fs::read_to_string(tmp.path().join("multi.md")).expect("read");
+        assert!(raw.contains("description: |-\n"), "raw: {raw}");
+
+        let agent = root.get("multi").expect("get");
+        assert_eq!(agent.description.as_deref(), Some(desc));
+        assert_eq!(agent.model.as_deref(), Some("sonnet"));
+        assert!(agent.extra.is_empty(), "extra: {:?}", agent.extra);
+    }
+
+    #[test]
+    fn write_round_trips_trailing_newlines_in_description() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        for desc in ["a\nb", "a\nb\n", "a\nb\n\n\n"] {
+            let input = AgentWriteInput {
+                description: Some(desc.into()),
+                body: "b".into(),
+                ..Default::default()
+            };
+            root.write("chomp", input).expect("write");
+            let agent = root.get("chomp").expect("get");
+            assert_eq!(agent.description.as_deref(), Some(desc), "desc {desc:?}");
         }
     }
 

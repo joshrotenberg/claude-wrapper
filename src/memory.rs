@@ -25,6 +25,13 @@
 //! (as plain strings); every other frontmatter key lands in
 //! [`Memory::extra`] verbatim.
 //!
+//! YAML block scalars (`>`, `>-`, `>+`, `|`, `|-`, `|+`) are
+//! supported for any key, which is how multi-line descriptions are
+//! usually written. `>` folds the block into one line, `|` preserves
+//! the line breaks, and the chomping indicator controls the trailing
+//! newline. Continuation lines are part of the value even when they
+//! contain a colon.
+//!
 //! Three levels of granularity:
 //!
 //! - [`MemoryRoot::list_projects_with_memory`] -- which projects
@@ -56,7 +63,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::artifacts::split_frontmatter;
+use crate::artifacts::{frontmatter_entries, split_frontmatter};
 use crate::error::{Error, Result};
 
 /// Root directory of Claude Code's per-project state. Defaults to
@@ -285,25 +292,17 @@ fn parse_memory_file(file_path: &Path) -> Result<Memory> {
     let mut extra = BTreeMap::new();
 
     if let Some(fm) = frontmatter {
-        for line in fm.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Some((k, v)) = trimmed.split_once(':') else {
-                continue;
-            };
-            let key = k.trim();
-            let value = unquote(v.trim()).to_string();
-            match key {
+        for (key, value) in frontmatter_entries(fm) {
+            let value = unquote(&value).to_string();
+            match key.as_str() {
                 "name" if !value.is_empty() => name = value,
                 "description" if !value.is_empty() => description = Some(value),
                 // The line-based parse flattens the nested
                 // `metadata:` block, so its `type:` arrives as a
                 // bare key.
                 "type" if !value.is_empty() => memory_type = Some(value),
-                _ if !key.is_empty() && !value.is_empty() => {
-                    extra.insert(key.to_string(), value);
+                _ if !value.is_empty() => {
+                    extra.insert(key, value);
                 }
                 _ => {}
             }
@@ -480,5 +479,38 @@ mod tests {
         assert_eq!(m.extra.get("custom").map(String::as_str), Some("kept"));
         // The bare `metadata:` container line has no value; dropped.
         assert!(!m.extra.contains_key("metadata"));
+    }
+
+    #[test]
+    fn folded_description_with_colons_is_one_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_memory(
+            tmp.path(),
+            "-slug",
+            "folded",
+            concat!(
+                "---\n",
+                "name: folded\n",
+                "description: >-\n",
+                "  Restarting as its own repo: MCP server plus CLI over one router,\n",
+                "  SQLite persistence.\n",
+                "metadata:\n",
+                "  type: project\n",
+                "---\n\nBody.\n",
+            ),
+        );
+        let root = MemoryRoot::at(tmp.path());
+        let m = root.get("-slug", "folded").expect("get");
+        assert_eq!(
+            m.description.as_deref(),
+            Some(
+                "Restarting as its own repo: MCP server plus CLI over one router, \
+                 SQLite persistence."
+            )
+        );
+        // The nested `metadata:` block still flattens to a bare `type`.
+        assert_eq!(m.memory_type.as_deref(), Some("project"));
+        assert!(m.extra.is_empty(), "extra: {:?}", m.extra);
+        assert_eq!(m.body, "Body.");
     }
 }
