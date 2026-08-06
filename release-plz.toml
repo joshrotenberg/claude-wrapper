@@ -18,16 +18,3 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-
-# `cr`, the companion CLI (crate name `claude-cr`, binary `cr`). Versioned and
-# tagged independently of the library.
-[[package]]
-name = "claude-cr"
-semver_check = false
-release = true
-publish = true
-git_release_enable = true
-git_tag_enable = true
-git_tag_name = "cr-v{{ version }}"
-changelog_update = true
-changelog_path = "examples/cr/CHANGELOG.md"

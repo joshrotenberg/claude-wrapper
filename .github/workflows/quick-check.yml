@@ -28,9 +28,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Clippy (cr CLI)
-        run: cargo clippy -p claude-cr --all-targets -- -D warnings
-
       - name: Check
         run: cargo check --all-features
 

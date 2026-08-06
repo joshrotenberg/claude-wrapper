@@ -1,7 +1,5 @@
 [workspace]
-# claude-wrapper is the root library crate; `examples/cr` is a companion CLI
-# member crate (published separately as `claude-cr`, installs the `cr` binary).
-members = ["examples/cr"]
+members = []
 resolver = "3"
 
 [package]
