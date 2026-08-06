@@ -33,11 +33,25 @@
 //! You are a Rust quality gate. ...
 //! ```
 //!
-//! The parser is permissive: only `name`, `description`, `tools`, and
-//! `model` are typed. `tools` is a comma-separated list. Any other
-//! `key: value` pairs land in [`Agent::extra`] so unknown future keys
-//! survive a round trip. Frontmatter is optional -- a body-only file
-//! parses fine, with `name` defaulting to the file stem.
+//! The parser is permissive: only `name`, `description`, `tools`,
+//! `model`, and `skills` are typed. `tools` is a comma-separated
+//! list; `skills` is usually a YAML block sequence:
+//!
+//! ```text
+//! skills:
+//!   - sandbox-preflight
+//!   - durable-context
+//! ```
+//!
+//! Any other `key: value` pairs land in [`Agent::extra`] so unknown
+//! future keys survive a round trip. Frontmatter is optional -- a
+//! body-only file parses fine, with `name` defaulting to the file
+//! stem.
+//!
+//! Sequences under keys other than `skills` reach [`Agent::extra`]
+//! joined by `", "`, since `extra` holds raw strings. Writing such an
+//! agent back out renders them comma-joined on one line rather than
+//! as a block sequence.
 //!
 //! YAML block scalars are supported for any key, which is how
 //! multi-line descriptions are usually written:
@@ -248,6 +262,9 @@ pub struct AgentWriteInput {
     pub tools: Vec<String>,
     /// Frontmatter `model`. Omitted when None.
     pub model: Option<String>,
+    /// Frontmatter `skills` as a list; rendered as a YAML block
+    /// sequence. Empty list omits the key entirely.
+    pub skills: Vec<String>,
     /// Body of the agent prompt. Trimmed of surrounding whitespace
     /// before write.
     pub body: String,
@@ -268,6 +285,14 @@ fn render_agent_markdown(file_stem: &str, input: &AgentWriteInput) -> String {
     }
     if let Some(model) = &input.model {
         push_frontmatter_field(&mut out, "model", model);
+    }
+    // Rendered as a block sequence rather than comma-joined: YAML
+    // reads `skills: a, b` as a plain scalar, not a list.
+    if !input.skills.is_empty() {
+        out.push_str("skills:\n");
+        for skill in &input.skills {
+            out.push_str(&format!("  - {skill}\n"));
+        }
     }
     for (k, v) in &input.extra {
         push_frontmatter_field(&mut out, k, v);
@@ -341,6 +366,8 @@ pub struct AgentSummary {
     pub tools: Vec<String>,
     /// Frontmatter `model` if present.
     pub model: Option<String>,
+    /// Frontmatter `skills` parsed as a list.
+    pub skills: Vec<String>,
     /// Absolute path to the source file.
     pub file_path: PathBuf,
     /// File size in bytes; useful for cheap UI hints.
@@ -358,6 +385,7 @@ impl AgentSummary {
             description: a.description.clone(),
             tools: a.tools.clone(),
             model: a.model.clone(),
+            skills: a.skills.clone(),
             file_path: a.file_path.clone(),
             size_bytes,
         }
@@ -377,6 +405,9 @@ pub struct Agent {
     pub tools: Vec<String>,
     /// Frontmatter `model` if present.
     pub model: Option<String>,
+    /// Frontmatter `skills` parsed as a list. Accepts a YAML block
+    /// sequence, a flow sequence, or a comma-separated scalar.
+    pub skills: Vec<String>,
     /// Absolute path to the source file.
     pub file_path: PathBuf,
     /// Markdown body after the frontmatter block (trimmed of
@@ -395,6 +426,7 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
     let mut description = None;
     let mut tools = Vec::new();
     let mut model = None;
+    let mut skills = Vec::new();
     let mut extra = BTreeMap::new();
 
     if let Some(fm) = frontmatter {
@@ -402,14 +434,9 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
             match key.as_str() {
                 "name" if !value.is_empty() => name = value,
                 "description" if !value.is_empty() => description = Some(value),
-                "tools" if !value.is_empty() => {
-                    tools = value
-                        .split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
+                "tools" if !value.is_empty() => tools = split_list(&value),
                 "model" if !value.is_empty() => model = Some(value),
+                "skills" if !value.is_empty() => skills = split_list(&value),
                 _ => {
                     extra.insert(key, value);
                 }
@@ -423,6 +450,7 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
         description,
         tools,
         model,
+        skills,
         file_path: path.to_path_buf(),
         body: body.trim().to_string(),
         extra,
@@ -439,10 +467,11 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
 /// skipped. Duplicate keys are returned in file order, so callers
 /// that fold into a map get last-wins.
 ///
-/// The one structural feature it understands is the YAML block
-/// scalar. A value of `>`, `>-`, `>+`, `|`, `|-`, or `|+` (with an
-/// optional explicit indentation digit and an optional trailing
-/// comment) consumes the indented block that follows:
+/// It understands two structural features.
+///
+/// **Block scalars.** A value of `>`, `>-`, `>+`, `|`, `|-`, or `|+`
+/// (with an optional explicit indentation digit and an optional
+/// trailing comment) consumes the indented block that follows:
 ///
 /// - `>` folds line breaks into spaces; a blank line becomes a
 ///   newline, and more-indented lines keep their breaks.
@@ -453,6 +482,26 @@ fn parse_agent_file(path: &Path, file_stem: &str) -> Result<Agent> {
 /// Without this, a folded `description` yields the indicator itself
 /// as the value and its continuation lines leak out as bogus keys
 /// (any line containing a colon) or vanish (any line without one).
+///
+/// **Block sequences.** An empty value followed by more-indented
+/// `- item` lines yields those items joined by `", "`, matching the
+/// comma-separated form `tools:` already uses. So
+///
+/// ```text
+/// skills:
+///   - sandbox-preflight
+///   - durable-context
+/// ```
+///
+/// becomes `("skills", "sandbox-preflight, durable-context")`.
+/// Without this the key yields an empty value and the items vanish
+/// (no colon to split on) or, if an item contains a colon, leak out
+/// as a bogus `- item` key. Use [`split_list`] to get the items back
+/// as a `Vec`.
+///
+/// Nested mappings are deliberately *not* structural: they keep
+/// flattening into bare keys, which [`crate::memory`] depends on to
+/// read `type:` out of a `metadata:` block.
 pub(crate) fn frontmatter_entries(fm: &str) -> Vec<(String, String)> {
     let lines: Vec<&str> = fm.lines().collect();
     let mut out = Vec::new();
@@ -471,16 +520,89 @@ pub(crate) fn frontmatter_entries(fm: &str) -> Vec<(String, String)> {
         if key.is_empty() {
             continue;
         }
-        match parse_block_header(v.trim()) {
+        let rest = v.trim();
+        match parse_block_header(rest) {
             Some(header) => {
                 let (value, consumed) = read_block_scalar(&lines[i..], indent_width(line), header);
                 i += consumed;
                 out.push((key.to_string(), value));
             }
-            None => out.push((key.to_string(), v.trim().to_string())),
+            // An empty value may be the head of a block sequence.
+            // `read_block_sequence` returns None for anything else
+            // (a nested mapping, a genuinely empty value), leaving
+            // those lines to the flat path exactly as before.
+            None if rest.is_empty() => match read_block_sequence(&lines[i..], indent_width(line)) {
+                Some((items, consumed)) => {
+                    i += consumed;
+                    out.push((key.to_string(), items.join(", ")));
+                }
+                None => out.push((key.to_string(), String::new())),
+            },
+            None => out.push((key.to_string(), rest.to_string())),
         }
     }
     out
+}
+
+/// Read the block sequence that follows a key with an empty value.
+///
+/// `lines` starts at the line after the key. Returns the item texts
+/// and how many lines they span, or `None` when the block isn't a
+/// plain sequence.
+///
+/// Every non-blank line in the block must be a `- item` entry. That
+/// rules out nested mappings (`metadata:` followed by `type: x`),
+/// which [`crate::memory`] relies on the flat path flattening, and
+/// item bodies that continue onto their own lines (`- matcher: Bash`
+/// followed by an indented `command:`). Both keep their existing
+/// behavior rather than being half-parsed here.
+fn read_block_sequence(lines: &[&str], parent_indent: usize) -> Option<(Vec<String>, usize)> {
+    let block = lines
+        .iter()
+        .take_while(|l| l.trim().is_empty() || indent_width(l) > parent_indent)
+        .count();
+    // Trailing blank lines belong to whatever follows, so the
+    // sequence ends at its last non-blank line. No non-blank line
+    // means no sequence.
+    let end = lines[..block]
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)?;
+
+    let mut items = Vec::new();
+    for line in &lines[..end] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // `-` must be followed by whitespace (or end the line) to be
+        // an item marker; `-foo` is a scalar that happens to start
+        // with a dash.
+        let item = trimmed.strip_prefix('-')?;
+        if !item.is_empty() && !item.starts_with([' ', '\t']) {
+            return None;
+        }
+        items.push(item.trim().to_string());
+    }
+    Some((items, end))
+}
+
+/// Split a comma-separated frontmatter list value.
+///
+/// Accepts both spellings Claude Code frontmatter uses for these
+/// keys: the bare form (`Read, Grep`) and the YAML flow sequence
+/// (`[Read, Grep]`). Block sequences arrive here already joined by
+/// [`frontmatter_entries`]. Empty items are dropped.
+pub(crate) fn split_list(value: &str) -> Vec<String> {
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(value);
+    inner
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// How a block scalar treats trailing line breaks.
@@ -1019,6 +1141,214 @@ mod tests {
         assert_eq!(agent.name, "empty-name");
     }
 
+    // -- block sequences -----------------------------------------------
+
+    #[test]
+    fn block_sequence_becomes_comma_joined_value() {
+        let entries = frontmatter_entries("skills:\n  - alpha\n  - beta\n  - gamma\n");
+        assert_eq!(
+            entries,
+            vec![("skills".to_string(), "alpha, beta, gamma".to_string())]
+        );
+    }
+
+    #[test]
+    fn block_sequence_followed_by_another_key() {
+        let entries = frontmatter_entries("skills:\n  - alpha\n  - beta\nmodel: sonnet\nname: x\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("skills".to_string(), "alpha, beta".to_string()),
+                ("model".to_string(), "sonnet".to_string()),
+                ("name".to_string(), "x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_sequence_yields_empty_value() {
+        // A key with nothing indented under it is YAML null, not a
+        // sequence. It keeps the pre-existing empty-value behavior.
+        let entries = frontmatter_entries("skills:\nmodel: sonnet\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("skills".to_string(), String::new()),
+                ("model".to_string(), "sonnet".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_sequence_at_end_of_frontmatter() {
+        let entries = frontmatter_entries("name: x\nskills:\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("name".to_string(), "x".to_string()),
+                ("skills".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_item_containing_colon_stays_one_item() {
+        // Without sequence support this line splits on the colon and
+        // leaks out as a bogus `- Use when` key.
+        let entries = frontmatter_entries("tags:\n  - Use when: needed\n  - simple\n");
+        assert_eq!(
+            entries,
+            vec![("tags".to_string(), "Use when: needed, simple".to_string())]
+        );
+    }
+
+    #[test]
+    fn blank_lines_around_sequence_are_not_swallowed() {
+        let entries = frontmatter_entries("skills:\n  - alpha\n\n  - beta\n\nmodel: sonnet\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("skills".to_string(), "alpha, beta".to_string()),
+                ("model".to_string(), "sonnet".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_dash_item_is_an_empty_string() {
+        let entries = frontmatter_entries("skills:\n  -\n  - beta\n");
+        assert_eq!(entries, vec![("skills".to_string(), ", beta".to_string())]);
+    }
+
+    #[test]
+    fn nested_mapping_still_flattens() {
+        // `crate::memory` reads `type:` out of a `metadata:` block by
+        // relying on this flattening, so a nested mapping must not be
+        // mistaken for a sequence.
+        let entries = frontmatter_entries("metadata:\n  type: reference\n  origin: abc\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("metadata".to_string(), String::new()),
+                ("type".to_string(), "reference".to_string()),
+                ("origin".to_string(), "abc".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_of_mappings_is_left_to_the_flat_path() {
+        // The second line isn't a `- item`, so the block isn't a plain
+        // sequence and keeps its previous (flat) parse.
+        let entries = frontmatter_entries("hooks:\n  - matcher: Bash\n    command: fmt\n");
+        assert_eq!(
+            entries,
+            vec![
+                ("hooks".to_string(), String::new()),
+                ("- matcher".to_string(), "Bash".to_string()),
+                ("command".to_string(), "fmt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dash_prefixed_scalar_is_not_a_sequence() {
+        // `-5` is a value, not an item marker.
+        let entries = frontmatter_entries("weird:\n  -5\n");
+        assert_eq!(entries, vec![("weird".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn split_list_accepts_bare_and_flow_forms() {
+        assert_eq!(split_list("a, b, c"), vec!["a", "b", "c"]);
+        assert_eq!(split_list("[a, b, c]"), vec!["a", "b", "c"]);
+        assert_eq!(split_list("[]"), Vec::<String>::new());
+        assert_eq!(split_list("solo"), vec!["solo"]);
+        // Brackets must be balanced to be stripped.
+        assert_eq!(split_list("[a"), vec!["[a"]);
+    }
+
+    /// The exact shape that motivated block-sequence support: the real
+    /// `~/.claude/agents/auditor.md`. Before, `skills` landed in
+    /// `extra` as an empty string and the three items were dropped.
+    #[test]
+    fn agent_skills_block_sequence_parses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_agent(
+            tmp.path(),
+            "auditor",
+            concat!(
+                "---\n",
+                "name: auditor\n",
+                "description: Surveys a codebase against a rubric.\n",
+                "tools: Read, Glob, Grep, Bash\n",
+                "model: sonnet\n",
+                "skills:\n",
+                "  - sandbox-preflight\n",
+                "  - durable-context\n",
+                "  - audit-protocol\n",
+                "---\n\nYou are the auditor.\n",
+            ),
+        );
+        let root = AgentsRoot::at(tmp.path());
+        let agent = root.get("auditor").expect("get");
+        assert_eq!(
+            agent.skills,
+            vec!["sandbox-preflight", "durable-context", "audit-protocol"]
+        );
+        // The key must not also land in extra.
+        assert!(agent.extra.is_empty(), "extra: {:?}", agent.extra);
+        assert_eq!(agent.tools, vec!["Read", "Glob", "Grep", "Bash"]);
+        assert_eq!(agent.model.as_deref(), Some("sonnet"));
+        assert_eq!(agent.body, "You are the auditor.");
+
+        // list() carries skills too.
+        let summary = root.list().expect("list").into_iter().next().expect("one");
+        assert_eq!(summary.skills, agent.skills);
+    }
+
+    #[test]
+    fn agent_skills_accepts_flow_and_scalar_forms() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_agent(tmp.path(), "flow", "---\nskills: [a, b]\n---\nbody\n");
+        write_agent(tmp.path(), "scalar", "---\nskills: a, b\n---\nbody\n");
+        let root = AgentsRoot::at(tmp.path());
+        assert_eq!(root.get("flow").expect("get").skills, vec!["a", "b"]);
+        assert_eq!(root.get("scalar").expect("get").skills, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn agent_without_skills_has_empty_list() {
+        let tmp = fixture_root();
+        let root = AgentsRoot::at(tmp.path());
+        assert!(root.get("rust-qa").expect("get").skills.is_empty());
+    }
+
+    #[test]
+    fn skills_round_trip_through_write_as_a_block_sequence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = AgentsRoot::at(tmp.path());
+        let input = AgentWriteInput {
+            name: Some("auditor".into()),
+            skills: vec!["sandbox-preflight".into(), "durable-context".into()],
+            body: "b".into(),
+            ..Default::default()
+        };
+        root.write("auditor", input).expect("write");
+
+        // Rendered as a real YAML sequence, not `skills: a, b` (which
+        // YAML would read as a plain scalar).
+        let raw = fs::read_to_string(tmp.path().join("auditor.md")).expect("read");
+        assert!(
+            raw.contains("skills:\n  - sandbox-preflight\n  - durable-context\n"),
+            "raw: {raw}"
+        );
+        assert_eq!(
+            root.get("auditor").expect("get").skills,
+            vec!["sandbox-preflight", "durable-context"]
+        );
+    }
+
     // -- write / write_new / delete -----------------------------------
 
     fn input_with_body(body: &str) -> AgentWriteInput {
@@ -1037,6 +1367,7 @@ mod tests {
             description: Some("does the thing".into()),
             tools: vec!["Read".into(), "Bash".into()],
             model: Some("sonnet".into()),
+            skills: vec!["durable-context".into()],
             body: "You are an agent.".into(),
             extra: BTreeMap::new(),
         };
@@ -1233,6 +1564,7 @@ mod tests {
             description: Some("d".into()),
             tools: vec!["t1".into(), "t2".into()],
             model: Some("haiku".into()),
+            skills: vec!["s1".into(), "s2".into()],
             body: "body".into(),
             extra,
         };
@@ -1240,13 +1572,17 @@ mod tests {
         let lines: Vec<&str> = md.lines().collect();
         // Header
         assert_eq!(lines[0], "---");
-        // Canonical order: name, description, tools, model, then sorted extras.
+        // Canonical order: name, description, tools, model, skills,
+        // then sorted extras.
         assert_eq!(lines[1], "name: n");
         assert_eq!(lines[2], "description: d");
         assert_eq!(lines[3], "tools: t1, t2");
         assert_eq!(lines[4], "model: haiku");
-        assert_eq!(lines[5], "aaa_first: v");
-        assert_eq!(lines[6], "zzz_last: v");
-        assert_eq!(lines[7], "---");
+        assert_eq!(lines[5], "skills:");
+        assert_eq!(lines[6], "  - s1");
+        assert_eq!(lines[7], "  - s2");
+        assert_eq!(lines[8], "aaa_first: v");
+        assert_eq!(lines[9], "zzz_last: v");
+        assert_eq!(lines[10], "---");
     }
 }
