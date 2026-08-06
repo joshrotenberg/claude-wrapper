@@ -409,7 +409,9 @@ pub use retry::{BackoffStrategy, RetryPolicy};
 pub use session::Session;
 pub use tool_pattern::{PatternError, ToolPattern};
 pub use types::*;
-pub use version::{CliVersion, CliVersionStatus, VersionParseError};
+pub use version::{
+    CliVersion, CliVersionStatus, TESTED_CLI_VERSION_MAX, TESTED_CLI_VERSION_MIN, VersionParseError,
+};
 
 /// The Claude CLI client. Holds shared configuration applied to all commands.
 ///
@@ -542,24 +544,37 @@ impl Claude {
 
     /// The tested-against `[min, max]` range declared at build time
     /// via [`ClaudeBuilder::tested_cli_version_range`], if any.
+    ///
+    /// `None` means no override was set, in which case version checks
+    /// use the crate's own [`TESTED_CLI_VERSION_MIN`] /
+    /// [`TESTED_CLI_VERSION_MAX`]; see [`Self::effective_tested_range`].
     #[must_use]
     pub fn tested_cli_version_range(&self) -> Option<(CliVersion, CliVersion)> {
         self.tested_cli_version_range
     }
 
-    /// Classify the installed CLI against the declared
-    /// tested-against range. Logs a `tracing::warn!` when outside
-    /// the range; returns the typed status either way. If no range
-    /// was declared via [`ClaudeBuilder::tested_cli_version_range`],
-    /// returns [`CliVersionStatus::Tested`] -- callers that didn't
-    /// opt in get the silent-success path.
+    /// The range version checks actually use: the caller's override when one
+    /// was set, otherwise the crate's own declared range.
+    #[must_use]
+    pub fn effective_tested_range(&self) -> (CliVersion, CliVersion) {
+        self.tested_cli_version_range
+            .unwrap_or((TESTED_CLI_VERSION_MIN, TESTED_CLI_VERSION_MAX))
+    }
+
+    /// Classify the installed CLI against the tested-against range.
+    /// Logs a `tracing::warn!` when outside the range; returns the
+    /// typed status either way.
+    ///
+    /// The range defaults to the crate's own
+    /// [`TESTED_CLI_VERSION_MIN`] / [`TESTED_CLI_VERSION_MAX`],
+    /// because only the crate knows what it was built and tested
+    /// against. [`ClaudeBuilder::tested_cli_version_range`] overrides
+    /// it for hosts that have verified a different range themselves.
     ///
     /// Intended for one-shot use at startup, not on every command.
     #[cfg(feature = "async")]
     pub async fn cli_version_status(&self) -> Result<CliVersionStatus> {
-        let Some((min, max)) = self.tested_cli_version_range else {
-            return Ok(CliVersionStatus::Tested);
-        };
+        let (min, max) = self.effective_tested_range();
         let found = self.cli_version().await?;
         let status = found.status_within(&min, &max);
         warn_on_drift(&status);
@@ -570,9 +585,7 @@ impl Claude {
     /// the `sync` feature.
     #[cfg(feature = "sync")]
     pub fn cli_version_status_sync(&self) -> Result<CliVersionStatus> {
-        let Some((min, max)) = self.tested_cli_version_range else {
-            return Ok(CliVersionStatus::Tested);
-        };
+        let (min, max) = self.effective_tested_range();
         let found = self.cli_version_sync()?;
         let status = found.status_within(&min, &max);
         warn_on_drift(&status);
@@ -751,6 +764,14 @@ impl ClaudeBuilder {
     /// lets us say "we know it's broken below this"; the max ceiling
     /// lets us say "we haven't verified above this -- proceed but
     /// expect surprises."
+    ///
+    /// # You usually do not need this
+    ///
+    /// The crate declares its own range in
+    /// [`TESTED_CLI_VERSION_MIN`] / [`TESTED_CLI_VERSION_MAX`], and
+    /// version checks use it by default, because only the crate knows
+    /// what it was built and tested against. Set this only when a host
+    /// has verified a different range itself.
     ///
     /// # Example
     ///
