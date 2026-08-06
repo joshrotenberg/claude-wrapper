@@ -14,6 +14,15 @@
 //! cargo test --test contract -- --ignored
 //! ```
 //!
+//! `CLAUDE_CONTRACT_BIN` overrides which binary is checked, which is how the
+//! supported floor is established: install several versions side by side and
+//! run this suite against each, rather than maintaining a flag list by hand.
+//!
+//! ```sh
+//! CLAUDE_CONTRACT_BIN=/tmp/v/node_modules/.bin/claude \
+//!   cargo test --test contract -- --ignored
+//! ```
+//!
 //! # How the check works
 //!
 //! The CLI's help (commander.js, not clap) indents each option line by exactly
@@ -80,7 +89,11 @@ const KNOWN_HIDDEN: &[(&str, &str, &str)] = &[(
 /// `--allowedTools, --allowed-tools <tools...>` and both spellings count as
 /// present.
 fn help_flags(subcommand: &[&str]) -> HashSet<String> {
-    let mut cmd = Command::new("claude");
+    // `CLAUDE_CONTRACT_BIN` points the suite at a specific binary, which is how
+    // a floor gets established: install several versions side by side and run
+    // the real check against each rather than hand-maintaining a flag list.
+    let binary = std::env::var("CLAUDE_CONTRACT_BIN").unwrap_or_else(|_| "claude".to_string());
+    let mut cmd = Command::new(&binary);
     cmd.args(subcommand)
         .arg("--help")
         // Same hygiene the exec layer applies, so the child does not believe it
@@ -89,7 +102,7 @@ fn help_flags(subcommand: &[&str]) -> HashSet<String> {
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
     let out = cmd
         .output()
-        .unwrap_or_else(|e| panic!("running `claude {} --help`: {e}", subcommand.join(" ")));
+        .unwrap_or_else(|e| panic!("running `{binary} {} --help`: {e}", subcommand.join(" ")));
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
