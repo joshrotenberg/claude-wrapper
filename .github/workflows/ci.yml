@@ -86,7 +86,12 @@ jobs:
         # Both ends of the range declared in src/version.rs as
         # TESTED_CLI_VERSION_MIN / MAX. A unit test cross-checks that these
         # match, so bumping a constant without adding it here fails the build.
-        claude_version: ["2.1.0", "2.1.999"]
+        #
+        # The floor is 2.1.50 because this suite proved it: 2.1.0 through at
+        # least 2.1.36 lack --effort, --worktree, and others the builders emit.
+        # (2.1.45 is skipped deliberately -- it reproducibly lacks even flags
+        # 2.1.36 had, so it looks like a bad publish.)
+        claude_version: ["2.1.50", "2.1.999"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
