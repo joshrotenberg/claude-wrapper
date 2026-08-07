@@ -50,6 +50,49 @@ pub(crate) fn full_command_args(claude: &Claude, args: Vec<String>) -> Vec<Strin
     command_args
 }
 
+/// The subcommand label for a span, derived from the argv.
+///
+/// The first token is the subcommand for subcommand-style invocations
+/// (`mcp`, `plugin`, `doctor`). For print-mode runs it is the leading
+/// flag (`--print`), which is equally informative. Never a value:
+/// values always follow a flag, and the first token cannot be one.
+///
+/// Deliberately not the whole argv. Prompts arrive as argv positionals
+/// and must never reach a span field.
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) fn span_command(args: &[String]) -> &str {
+    args.first().map(String::as_str).unwrap_or("<none>")
+}
+
+/// Open the span covering one CLI invocation.
+///
+/// `exit_code` and `duration_ms` are declared empty and recorded when
+/// the call finishes, so a subscriber sees them on close. Carries the
+/// binary and working directory, never the prompt and never the env.
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) fn exec_span(claude: &Claude, args: &[String], mode: &'static str) -> tracing::Span {
+    tracing::debug_span!(
+        "claude.exec",
+        command = span_command(args),
+        mode,
+        binary = %claude.binary.display(),
+        cwd = claude.working_dir.as_deref().map(|d| d.display().to_string()),
+        exit_code = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+    )
+}
+
+/// Record the outcome of an invocation on its span.
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) fn record_exec_outcome(
+    span: &tracing::Span,
+    exit_code: i32,
+    started: std::time::Instant,
+) {
+    span.record("exit_code", exit_code);
+    span.record("duration_ms", started.elapsed().as_millis() as u64);
+}
+
 /// Raw output from a claude CLI invocation.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -189,13 +232,16 @@ async fn run_claude_with_stdin_prompt_internal(
 ) -> Result<CommandOutput> {
     let command_args = full_command_args(claude, args);
 
+    let span = exec_span(claude, &command_args, "stdin");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt)");
 
     let binary = &claude.binary;
     let env = &claude.env;
     let working_dir = claude.working_dir.as_deref();
 
-    if let Some(timeout) = claude.timeout {
+    let result = if let Some(timeout) = claude.timeout {
         run_with_timeout_stdin(
             binary,
             &command_args,
@@ -207,7 +253,12 @@ async fn run_claude_with_stdin_prompt_internal(
         .await
     } else {
         run_internal_stdin(binary, &command_args, env, working_dir, stdin_content).await
+    };
+
+    if let Ok(output) = &result {
+        record_exec_outcome(&span, output.exit_code, started);
     }
+    result
 }
 
 #[cfg(feature = "async")]
@@ -426,6 +477,9 @@ async fn run_with_timeout_stdin(
 async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     let command_args = full_command_args(claude, args);
 
+    let span = exec_span(claude, &command_args, "oneshot");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command");
 
     let output = if let Some(timeout) = claude.timeout {
@@ -447,6 +501,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
         .await?
     };
 
+    record_exec_outcome(&span, output.exit_code, started);
     Ok(output)
 }
 
@@ -771,9 +826,12 @@ pub fn run_claude_with_stdin_prompt_sync(
 ) -> Result<CommandOutput> {
     let command_args = full_command_args(claude, args);
 
+    let span = exec_span(claude, &command_args, "stdin-sync");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt, sync)");
 
-    if let Some(timeout) = claude.timeout {
+    let result = if let Some(timeout) = claude.timeout {
         run_with_timeout_stdin_sync(
             &claude.binary,
             &command_args,
@@ -790,7 +848,12 @@ pub fn run_claude_with_stdin_prompt_sync(
             claude.working_dir.as_deref(),
             stdin_content,
         )
+    };
+
+    if let Ok(output) = &result {
+        record_exec_outcome(&span, output.exit_code, started);
     }
+    result
 }
 
 #[cfg(feature = "sync")]
@@ -1001,9 +1064,12 @@ fn run_with_timeout_stdin_sync(
 fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     let command_args = full_command_args(claude, args);
 
+    let span = exec_span(claude, &command_args, "oneshot-sync");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (sync)");
 
-    if let Some(timeout) = claude.timeout {
+    let result = if let Some(timeout) = claude.timeout {
         run_with_timeout_sync(
             &claude.binary,
             &command_args,
@@ -1018,7 +1084,12 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &claude.env,
             claude.working_dir.as_deref(),
         )
+    };
+
+    if let Ok(output) = &result {
+        record_exec_outcome(&span, output.exit_code, started);
     }
+    result
 }
 
 /// Blocking mirror of [`run_claude_allow_exit_codes`].

@@ -200,7 +200,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, warn};
 
 use crate::Claude;
 use crate::command::spawn_args::{SharedSpawnArgs, shell_quote};
@@ -1187,16 +1187,41 @@ impl DuplexSession {
         let (events_tx, _initial_rx) = broadcast::channel(capacity);
         let (exit_tx, exit_rx) = watch::channel(SessionExitStatus::Running);
 
-        let join = tokio::spawn(run_session(
-            child,
-            group,
-            stdin,
-            stdout,
-            outbound_rx,
-            events_tx.clone(),
-            permission_handler,
-            exit_tx,
-        ));
+        // A session-lifetime span, entered inside the spawned task. The
+        // run loop interleaves events from every turn on one stdout
+        // stream, so without this its lines ("dropping orphan result
+        // event", parse failures, shutdown-budget kills) cannot be
+        // attributed to a session at all when several are open.
+        //
+        // `session_id` starts empty and is recorded when the CLI's init
+        // event arrives, since it is not known at spawn unless resuming.
+        let session_span = tracing::debug_span!(
+            "claude.session",
+            session_id = tracing::field::Empty,
+            model = opts.shared.model.as_deref().unwrap_or("default"),
+            permission_mode = opts
+                .shared
+                .permission_mode
+                .as_ref()
+                .map(|m| m.as_arg())
+                .unwrap_or("default"),
+            resumed = opts.shared.resume.is_some(),
+            turns = tracing::field::Empty,
+            exit = tracing::field::Empty,
+        );
+        let join = tokio::spawn(
+            run_session(
+                child,
+                group,
+                stdin,
+                stdout,
+                outbound_rx,
+                events_tx.clone(),
+                permission_handler,
+                exit_tx,
+            )
+            .instrument(session_span),
+        );
 
         Ok(Self {
             outbound_tx,
@@ -1471,6 +1496,11 @@ async fn run_session(
     let mut pending_control: HashMap<String, oneshot::Sender<Result<()>>> = HashMap::new();
     let mut next_control_id: u64 = 0;
     let mut stream_err: Option<Error> = None;
+    // The session span is this task's own span (see DuplexSession::spawn).
+    let session_span = tracing::Span::current();
+    let mut turns: u64 = 0;
+    let mut turn_span: Option<tracing::Span> = None;
+    let mut turn_started: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -1488,6 +1518,41 @@ async fn run_session(
                             continue;
                         }
                     };
+                    // Peek before handle_inbound consumes it: the init
+                    // event is where the session id first appears, and the
+                    // result event carries the turn's outcome.
+                    match parsed.get("type").and_then(Value::as_str) {
+                        Some("system")
+                            if parsed.get("subtype").and_then(Value::as_str) == Some("init") =>
+                        {
+                            if let Some(id) = parsed.get("session_id").and_then(Value::as_str) {
+                                session_span.record("session_id", id);
+                            }
+                        }
+                        Some("result") => {
+                            if let Some(span) = turn_span.take() {
+                                span.record(
+                                    "is_error",
+                                    parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                                );
+                                if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
+                                    span.record("subtype", sub);
+                                }
+                                if let Some(c) =
+                                    parsed.get("total_cost_usd").and_then(Value::as_f64)
+                                {
+                                    span.record("cost_usd", c);
+                                }
+                                if let Some(started) = turn_started.take() {
+                                    span.record(
+                                        "duration_ms",
+                                        started.elapsed().as_millis() as u64,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     match handle_inbound(parsed, &mut pending, &events_tx) {
                         InboundAction::None => {}
                         InboundAction::Permission(req) => {
@@ -1550,6 +1615,21 @@ async fn run_session(
                         let _ = reply.send(Err(e));
                         continue;
                     }
+                    turns += 1;
+                    // One span per turn, so the events a turn produces are
+                    // attributable to it rather than to the session as a
+                    // whole. Outcome fields are recorded when the result
+                    // event arrives above.
+                    turn_span = Some(tracing::debug_span!(
+                        parent: &session_span,
+                        "claude.turn",
+                        turn = turns,
+                        is_error = tracing::field::Empty,
+                        subtype = tracing::field::Empty,
+                        cost_usd = tracing::field::Empty,
+                        duration_ms = tracing::field::Empty,
+                    ));
+                    turn_started = Some(std::time::Instant::now());
                     pending = Some((reply, Vec::new()));
                 }
                 Some(OutboundMsg::PermissionResponse { request_id, decision }) => {
@@ -1607,6 +1687,15 @@ async fn run_session(
         Ok(()) => SessionExitStatus::Completed,
         Err(e) => SessionExitStatus::Failed(e.to_string()),
     };
+    session_span.record("turns", turns);
+    session_span.record(
+        "exit",
+        match &final_state {
+            SessionExitStatus::Completed => "completed",
+            SessionExitStatus::Failed(_) => "failed",
+            SessionExitStatus::Running => "running",
+        },
+    );
     let _ = exit_tx.send(final_state);
     result
 }

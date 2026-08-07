@@ -53,6 +53,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+# Span assertions: the contract these spans publish is their field set,
+# so a test needs to observe what a subscriber actually receives.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 # All examples use the async API; require the feature so they're
 # skipped automatically on sync-only builds.
