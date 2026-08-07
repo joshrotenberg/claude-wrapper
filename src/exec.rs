@@ -147,6 +147,7 @@ pub(crate) struct SpawnPolicy<'a> {
     pub(crate) on_spawn: Option<&'a crate::SpawnObserver>,
 }
 
+#[cfg(any(feature = "async", feature = "sync"))]
 impl SpawnPolicy<'_> {
     /// The policy a [`Claude`] client describes.
     pub(crate) fn of(claude: &Claude) -> SpawnPolicy<'_> {
