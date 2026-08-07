@@ -338,6 +338,71 @@ pub struct QueryMessage {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// Token usage reported by the CLI for a single run.
+///
+/// Field names align with `codex-wrapper`'s `TokenUsage` so an adapter
+/// can map the two directly (see the cross-crate design in issue #760).
+/// Serde aliases accept the Anthropic key names the CLI actually emits
+/// (`cache_read_input_tokens`, `cache_creation_input_tokens`), the same
+/// keys the on-disk history accounting reads, so the live and read-side
+/// paths agree.
+///
+/// Every field is `Option` because the CLI does not report all buckets
+/// on every turn. A missing bucket means "not reported", not zero;
+/// [`Session::turns_missing_usage`](crate::Session::turns_missing_usage)
+/// exists so callers can tell a low total from an incomplete one.
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TokenUsage {
+    /// Non-cached input tokens.
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    /// Input tokens served from cache.
+    #[serde(default, alias = "cache_read_input_tokens")]
+    pub cached_input_tokens: Option<u64>,
+    /// Input tokens written to cache.
+    #[serde(default, alias = "cache_creation_input_tokens")]
+    pub cache_write_input_tokens: Option<u64>,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    /// Output tokens spent on reasoning, where the CLI reports them
+    /// separately.
+    #[serde(default)]
+    pub reasoning_output_tokens: Option<u64>,
+    /// Explicit total, where the CLI reports one.
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+}
+
+#[cfg(feature = "json")]
+impl TokenUsage {
+    /// Total tokens for this run: the explicit `total_tokens` if the
+    /// CLI reported one, otherwise the sum of every reported bucket.
+    /// Cache and non-cache input both count, mirroring the on-disk
+    /// accounting in the history module.
+    pub fn total(&self) -> u64 {
+        if let Some(t) = self.total_tokens {
+            return t;
+        }
+        [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.cache_write_input_tokens,
+            self.output_tokens,
+            self.reasoning_output_tokens,
+        ]
+        .iter()
+        .flatten()
+        .sum()
+    }
+
+    /// True when the CLI reported no usage buckets at all.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Result from a query with `--output-format json`.
 #[cfg(feature = "json")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -360,6 +425,10 @@ pub struct QueryResult {
     /// Whether the query resulted in an error.
     #[serde(default)]
     pub is_error: bool,
+    /// Token usage for this run, when the CLI reports it on the result
+    /// event.
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
     /// Additional fields returned by the CLI not captured in typed fields.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -425,10 +494,58 @@ mod tests {
             duration_ms: None,
             num_turns: Some(3),
             is_error: false,
+            usage: None,
             extra: Default::default(),
         };
         let json = serde_json::to_string(&qr).unwrap();
         assert!(json.contains("\"total_cost_usd\""));
         assert!(json.contains("\"num_turns\""));
+    }
+
+    #[test]
+    fn token_usage_deserializes_anthropic_cache_key_names() {
+        let json = r#"{
+            "input_tokens": 100,
+            "cache_read_input_tokens": 400,
+            "cache_creation_input_tokens": 50,
+            "output_tokens": 25
+        }"#;
+        let usage: TokenUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.cached_input_tokens, Some(400));
+        assert_eq!(usage.cache_write_input_tokens, Some(50));
+        assert_eq!(usage.output_tokens, Some(25));
+        assert_eq!(usage.total(), 575);
+        assert!(!usage.is_empty());
+    }
+
+    #[test]
+    fn token_usage_prefers_explicit_total() {
+        let json = r#"{"input_tokens": 100, "output_tokens": 25, "total_tokens": 999}"#;
+        let usage: TokenUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.total(), 999);
+    }
+
+    #[test]
+    fn token_usage_empty_object_is_empty() {
+        let usage: TokenUsage = serde_json::from_str("{}").unwrap();
+        assert!(usage.is_empty());
+        assert_eq!(usage.total(), 0);
+    }
+
+    #[test]
+    fn query_result_parses_usage_off_result_event() {
+        let json = r#"{
+            "result": "hi",
+            "session_id": "s1",
+            "total_cost_usd": 0.01,
+            "is_error": false,
+            "usage": {"input_tokens": 7, "output_tokens": 3}
+        }"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        let usage = qr.usage.expect("usage parsed");
+        assert_eq!(usage.total(), 10);
+        // The typed field captures it; it must not also land in extra.
+        assert!(!qr.extra.contains_key("usage"));
     }
 }
