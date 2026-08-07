@@ -1,5 +1,9 @@
 [workspace]
 changelog_update = true
+# Changelog rules live in cliff.toml (shared shape with codex-wrapper);
+# release-plz and the changelog preview workflow both read it, so the
+# release cannot rewrite what a preview showed.
+changelog_config = "cliff.toml"
 git_release_enable = true
 git_tag_enable = true
 pr_labels = ["release"]

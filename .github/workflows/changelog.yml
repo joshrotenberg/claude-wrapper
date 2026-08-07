@@ -1,0 +1,38 @@
+name: Changelog
+
+# Preview-only: renders the unreleased changelog section with git-cliff
+# so grouping-rule changes are reviewable before a release. The actual
+# CHANGELOG.md write stays with release-plz, which reads the same
+# cliff.toml (changelog_config in release-plz.toml), so a release
+# cannot rewrite what a preview showed.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - cliff.toml
+      - release-plz.toml
+      - .github/workflows/changelog.yml
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Changelog preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Render unreleased changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --verbose --unreleased
+        env:
+          OUTPUT: changelog-preview.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Publish preview to job summary
+        run: cat changelog-preview.md >> "$GITHUB_STEP_SUMMARY"
