@@ -1775,7 +1775,10 @@ mod tests {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
     }
 
-    /// Read a pid recorded by `group_script`.
+    /// Read a pid recorded by `group_script`. Only the async tests use
+    /// this unconditional variant; the sync timeout test reads through
+    /// `try_read_pid`, so gate it to keep sync-only builds warning-free.
+    #[cfg(feature = "async")]
     fn read_pid(path: &std::path::Path) -> u32 {
         try_read_pid(path).expect("pid file readable")
     }
