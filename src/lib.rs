@@ -413,10 +413,34 @@ pub use version::{
     CliVersion, CliVersionStatus, TESTED_CLI_VERSION_MAX, TESTED_CLI_VERSION_MIN, VersionParseError,
 };
 
+/// What the crate knows about a child the moment it is spawned.
+///
+/// Delivered to the [`ClaudeBuilder::on_spawn`] observer before the run can
+/// produce output, which is the point: a supervisor that records the pid only
+/// after a run *finishes* has nothing to reconcile when it crashes mid-run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpawnInfo {
+    /// The child's process id.
+    pub pid: u32,
+    /// The child's process group id, when it leads its own group.
+    ///
+    /// `None` when [`ClaudeBuilder::process_group`] is disabled, in which case
+    /// the child shares the parent's group and its pid must never be passed to
+    /// `killpg`: that would signal the caller's own process group.
+    pub pgid: Option<u32>,
+}
+
+/// Called with [`SpawnInfo`] each time the crate spawns a CLI child.
+///
+/// Must not block: it runs inline on the spawning thread, between `spawn` and
+/// the first read of the child's output.
+pub type SpawnObserver = std::sync::Arc<dyn Fn(SpawnInfo) + Send + Sync>;
+
 /// The Claude CLI client. Holds shared configuration applied to all commands.
 ///
 /// Create one via [`Claude::builder()`] and reuse it across commands.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Claude {
     pub(crate) binary: PathBuf,
     pub(crate) working_dir: Option<PathBuf>,
@@ -437,6 +461,24 @@ pub struct Claude {
     pub(crate) process_group: bool,
     #[allow(dead_code)]
     pub(crate) kill_grace: Option<Duration>,
+    #[allow(dead_code)]
+    pub(crate) on_spawn: Option<SpawnObserver>,
+}
+
+impl std::fmt::Debug for Claude {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Claude")
+            .field("binary", &self.binary)
+            .field("working_dir", &self.working_dir)
+            .field("global_args", &self.global_args)
+            .field("timeout", &self.timeout)
+            .field("process_group", &self.process_group)
+            .field("kill_grace", &self.kill_grace)
+            // A closure cannot be rendered, and env may hold credentials, so
+            // neither is printed: only whether an observer is installed.
+            .field("on_spawn", &self.on_spawn.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Claude {
@@ -706,7 +748,7 @@ fn warn_on_drift(status: &CliVersionStatus) {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ClaudeBuilder {
     binary: Option<PathBuf>,
     working_dir: Option<PathBuf>,
@@ -717,6 +759,23 @@ pub struct ClaudeBuilder {
     tested_cli_version_range: Option<(CliVersion, CliVersion)>,
     process_group: Option<bool>,
     kill_grace: Option<Duration>,
+    on_spawn: Option<SpawnObserver>,
+}
+
+impl std::fmt::Debug for ClaudeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mirrors Claude's Debug: a closure cannot be rendered and env may
+        // hold credentials, so neither is printed.
+        f.debug_struct("ClaudeBuilder")
+            .field("binary", &self.binary)
+            .field("working_dir", &self.working_dir)
+            .field("global_args", &self.global_args)
+            .field("timeout", &self.timeout)
+            .field("process_group", &self.process_group)
+            .field("kill_grace", &self.kill_grace)
+            .field("on_spawn", &self.on_spawn.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClaudeBuilder {
@@ -909,6 +968,45 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Observe every child this client spawns, at spawn time.
+    ///
+    /// The observer receives a [`SpawnInfo`] before the run produces output,
+    /// which is what makes it useful to a supervisor: recording the pid only
+    /// once a run *finishes* leaves nothing to reconcile after a crash
+    /// mid-run. Fires for one-shot runs, streaming runs, and duplex sessions
+    /// alike, and on retry it fires once per attempt, since each attempt is a
+    /// distinct process.
+    ///
+    /// The observer runs inline on the spawning thread, so it must not block.
+    /// Write a pidfile or push to a channel; do not do I/O that can stall.
+    ///
+    /// # Why a callback rather than a return value
+    ///
+    /// The crash case needs the pid to be durable *before* the run can be
+    /// orphaned. A pid on the result type arrives too late for exactly the
+    /// scenario that motivates recording it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use claude_wrapper::Claude;
+    ///
+    /// # fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder()
+    ///     .on_spawn(Arc::new(|info| {
+    ///         eprintln!("spawned pid {} (group {:?})", info.pid, info.pgid);
+    ///     }))
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn on_spawn(mut self, observer: SpawnObserver) -> Self {
+        self.on_spawn = Some(observer);
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -926,6 +1024,7 @@ impl ClaudeBuilder {
             tested_cli_version_range: self.tested_cli_version_range,
             process_group: self.process_group.unwrap_or(true),
             kill_grace: self.kill_grace,
+            on_spawn: self.on_spawn,
         })
     }
 }

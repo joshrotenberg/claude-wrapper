@@ -390,7 +390,8 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
-    let mut group = crate::exec::GroupKillGuard::new_if(claude.process_group, child.id());
+    let mut group =
+        crate::exec::arm_and_notify(claude.process_group, child.id(), claude.on_spawn.as_ref());
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -613,7 +614,11 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
-    let mut group = crate::exec::GroupKillGuard::new_if(claude.process_group, Some(child.id()));
+    let mut group = crate::exec::arm_and_notify(
+        claude.process_group,
+        Some(child.id()),
+        claude.on_spawn.as_ref(),
+    );
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
