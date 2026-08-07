@@ -265,6 +265,31 @@ impl Session {
         self.cumulative_turns
     }
 
+    /// Cumulative token count across all recorded turns, summing every
+    /// bucket the CLI reported (cache and non-cache input both count;
+    /// see [`TokenUsage::total`](crate::TokenUsage::total)).
+    ///
+    /// Turns whose result carried no usage contribute nothing here.
+    /// Check [`turns_missing_usage`](Self::turns_missing_usage) to tell
+    /// a genuinely low total from an incomplete one.
+    pub fn total_tokens(&self) -> u64 {
+        self.history
+            .iter()
+            .filter_map(|r| r.usage.as_ref())
+            .map(crate::TokenUsage::total)
+            .sum()
+    }
+
+    /// Number of recorded turns whose result carried no usage at all
+    /// (no `usage` object, or one with every bucket absent). A non-zero
+    /// value means [`total_tokens`](Self::total_tokens) undercounts.
+    pub fn turns_missing_usage(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|r| r.usage.as_ref().is_none_or(crate::TokenUsage::is_empty))
+            .count()
+    }
+
     /// Full per-turn result history.
     pub fn history(&self) -> &[QueryResult] {
         &self.history
@@ -328,6 +353,7 @@ mod tests {
             duration_ms: None,
             num_turns: Some(3),
             is_error: false,
+            usage: None,
             extra: Default::default(),
         };
         session.record(&result);
@@ -351,6 +377,7 @@ mod tests {
             duration_ms: None,
             num_turns: Some(2),
             is_error: false,
+            usage: None,
             extra: Default::default(),
         };
         let r2 = QueryResult {
@@ -360,6 +387,7 @@ mod tests {
             duration_ms: None,
             num_turns: Some(1),
             is_error: false,
+            usage: None,
             extra: Default::default(),
         };
         session.record(&r1);
@@ -367,6 +395,50 @@ mod tests {
         assert_eq!(session.total_turns(), 3);
         assert!((session.total_cost_usd() - 0.03).abs() < f64::EPSILON);
         assert_eq!(session.history().len(), 2);
+    }
+
+    #[test]
+    fn token_accounting_sums_and_flags_missing() {
+        use crate::TokenUsage;
+
+        let mut session = Session::new(test_claude());
+        let with_usage = QueryResult {
+            result: "a".into(),
+            session_id: "sess-1".into(),
+            cost_usd: Some(0.01),
+            duration_ms: None,
+            num_turns: Some(1),
+            is_error: false,
+            usage: Some(TokenUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(25),
+                ..Default::default()
+            }),
+            extra: Default::default(),
+        };
+        let without_usage = QueryResult {
+            result: "b".into(),
+            session_id: "sess-1".into(),
+            cost_usd: Some(0.01),
+            duration_ms: None,
+            num_turns: Some(1),
+            is_error: false,
+            usage: None,
+            extra: Default::default(),
+        };
+        // A usage object with every bucket absent counts as missing,
+        // not as a zero-token turn.
+        let empty_usage = QueryResult {
+            usage: Some(TokenUsage::default()),
+            ..without_usage.clone()
+        };
+
+        session.record(&with_usage);
+        session.record(&without_usage);
+        session.record(&empty_usage);
+
+        assert_eq!(session.total_tokens(), 125);
+        assert_eq!(session.turns_missing_usage(), 2);
     }
 
     #[test]
@@ -383,6 +455,7 @@ mod tests {
             duration_ms: None,
             num_turns: Some(1),
             is_error: false,
+            usage: None,
             extra: Default::default(),
         };
         session.record(&r);

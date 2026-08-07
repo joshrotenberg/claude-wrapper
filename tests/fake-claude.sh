@@ -22,6 +22,9 @@
 #       test that cancellation kills the whole group. Written before
 #       FAKE_CLAUDE_PID_FILE, so once the pid file exists the
 #       grandchild pid is readable too.
+#   FAKE_CLAUDE_USAGE_JSON  - if set, raw JSON embedded as the "usage"
+#       field of the result output (stream-json result line and json
+#       object), e.g. '{"input_tokens":100,"output_tokens":25}'.
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -91,17 +94,23 @@ if [[ "$FORK_SESSION" == "true" && -n "$FAKE_CLAUDE_FORKED_SESSION_ID" ]]; then
     SESSION_ID="$FAKE_CLAUDE_FORKED_SESSION_ID"
 fi
 
+# Optional usage object appended to the result output.
+USAGE_FIELD=""
+if [[ -n "${FAKE_CLAUDE_USAGE_JSON:-}" ]]; then
+    USAGE_FIELD=",\"usage\":${FAKE_CLAUDE_USAGE_JSON}"
+fi
+
 if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     # Emit NDJSON matching real claude's stream-json format.
     # Escape the output for safe embedding in a JSON string value.
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
     printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
     printf '{"type":"assistant","message":{"id":"msg_fake","type":"message","role":"assistant","content":[{"type":"text","text":"%s"}],"model":"claude-fake","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":3}},"session_id":"%s"}\n' "$ESCAPED_OUTPUT" "$SESSION_ID"
-    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS"
+    printf '{"type":"result","subtype":"success","result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false%s}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS" "$USAGE_FIELD"
 elif [[ "$OUTPUT_FORMAT" == "json" ]]; then
     # Emit a single JSON object matching QueryResult.
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
-    printf '{"result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS"
+    printf '{"result":"%s","session_id":"%s","total_cost_usd":%s,"num_turns":%s,"is_error":false%s}\n' "$ESCAPED_OUTPUT" "$SESSION_ID" "$COST_USD" "$NUM_TURNS" "$USAGE_FIELD"
 else
     # Plain text.
     printf '%s\n' "$OUTPUT"

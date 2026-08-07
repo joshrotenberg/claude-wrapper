@@ -845,3 +845,63 @@ async fn dropping_in_flight_stream_query_kills_child() {
     assert_pid_killed(pid).await;
     assert_pid_killed(read_pid(&gpid_path)).await;
 }
+
+// ── Token accounting ─────────────────────────────────────────────────
+
+/// A result event carrying a usage object lands typed on QueryResult,
+/// with the Anthropic cache key names mapped onto the shared field names.
+#[tokio::test]
+async fn execute_json_parses_usage() {
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "ok"),
+        (
+            "FAKE_CLAUDE_USAGE_JSON",
+            r#"{"input_tokens":100,"cache_read_input_tokens":400,"output_tokens":25}"#,
+        ),
+    ]);
+    let result = QueryCommand::new("hi")
+        .no_session_persistence()
+        .execute_json(&claude)
+        .await
+        .expect("query succeeds");
+    let usage = result.usage.expect("usage present");
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.cached_input_tokens, Some(400));
+    assert_eq!(usage.output_tokens, Some(25));
+    assert_eq!(usage.total(), 525);
+}
+
+/// A turn whose result carries usage counts toward Session::total_tokens.
+#[tokio::test]
+async fn session_counts_tokens_when_usage_reported() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(claude_with_env(&[
+        ("FAKE_CLAUDE_OUTPUT", "one"),
+        (
+            "FAKE_CLAUDE_USAGE_JSON",
+            r#"{"input_tokens":10,"output_tokens":5}"#,
+        ),
+    ]));
+    let mut session = Session::new(claude);
+    session.send("first").await.expect("turn succeeds");
+
+    assert_eq!(session.total_tokens(), 15);
+    assert_eq!(session.turns_missing_usage(), 0);
+}
+
+/// A turn without usage increments turns_missing_usage rather than
+/// counting as a zero-token turn.
+#[tokio::test]
+async fn session_flags_turn_without_usage() {
+    use claude_wrapper::session::Session;
+    use std::sync::Arc;
+
+    let claude = Arc::new(claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "one")]));
+    let mut session = Session::new(claude);
+    session.send("first").await.expect("turn succeeds");
+
+    assert_eq!(session.total_tokens(), 0);
+    assert_eq!(session.turns_missing_usage(), 1);
+}
