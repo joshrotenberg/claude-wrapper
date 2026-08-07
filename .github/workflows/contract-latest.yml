@@ -1,0 +1,74 @@
+# Run the CLI contract suite against whatever is currently published.
+#
+# The contract job in ci.yml pins its CLI versions, so drift only surfaces when
+# someone bumps the pin. This closes that window: an upstream release that drops
+# or renames a flag shows up here within a week instead of in a user's bug
+# report.
+#
+# Deliberately not a PR gate. An upstream release must not turn every open PR
+# red, and the pinned job in ci.yml is what blocks. This one reports.
+name: Contract (latest CLI)
+
+on:
+  schedule:
+    # Mondays, 08:00 UTC.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  contract-latest:
+    name: CLI contract (latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          # Same key as the pinned contract job, so this reuses its build.
+          shared-key: "contract"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the latest claude CLI
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Record the resolved version
+        # A failure here has to identify which release introduced the drift, so
+        # the version goes in the log and the job summary rather than only in
+        # whatever the test happens to print.
+        run: |
+          version=$(claude --version)
+          echo "resolved: $version"
+          {
+            echo "### Contract run against \`$version\`"
+            echo ""
+            echo "Pinned range is declared in \`src/version.rs\` as \`TESTED_CLI_VERSION_MIN\`/\`MAX\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Contract suite
+        # No auth and no tokens: every check reads `--help` only.
+        run: cargo test --test contract --all-features -- --ignored
+
+      - name: Explain a failure
+        if: failure()
+        run: |
+          {
+            echo "### Drift detected"
+            echo ""
+            echo "The latest published CLI no longer matches what the builders emit."
+            echo ""
+            echo "This job does not gate PRs. To act on it:"
+            echo ""
+            echo "1. If a flag was removed or renamed, fix the builder."
+            echo "2. If a flag is still accepted but dropped from \`--help\`, add it"
+            echo "   to \`KNOWN_HIDDEN\` in \`tests/contract.rs\` with the version and"
+            echo "   how you verified it."
+            echo "3. If the range should move, bump \`TESTED_CLI_VERSION_MAX\` and add"
+            echo "   the version to the \`claude_version\` matrix in \`ci.yml\`; a unit"
+            echo "   test enforces that those two agree."
+          } >> "$GITHUB_STEP_SUMMARY"
