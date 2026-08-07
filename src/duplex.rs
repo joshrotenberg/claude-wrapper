@@ -1166,8 +1166,8 @@ impl DuplexSession {
             .kill_on_drop(true);
         // Own process group (Unix) so shutdown can signal the whole
         // tree, not just the direct child (see exec::GroupKillGuard).
-        #[cfg(unix)]
-        cmd.process_group(0);
+        // Opt out via ClaudeBuilder::process_group.
+        crate::exec::apply_process_group(&mut cmd, claude.process_group);
 
         if let Some(ref dir) = claude.working_dir {
             cmd.current_dir(dir);
@@ -1178,7 +1178,7 @@ impl DuplexSession {
             source: e,
             working_dir: claude.working_dir.clone(),
         })?;
-        let group = crate::exec::GroupKillGuard::new(child.id());
+        let group = crate::exec::GroupKillGuard::new_if(claude.process_group, child.id());
 
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");

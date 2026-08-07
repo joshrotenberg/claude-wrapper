@@ -432,6 +432,9 @@ pub struct Claude {
     #[allow(dead_code)]
     pub(crate) retry_policy: Option<RetryPolicy>,
     pub(crate) tested_cli_version_range: Option<(CliVersion, CliVersion)>,
+    // Read only by the feature-gated exec paths, like env/timeout.
+    #[allow(dead_code)]
+    pub(crate) process_group: bool,
 }
 
 impl Claude {
@@ -710,6 +713,7 @@ pub struct ClaudeBuilder {
     timeout: Option<Duration>,
     retry_policy: Option<RetryPolicy>,
     tested_cli_version_range: Option<(CliVersion, CliVersion)>,
+    process_group: Option<bool>,
 }
 
 impl ClaudeBuilder {
@@ -860,6 +864,30 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Control whether spawned `claude` children are placed in their
+    /// own process group on Unix. Defaults to `true`.
+    ///
+    /// Own group (the default): cancellation and timeouts kill the
+    /// child's whole process tree, but the child no longer shares the
+    /// host terminal's process group, so terminal-generated signals
+    /// (Ctrl-C) do not reach it; terminating a run is the wrapper's
+    /// job via drop, timeout, or explicit kill. This is the right
+    /// contract for supervisors (daemons, MCP servers, worker queues).
+    ///
+    /// Shared group (`false`): the child stays in the host's process
+    /// group, so a terminal Ctrl-C reaches the whole run directly, but
+    /// a wrapper-side kill only reaches the direct child and any
+    /// subprocesses it spawned for tool use survive it. This is the
+    /// right contract for terminal-attached hosts that shell out
+    /// synchronously and rely on the terminal as the supervisor.
+    ///
+    /// No effect on non-Unix targets.
+    #[must_use]
+    pub fn process_group(mut self, enabled: bool) -> Self {
+        self.process_group = Some(enabled);
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -875,6 +903,7 @@ impl ClaudeBuilder {
             timeout: self.timeout,
             retry_policy: self.retry_policy,
             tested_cli_version_range: self.tested_cli_version_range,
+            process_group: self.process_group.unwrap_or(true),
         })
     }
 }
@@ -882,6 +911,22 @@ impl ClaudeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_process_group_defaults_on_and_can_opt_out() {
+        let on = Claude::builder()
+            .binary("/nonexistent/claude")
+            .build()
+            .unwrap();
+        assert!(on.process_group);
+
+        let off = Claude::builder()
+            .binary("/nonexistent/claude")
+            .process_group(false)
+            .build()
+            .unwrap();
+        assert!(!off.process_group);
+    }
 
     // -- the version gate ------------------------------------------
     //

@@ -23,6 +23,10 @@
 //! host's terminal process group, so terminal-generated signals
 //! (Ctrl-C) do not reach it directly; terminating a run is the
 //! wrapper's job, via drop, timeout, or an explicit kill.
+//! Terminal-attached hosts that want the terminal to stay the
+//! supervisor can opt out with
+//! [`ClaudeBuilder::process_group(false)`](crate::ClaudeBuilder::process_group),
+//! trading the tree kill away: kills then reach only the direct child.
 
 #[cfg(any(feature = "async", feature = "sync"))]
 use std::time::Duration;
@@ -130,6 +134,14 @@ pub(crate) struct GroupKillGuard {
 
 #[cfg(any(feature = "async", feature = "sync"))]
 impl GroupKillGuard {
+    /// Arm a guard only when the child was placed in its own process
+    /// group; otherwise the child's pid is not a group id and must
+    /// never be signalled (see
+    /// [`ClaudeBuilder::process_group`](crate::ClaudeBuilder::process_group)).
+    pub(crate) fn new_if(enabled: bool, pid: Option<u32>) -> Self {
+        Self::new(if enabled { pid } else { None })
+    }
+
     /// Arm a guard for the child with the given pid (as returned by
     /// `Child::id`). A `None` pid (child already reaped) leaves the
     /// guard disarmed.
@@ -171,6 +183,35 @@ impl GroupKillGuard {
 impl Drop for GroupKillGuard {
     fn drop(&mut self) {
         self.kill_now();
+    }
+}
+
+/// Apply the client's process-group policy to an async spawn: place
+/// the child in its own group (Unix) unless the builder opted out via
+/// [`ClaudeBuilder::process_group`](crate::ClaudeBuilder::process_group).
+#[cfg(feature = "async")]
+pub(crate) fn apply_process_group(cmd: &mut Command, enabled: bool) {
+    #[cfg(unix)]
+    if enabled {
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cmd, enabled);
+    }
+}
+
+/// Blocking mirror of [`apply_process_group`].
+#[cfg(feature = "sync")]
+pub(crate) fn apply_process_group_sync(cmd: &mut std::process::Command, enabled: bool) {
+    #[cfg(unix)]
+    if enabled {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cmd, enabled);
     }
 }
 
@@ -247,12 +288,21 @@ async fn run_claude_with_stdin_prompt_internal(
             &command_args,
             env,
             working_dir,
+            claude.process_group,
             timeout,
             stdin_content,
         )
         .await
     } else {
-        run_internal_stdin(binary, &command_args, env, working_dir, stdin_content).await
+        run_internal_stdin(
+            binary,
+            &command_args,
+            env,
+            working_dir,
+            claude.process_group,
+            stdin_content,
+        )
+        .await
     };
 
     if let Ok(output) = &result {
@@ -267,6 +317,7 @@ async fn run_internal_stdin(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     stdin_content: String,
 ) -> Result<CommandOutput> {
     use tokio::io::AsyncWriteExt;
@@ -280,9 +331,9 @@ async fn run_internal_stdin(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // via ClaudeBuilder::process_group.
+    apply_process_group(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -301,7 +352,7 @@ async fn run_internal_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new(child.id());
+    let mut group = GroupKillGuard::new_if(process_group, child.id());
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -358,6 +409,7 @@ async fn run_with_timeout_stdin(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     timeout: Duration,
     stdin_content: String,
 ) -> Result<CommandOutput> {
@@ -372,9 +424,9 @@ async fn run_with_timeout_stdin(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // via ClaudeBuilder::process_group.
+    apply_process_group(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -393,7 +445,7 @@ async fn run_with_timeout_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new(child.id());
+    let mut group = GroupKillGuard::new_if(process_group, child.id());
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -488,6 +540,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
             timeout,
         )
         .await?
@@ -497,6 +550,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
         )
         .await?
     };
@@ -538,6 +592,7 @@ async fn run_internal(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
 ) -> Result<CommandOutput> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
@@ -551,9 +606,9 @@ async fn run_internal(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // via ClaudeBuilder::process_group.
+    apply_process_group(&mut cmd, process_group);
 
     // Remove Claude Code env vars to prevent nested session detection
     cmd.env_remove("CLAUDECODE");
@@ -576,7 +631,7 @@ async fn run_internal(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new(child.id());
+    let mut group = GroupKillGuard::new_if(process_group, child.id());
 
     let mut stdout_handle = child.stdout.take().expect("stdout was piped");
     let mut stderr_handle = child.stderr.take().expect("stderr was piped");
@@ -632,6 +687,7 @@ async fn run_with_timeout(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     timeout: Duration,
 ) -> Result<CommandOutput> {
     let mut cmd = Command::new(binary);
@@ -643,9 +699,9 @@ async fn run_with_timeout(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // via ClaudeBuilder::process_group.
+    apply_process_group(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -664,7 +720,7 @@ async fn run_with_timeout(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new(child.id());
+    let mut group = GroupKillGuard::new_if(process_group, child.id());
 
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -837,6 +893,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
             timeout,
             stdin_content,
         )
@@ -846,6 +903,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
             stdin_content,
         )
     };
@@ -862,6 +920,7 @@ fn run_internal_stdin_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     stdin_content: String,
 ) -> Result<CommandOutput> {
     use std::io::Write;
@@ -873,12 +932,9 @@ fn run_internal_stdin_sync(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // Own process group (Unix) so a kill can signal the whole tree,
-    // not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    // not just the direct child (see GroupKillGuard). Opt out via
+    // ClaudeBuilder::process_group.
+    apply_process_group_sync(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -895,7 +951,7 @@ fn run_internal_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new(Some(child.id()));
+    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -949,6 +1005,7 @@ fn run_with_timeout_stdin_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     timeout: Duration,
     stdin_content: String,
 ) -> Result<CommandOutput> {
@@ -963,12 +1020,9 @@ fn run_with_timeout_stdin_sync(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // Own process group (Unix) so a kill can signal the whole tree,
-    // not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    // not just the direct child (see GroupKillGuard). Opt out via
+    // ClaudeBuilder::process_group.
+    apply_process_group_sync(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -985,7 +1039,7 @@ fn run_with_timeout_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new(Some(child.id()));
+    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -1075,6 +1129,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
             timeout,
         )
     } else {
@@ -1083,6 +1138,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
+            claude.process_group,
         )
     };
 
@@ -1121,6 +1177,7 @@ fn run_internal_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
 ) -> Result<CommandOutput> {
     use std::process::{Command as StdCommand, Stdio};
 
@@ -1130,11 +1187,7 @@ fn run_internal_sync(
     // Own process group (Unix); see the module docs. This path has no
     // kill site (a blocking call cannot be cancelled mid-flight), so
     // there is no guard to arm.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    apply_process_group_sync(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1187,6 +1240,7 @@ fn run_with_timeout_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    process_group: bool,
     timeout: Duration,
 ) -> Result<CommandOutput> {
     use std::process::{Command as StdCommand, Stdio};
@@ -1199,12 +1253,9 @@ fn run_with_timeout_sync(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // Own process group (Unix) so a kill can signal the whole tree,
-    // not just the direct child (see GroupKillGuard).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    // not just the direct child (see GroupKillGuard). Opt out via
+    // ClaudeBuilder::process_group.
+    apply_process_group_sync(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1221,7 +1272,7 @@ fn run_with_timeout_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new(Some(child.id()));
+    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
 
     // Detach stdout/stderr onto their own threads so neither can block
     // the child by filling its pipe buffer. Each thread owns its half
@@ -1775,7 +1826,10 @@ mod tests {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
     }
 
-    /// Read a pid recorded by `group_script`.
+    /// Read a pid recorded by `group_script`. Only the async tests use
+    /// this unconditional variant; the sync timeout test reads through
+    /// `try_read_pid`, so gate it to keep sync-only builds warning-free.
+    #[cfg(feature = "async")]
     fn read_pid(path: &std::path::Path) -> u32 {
         try_read_pid(path).expect("pid file readable")
     }
@@ -1866,6 +1920,44 @@ mod tests {
             }
         }
         assert!(observed, "child never recorded pids within 5 timeout runs");
+    }
+
+    // With the process-group split opted out, dropping the future still
+    // kills the direct child via kill_on_drop, but the grandchild is
+    // deliberately left running: that is the pre-group contract #767
+    // preserves for terminal-attached hosts, where the terminal is the
+    // supervisor. The test reaps the survivor itself.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_process_group_opt_out_kills_only_direct_child() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let gpid_path = workdir.path().join("gpid");
+        let (_dir, path) = group_script(&pid_path, &gpid_path);
+        let claude = Claude::builder()
+            .binary(&path)
+            .process_group(false)
+            .build()
+            .expect("build");
+        let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
+        assert_pid_killed(pid);
+
+        // The grandchild must still be alive: no group kill happened.
+        let gpid = read_pid(&gpid_path);
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &gpid.to_string()])
+            .output()
+            .expect("run ps");
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            out.status.success() && !stat.is_empty() && !stat.starts_with('Z'),
+            "grandchild {gpid} should have survived the opt-out drop (stat {stat:?})"
+        );
+
+        // Reap the deliberate survivor so it does not idle for 300s.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &gpid.to_string()])
+            .status();
     }
 
     // Same guarantee for the stdin-prompt path.

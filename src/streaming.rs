@@ -377,9 +377,9 @@ where
         // the CLI running unattended (see the `exec` module docs).
         .kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see exec::GroupKillGuard).
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // tree, not just the direct child (see exec::GroupKillGuard). Opt
+    // out via ClaudeBuilder::process_group.
+    crate::exec::apply_process_group(&mut cmd, claude.process_group);
 
     if let Some(ref dir) = claude.working_dir {
         cmd.current_dir(dir);
@@ -390,7 +390,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
-    let mut group = crate::exec::GroupKillGuard::new(child.id());
+    let mut group = crate::exec::GroupKillGuard::new_if(claude.process_group, child.id());
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -599,12 +599,9 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Own process group (Unix) so a kill can signal the whole tree,
-    // not just the direct child (see exec::GroupKillGuard).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd_builder.process_group(0);
-    }
+    // not just the direct child (see exec::GroupKillGuard). Opt out
+    // via ClaudeBuilder::process_group.
+    crate::exec::apply_process_group_sync(&mut cmd_builder, claude.process_group);
 
     if let Some(ref dir) = claude.working_dir {
         cmd_builder.current_dir(dir);
@@ -615,7 +612,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
-    let mut group = crate::exec::GroupKillGuard::new(Some(child.id()));
+    let mut group = crate::exec::GroupKillGuard::new_if(claude.process_group, Some(child.id()));
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
