@@ -1178,7 +1178,8 @@ impl DuplexSession {
             source: e,
             working_dir: claude.working_dir.clone(),
         })?;
-        let group = crate::exec::GroupKillGuard::new_if(claude.process_group, child.id());
+        let group =
+            crate::exec::arm_and_notify(claude.process_group, child.id(), claude.on_spawn.as_ref());
 
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");

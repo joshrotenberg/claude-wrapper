@@ -126,6 +126,40 @@ pub struct CommandOutput {
 /// cannot be recycled, so firing is safe.
 ///
 /// On non-Unix targets the guard is a no-op.
+/// Arm the group-kill guard and tell the observer the child exists.
+///
+/// Kept together so the two cannot disagree about whether the child leads its
+/// own group: the `pgid` reported is `Some` exactly when the guard is armed,
+/// which is exactly when the pid is safe to `killpg`.
+/// The spawn-policy knobs the timeout paths carry together.
+///
+/// Bundled because those two functions otherwise exceed clippy's argument
+/// threshold, and because these three always travel as a set: whether the
+/// child leads its own group, how long to wait before escalating a kill, and
+/// who to tell that it exists.
+#[cfg(any(feature = "async", feature = "sync"))]
+#[derive(Clone, Copy)]
+pub(crate) struct SpawnPolicy<'a> {
+    pub(crate) process_group: bool,
+    pub(crate) kill_grace: Option<Duration>,
+    pub(crate) on_spawn: Option<&'a crate::SpawnObserver>,
+}
+
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) fn arm_and_notify(
+    process_group: bool,
+    pid: Option<u32>,
+    on_spawn: Option<&crate::SpawnObserver>,
+) -> GroupKillGuard {
+    if let (Some(pid), Some(observer)) = (pid, on_spawn) {
+        observer(crate::SpawnInfo {
+            pid,
+            pgid: process_group.then_some(pid),
+        });
+    }
+    GroupKillGuard::new_if(process_group, pid)
+}
+
 #[cfg(any(feature = "async", feature = "sync"))]
 pub(crate) struct GroupKillGuard {
     #[cfg(unix)]
@@ -348,6 +382,7 @@ async fn run_claude_with_stdin_prompt_internal(
             timeout,
             claude.kill_grace,
             stdin_content,
+            claude.on_spawn.as_ref(),
         )
         .await
     } else {
@@ -358,6 +393,7 @@ async fn run_claude_with_stdin_prompt_internal(
             working_dir,
             claude.process_group,
             stdin_content,
+            claude.on_spawn.as_ref(),
         )
         .await
     };
@@ -376,6 +412,7 @@ async fn run_internal_stdin(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     stdin_content: String,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     use tokio::io::AsyncWriteExt;
 
@@ -409,7 +446,7 @@ async fn run_internal_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new_if(process_group, child.id());
+    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -471,6 +508,7 @@ async fn run_with_timeout_stdin(
     timeout: Duration,
     kill_grace: Option<Duration>,
     stdin_content: String,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     use tokio::io::AsyncWriteExt;
 
@@ -504,7 +542,7 @@ async fn run_with_timeout_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new_if(process_group, child.id());
+    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -600,9 +638,12 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
             timeout,
-            claude.kill_grace,
+            SpawnPolicy {
+                process_group: claude.process_group,
+                kill_grace: claude.kill_grace,
+                on_spawn: claude.on_spawn.as_ref(),
+            },
         )
         .await?
     } else {
@@ -612,6 +653,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &claude.env,
             claude.working_dir.as_deref(),
             claude.process_group,
+            claude.on_spawn.as_ref(),
         )
         .await?
     };
@@ -654,6 +696,7 @@ async fn run_internal(
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
     process_group: bool,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
@@ -692,7 +735,7 @@ async fn run_internal(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new_if(process_group, child.id());
+    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
     let mut stdout_handle = child.stdout.take().expect("stdout was piped");
     let mut stderr_handle = child.stderr.take().expect("stderr was piped");
@@ -748,10 +791,14 @@ async fn run_with_timeout(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     timeout: Duration,
-    kill_grace: Option<Duration>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace,
+        on_spawn,
+    } = policy;
     let mut cmd = Command::new(binary);
     cmd.args(args);
     cmd.stdin(std::process::Stdio::null());
@@ -782,7 +829,7 @@ async fn run_with_timeout(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
-    let mut group = GroupKillGuard::new_if(process_group, child.id());
+    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -960,6 +1007,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             timeout,
             claude.kill_grace,
             stdin_content,
+            claude.on_spawn.as_ref(),
         )
     } else {
         run_internal_stdin_sync(
@@ -969,6 +1017,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             claude.working_dir.as_deref(),
             claude.process_group,
             stdin_content,
+            claude.on_spawn.as_ref(),
         )
     };
 
@@ -986,6 +1035,7 @@ fn run_internal_stdin_sync(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     stdin_content: String,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     use std::io::Write;
     use std::process::{Command as StdCommand, Stdio};
@@ -1015,7 +1065,7 @@ fn run_internal_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
+    let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -1074,6 +1124,7 @@ fn run_with_timeout_stdin_sync(
     timeout: Duration,
     kill_grace: Option<Duration>,
     stdin_content: String,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     use std::io::Write;
     use std::process::{Command as StdCommand, Stdio};
@@ -1105,7 +1156,7 @@ fn run_with_timeout_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
+    let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -1196,9 +1247,12 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
             timeout,
-            claude.kill_grace,
+            SpawnPolicy {
+                process_group: claude.process_group,
+                kill_grace: claude.kill_grace,
+                on_spawn: claude.on_spawn.as_ref(),
+            },
         )
     } else {
         run_internal_sync(
@@ -1207,6 +1261,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &claude.env,
             claude.working_dir.as_deref(),
             claude.process_group,
+            claude.on_spawn.as_ref(),
         )
     };
 
@@ -1246,6 +1301,7 @@ fn run_internal_sync(
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
     process_group: bool,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> Result<CommandOutput> {
     use std::process::{Command as StdCommand, Stdio};
 
@@ -1254,7 +1310,8 @@ fn run_internal_sync(
     cmd.stdin(Stdio::null());
     // Own process group (Unix); see the module docs. This path has no
     // kill site (a blocking call cannot be cancelled mid-flight), so
-    // there is no guard to arm.
+    // there is no guard to arm -- but the child still exists and a
+    // supervisor still wants its pid, so the spawn is observed below.
     apply_process_group_sync(&mut cmd, process_group);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
@@ -1267,11 +1324,14 @@ fn run_internal_sync(
         cmd.env(key, value);
     }
 
-    let output = output_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
+    let output =
+        output_retrying_txtbsy_sync_observed(&mut cmd, process_group, on_spawn).map_err(|e| {
+            Error::Io {
+                message: format!("failed to spawn claude: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            }
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1308,10 +1368,14 @@ fn run_with_timeout_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     timeout: Duration,
-    kill_grace: Option<Duration>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace,
+        on_spawn,
+    } = policy;
     use std::process::{Command as StdCommand, Stdio};
     use std::thread;
     use wait_timeout::ChildExt;
@@ -1341,7 +1405,7 @@ fn run_with_timeout_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
-    let mut group = GroupKillGuard::new_if(process_group, Some(child.id()));
+    let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
 
     // Detach stdout/stderr onto their own threads so neither can block
     // the child by filling its pipe buffer. Each thread owns its half
@@ -1447,13 +1511,36 @@ fn spawn_retrying_txtbsy_sync(
 /// needs the same retry wrapped around `output` itself. The `ETXTBSY`
 /// still occurs at the `execve` inside `output`.
 #[cfg(feature = "sync")]
-fn output_retrying_txtbsy_sync(
+/// Run to completion, reporting the child to `on_spawn` first.
+///
+/// `Command::output` is `spawn` followed by `wait_with_output`, so splitting
+/// the two is behaviour-identical and makes the pid observable on a path that
+/// otherwise never exposes it.
+#[cfg(feature = "sync")]
+fn output_retrying_txtbsy_sync_observed(
     cmd: &mut std::process::Command,
+    process_group: bool,
+    on_spawn: Option<&crate::SpawnObserver>,
 ) -> std::io::Result<std::process::Output> {
+    // `Command::output` pipes stdout and stderr implicitly; `spawn` does not,
+    // so setting them here keeps this split behaviour-identical rather than
+    // silently returning empty captures.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
     let start = std::time::Instant::now();
     let mut backoff = Duration::from_millis(1);
     loop {
-        match cmd.output() {
+        let spawned = cmd.spawn().inspect(|child| {
+            if let Some(observer) = on_spawn {
+                let pid = child.id();
+                observer(crate::SpawnInfo {
+                    pid,
+                    pgid: process_group.then_some(pid),
+                });
+            }
+        });
+        match spawned.and_then(std::process::Child::wait_with_output) {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ExecutableFileBusy
                     && start.elapsed() < TXTBSY_RETRY_BUDGET =>
@@ -2193,7 +2280,7 @@ mod tests {
     #[test]
     fn sync_output_retry_passes_through_non_txtbsy_error() {
         let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
-        let err = output_retrying_txtbsy_sync(&mut cmd)
+        let err = output_retrying_txtbsy_sync_observed(&mut cmd, false, None)
             .expect_err("output of missing binary should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
