@@ -138,6 +138,43 @@ impl Ord for CliVersion {
     }
 }
 
+/// Lowest `claude` CLI version this crate supports.
+///
+/// Below this the wrapper emits flags the CLI does not have. This is measured,
+/// not assumed: the contract suite (`tests/contract.rs`) bisected it. 2.1.97
+/// lacks `--exclude-dynamic-system-prompt-sections`, one of the three flags a
+/// hermetic seal emits, and 2.1.98 has it. That was the last flag of the
+/// emitted set to land, so 2.1.98 is the lowest version every builder is
+/// valid against.
+///
+/// Raising this is a support decision. Lowering it is a claim that must be
+/// re-measured, because the failure it prevents is silent: an invocation that
+/// looks right and is rejected by the binary.
+pub const TESTED_CLI_VERSION_MIN: CliVersion = CliVersion {
+    major: 2,
+    minor: 1,
+    patch: 98,
+};
+
+/// Highest `claude` CLI version this crate has been exercised against.
+///
+/// Above this the wrapper generally still works, but semantics may have
+/// drifted, so [`Claude::cli_version_status`](crate::Claude::cli_version_status)
+/// reports [`CliVersionStatus::NewerUntested`] rather than failing.
+///
+/// # Bumping this
+///
+/// Raising either bound is a claim about coverage, so it comes with work:
+/// add that version to the CI matrix and fix whatever drift the contract check
+/// reports. The `tested_range_matches_the_ci_contract_matrix` test below fails
+/// if a bound is declared here but never exercised in CI, which is what keeps
+/// the constants honest rather than aspirational.
+pub const TESTED_CLI_VERSION_MAX: CliVersion = CliVersion {
+    major: 2,
+    minor: 1,
+    patch: 999,
+};
+
 impl fmt::Display for CliVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
@@ -233,6 +270,74 @@ mod tests {
         assert!("not-a-version".parse::<CliVersion>().is_err());
         assert!("2.1".parse::<CliVersion>().is_err());
         assert!("2.1.x".parse::<CliVersion>().is_err());
+    }
+
+    // -- declared tested range --------------------------------------
+
+    #[test]
+    fn tested_range_is_ordered() {
+        assert!(
+            TESTED_CLI_VERSION_MIN <= TESTED_CLI_VERSION_MAX,
+            "declared tested range is inverted: {TESTED_CLI_VERSION_MIN} > {TESTED_CLI_VERSION_MAX}"
+        );
+    }
+
+    #[test]
+    fn tested_range_bounds_classify_as_tested() {
+        // The bounds are inclusive; a version at either end must not be
+        // reported as drift, or the range would be a lie at its own edges.
+        for v in [TESTED_CLI_VERSION_MIN, TESTED_CLI_VERSION_MAX] {
+            assert_eq!(
+                v.status_within(&TESTED_CLI_VERSION_MIN, &TESTED_CLI_VERSION_MAX),
+                CliVersionStatus::Tested,
+                "{v} should classify as Tested"
+            );
+        }
+    }
+
+    /// Extract the `claude_version` matrix axis from a workflow file, if the
+    /// contract job declares one. Split out from the test below so the
+    /// parsing is itself testable: the real check is vacuous until the
+    /// contract job lands (#753), and a vacuous check that would not work
+    /// when it stops being vacuous is worse than no check.
+    fn ci_claude_version_axis(yaml: &str) -> Option<String> {
+        let (_, rest) = yaml.split_once("claude_version:")?;
+        Some(rest.chars().take_while(|c| *c != ']').collect())
+    }
+
+    #[test]
+    fn ci_matrix_axis_parsing_works() {
+        assert_eq!(ci_claude_version_axis("no matrix here"), None);
+        let yaml = "    matrix:\n      claude_version: [\"2.1.0\", \"2.1.999\"]\n";
+        let axis = ci_claude_version_axis(yaml).expect("axis found");
+        assert!(axis.contains("2.1.0"));
+        assert!(axis.contains("2.1.999"));
+        assert!(!axis.contains("2.2.0"));
+    }
+
+    /// The constants claim CI coverage. This checks the claim.
+    ///
+    /// Returns early when the workflow file is absent (a vendored or packaged
+    /// build has no `.github/`), and when no CLI-version matrix exists yet, so
+    /// it starts enforcing as soon as the contract job lands (#753) rather
+    /// than blocking on it. `ci_matrix_axis_parsing_works` above covers the
+    /// parsing meanwhile.
+    #[test]
+    fn tested_range_matches_the_ci_contract_matrix() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows/ci.yml");
+        let Ok(yaml) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Some(axis) = ci_claude_version_axis(&yaml) else {
+            return;
+        };
+        for bound in [TESTED_CLI_VERSION_MIN, TESTED_CLI_VERSION_MAX] {
+            assert!(
+                axis.contains(&bound.to_string()),
+                "declared tested bound {bound} is not in ci.yml's claude_version matrix \
+                 ({axis:?}); either add it to CI or do not claim it here"
+            );
+        }
     }
 
     // -- status_within ---------------------------------------------
