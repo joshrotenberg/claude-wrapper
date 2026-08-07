@@ -78,6 +78,27 @@ pub enum Error {
         minimum: crate::version::CliVersion,
     },
 
+    /// The installed CLI is outside the tested-against range and the
+    /// caller asked for a hard gate via
+    /// [`Claude::ensure_tested_cli_version`](crate::Claude::ensure_tested_cli_version).
+    ///
+    /// Distinct from [`Error::VersionMismatch`], which is about a
+    /// caller-declared minimum for one operation. This one carries
+    /// both bounds because being *newer* than the tested maximum is
+    /// also a refusable condition.
+    #[error(
+        "CLI version {found} is outside the tested range {tested_min}..={tested_max}{}",
+        if found < tested_min { " (older than the supported minimum)" } else { " (newer than the tested maximum)" }
+    )]
+    UntestedCliVersion {
+        /// The version detected on the system.
+        found: crate::version::CliVersion,
+        /// Lowest CLI version the wrapper supports.
+        tested_min: crate::version::CliVersion,
+        /// Highest CLI version the wrapper has been tested against.
+        tested_max: crate::version::CliVersion,
+    },
+
     /// Construction of a `dangerous::Client` was attempted without
     /// the opt-in env-var set. The env-var name is a compile-time
     /// constant exported from [`crate::dangerous::ALLOW_ENV`].

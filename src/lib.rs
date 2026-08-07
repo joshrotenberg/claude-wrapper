@@ -591,6 +591,74 @@ impl Claude {
         warn_on_drift(&status);
         Ok(status)
     }
+
+    /// Refuse to proceed against a CLI outside the tested range.
+    ///
+    /// The opt-in hard gate. [`Claude::cli_version_status`] is the
+    /// reporting path and keeps its behavior: it returns a typed
+    /// status and warns. This one turns the same condition into
+    /// [`Error::UntestedCliVersion`], for hosts that would rather fail
+    /// at startup than run on an unverified binary.
+    ///
+    /// Returns the detected version on success. The drift warning
+    /// still fires on the failure path, so a host that logs and a host
+    /// that gates see the same line.
+    ///
+    /// # Why this is a method and not a builder option
+    ///
+    /// [`ClaudeBuilder::build`] is synchronous and never spawns the
+    /// binary. Enforcing a version there would mean running a
+    /// subprocess inside a constructor, so the check lives where the
+    /// caller can await it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> claude_wrapper::Result<()> {
+    /// let claude = claude_wrapper::Claude::builder().build()?;
+    /// // Run once at startup; returns Err on an untested CLI.
+    /// let version = claude.ensure_tested_cli_version().await?;
+    /// println!("running against {version}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "async")]
+    pub async fn ensure_tested_cli_version(&self) -> Result<CliVersion> {
+        let (min, max) = self.effective_tested_range();
+        let found = self.cli_version().await?;
+        self.gate_version(found, min, max)
+    }
+
+    /// Blocking mirror of [`Claude::ensure_tested_cli_version`].
+    /// Requires the `sync` feature.
+    #[cfg(feature = "sync")]
+    pub fn ensure_tested_cli_version_sync(&self) -> Result<CliVersion> {
+        let (min, max) = self.effective_tested_range();
+        let found = self.cli_version_sync()?;
+        self.gate_version(found, min, max)
+    }
+
+    /// Shared decision for the async and sync gates, so the two cannot
+    /// disagree about what "outside the range" means.
+    #[cfg(any(feature = "async", feature = "sync"))]
+    fn gate_version(
+        &self,
+        found: CliVersion,
+        min: CliVersion,
+        max: CliVersion,
+    ) -> Result<CliVersion> {
+        let status = found.status_within(&min, &max);
+        warn_on_drift(&status);
+        if status.is_tested() {
+            Ok(found)
+        } else {
+            Err(Error::UntestedCliVersion {
+                found,
+                tested_min: min,
+                tested_max: max,
+            })
+        }
+    }
 }
 
 #[allow(dead_code)] // unused with neither `async` nor `sync` feature
@@ -814,6 +882,94 @@ impl ClaudeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- the version gate ------------------------------------------
+    //
+    // `gate_version` is the decision both the async and sync gates
+    // share, and it takes the version rather than fetching it, so the
+    // policy is testable without spawning a binary.
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    fn gate(found: (u32, u32, u32)) -> Result<CliVersion> {
+        let claude = Claude::builder()
+            .binary("/nonexistent/claude")
+            .build()
+            .unwrap();
+        let (min, max) = claude.effective_tested_range();
+        claude.gate_version(CliVersion::new(found.0, found.1, found.2), min, max)
+    }
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    #[test]
+    fn gate_accepts_a_version_inside_the_declared_range() {
+        let found = gate((
+            TESTED_CLI_VERSION_MIN.major,
+            TESTED_CLI_VERSION_MIN.minor,
+            TESTED_CLI_VERSION_MIN.patch,
+        ))
+        .expect("the declared minimum must pass its own gate");
+        assert_eq!(found, TESTED_CLI_VERSION_MIN);
+    }
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    #[test]
+    fn gate_rejects_older_than_minimum_with_both_bounds() {
+        let err = gate((1, 0, 0)).expect_err("1.0.0 is below any supported floor");
+        match err {
+            Error::UntestedCliVersion {
+                found,
+                tested_min,
+                tested_max,
+            } => {
+                assert_eq!(found, CliVersion::new(1, 0, 0));
+                assert_eq!(tested_min, TESTED_CLI_VERSION_MIN);
+                assert_eq!(tested_max, TESTED_CLI_VERSION_MAX);
+                // The message must say which side it fell off, since
+                // "too old" and "too new" call for opposite fixes.
+                assert!(err_text(&err).contains("older"), "{}", err_text(&err));
+            }
+            other => panic!("expected UntestedCliVersion, got {other:?}"),
+        }
+    }
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    #[test]
+    fn gate_rejects_newer_than_maximum() {
+        let err = gate((99, 0, 0)).expect_err("99.0.0 is above the tested ceiling");
+        assert!(matches!(err, Error::UntestedCliVersion { .. }));
+        assert!(err_text(&err).contains("newer"), "{}", err_text(&err));
+    }
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    #[test]
+    fn gate_honours_a_caller_supplied_range_over_the_crate_default() {
+        // A host that has verified a narrower window should be able to
+        // enforce it, including rejecting versions the crate itself
+        // considers fine.
+        let claude = Claude::builder()
+            .binary("/nonexistent/claude")
+            .tested_cli_version_range(CliVersion::new(3, 0, 0), CliVersion::new(3, 0, 9))
+            .build()
+            .unwrap();
+        let (min, max) = claude.effective_tested_range();
+        assert_eq!(min, CliVersion::new(3, 0, 0));
+        assert!(
+            claude
+                .gate_version(CliVersion::new(3, 0, 5), min, max)
+                .is_ok()
+        );
+        assert!(
+            claude
+                .gate_version(TESTED_CLI_VERSION_MIN, min, max)
+                .is_err(),
+            "the caller's range must win over the crate's"
+        );
+    }
+
+    #[cfg(any(feature = "async", feature = "sync"))]
+    fn err_text(e: &Error) -> String {
+        e.to_string()
+    }
 
     #[test]
     fn test_builder_with_binary() {
