@@ -273,8 +273,17 @@ impl SharedSpawnArgs {
 /// Shared by [`QueryCommand::to_command_string`](crate::QueryCommand::to_command_string)
 /// and [`DuplexOptions::to_command_string`](crate::duplex::DuplexOptions::to_command_string).
 pub(crate) fn shell_quote(arg: &str) -> String {
-    // Check if the argument needs quoting (contains whitespace or shell metacharacters)
-    if arg.contains(|c: char| c.is_whitespace() || "\"'$\\`|;<>&()[]{}".contains(c)) {
+    // An empty argument has to be quoted. Unquoted it contributes nothing to
+    // the joined command, so the preview would describe an invocation with one
+    // fewer argument than the real one (#773).
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    // Check if the argument needs quoting (contains whitespace or shell
+    // metacharacters). The globbing and history characters are in the set
+    // because an unquoted `*.rs` pastes back as a shell expansion rather than
+    // the literal the process received.
+    if arg.contains(|c: char| c.is_whitespace() || "\"'$\\`|;<>&()[]{}*?!~#".contains(c)) {
         // Use single quotes and escape any existing single quotes
         format!("'{}'", arg.replace("'", "'\\''"))
     } else {
@@ -455,8 +464,26 @@ mod tests {
     #[test]
     fn shell_quote_plain_word_is_unchanged() {
         assert_eq!(shell_quote("simple"), "simple");
-        assert_eq!(shell_quote(""), "");
         assert_eq!(shell_quote("file.rs"), "file.rs");
+    }
+
+    /// An unquoted empty argument disappears once the arguments are joined,
+    /// so the rendered command would run with one fewer argument than the one
+    /// it claims to preview (#773).
+    #[test]
+    fn shell_quote_keeps_an_empty_argument_visible() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    /// A glob left unquoted pastes back as a shell expansion rather than the
+    /// literal the process was given.
+    #[test]
+    fn shell_quote_globbing_and_history_characters_get_quoted() {
+        assert_eq!(shell_quote("*.rs"), "'*.rs'");
+        assert_eq!(shell_quote("a?b"), "'a?b'");
+        assert_eq!(shell_quote("!!"), "'!!'");
+        assert_eq!(shell_quote("~/x"), "'~/x'");
+        assert_eq!(shell_quote("#comment"), "'#comment'");
     }
 
     #[test]
