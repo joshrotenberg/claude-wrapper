@@ -435,6 +435,8 @@ pub struct Claude {
     // Read only by the feature-gated exec paths, like env/timeout.
     #[allow(dead_code)]
     pub(crate) process_group: bool,
+    #[allow(dead_code)]
+    pub(crate) kill_grace: Option<Duration>,
 }
 
 impl Claude {
@@ -714,6 +716,7 @@ pub struct ClaudeBuilder {
     retry_policy: Option<RetryPolicy>,
     tested_cli_version_range: Option<(CliVersion, CliVersion)>,
     process_group: Option<bool>,
+    kill_grace: Option<Duration>,
 }
 
 impl ClaudeBuilder {
@@ -888,6 +891,24 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Grace period between SIGTERM and SIGKILL when a run is killed
+    /// by a timeout or a duplex shutdown overrun (Unix). Default:
+    /// none; kills are immediate SIGKILL.
+    ///
+    /// With a grace set, the child's whole process group gets SIGTERM
+    /// first so `claude` can flush its transcript and session state,
+    /// and SIGKILL follows once the grace elapses. The full grace is
+    /// waited before the timeout error returns, so keep it short
+    /// (500ms to 2s). Dropping a future cannot wait, so drop-path
+    /// cancellation stays immediate SIGKILL, and the grace applies
+    /// only while the child is in its own process group (see
+    /// [`process_group`](Self::process_group)).
+    #[must_use]
+    pub fn kill_grace(mut self, grace: Duration) -> Self {
+        self.kill_grace = Some(grace);
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -904,6 +925,7 @@ impl ClaudeBuilder {
             retry_policy: self.retry_policy,
             tested_cli_version_range: self.tested_cli_version_range,
             process_group: self.process_group.unwrap_or(true),
+            kill_grace: self.kill_grace,
         })
     }
 }
@@ -926,6 +948,22 @@ mod tests {
             .build()
             .unwrap();
         assert!(!off.process_group);
+    }
+
+    #[test]
+    fn builder_kill_grace_defaults_off_and_can_be_set() {
+        let off = Claude::builder()
+            .binary("/nonexistent/claude")
+            .build()
+            .unwrap();
+        assert!(off.kill_grace.is_none());
+
+        let on = Claude::builder()
+            .binary("/nonexistent/claude")
+            .kill_grace(Duration::from_millis(750))
+            .build()
+            .unwrap();
+        assert_eq!(on.kill_grace, Some(Duration::from_millis(750)));
     }
 
     // -- the version gate ------------------------------------------

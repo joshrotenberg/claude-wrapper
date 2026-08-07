@@ -168,6 +168,30 @@ impl GroupKillGuard {
         }
     }
 
+    /// True while the guard can still signal the group.
+    pub(crate) fn is_armed(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.pgid.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// SIGTERM the whole group (Unix) so the CLI can flush its
+    /// transcript and session state. Does not disarm: callers follow
+    /// up with [`kill_now`](Self::kill_now) once the grace elapses.
+    pub(crate) fn term_now(&self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            // SAFETY: plain FFI call with no pointers or invariants;
+            // failure (e.g. ESRCH once the group is gone) is ignored.
+            let _ = unsafe { libc::killpg(pgid, libc::SIGTERM) };
+        }
+    }
+
     /// SIGKILL the group immediately and disarm.
     pub(crate) fn kill_now(&mut self) {
         #[cfg(unix)]
@@ -213,6 +237,38 @@ pub(crate) fn apply_process_group_sync(cmd: &mut std::process::Command, enabled:
     {
         let _ = (cmd, enabled);
     }
+}
+
+/// Escalated group kill for the waitable paths: SIGTERM the group,
+/// wait out `grace` without reaping (the zombie child keeps the group
+/// id reserved, so a recycled pid can never be signalled), then
+/// SIGKILL whatever remains. With no grace configured, or when the
+/// child is not in its own process group, this is an immediate
+/// SIGKILL. Drop-path cancellation cannot wait and always SIGKILLs
+/// immediately via the guard's `Drop`.
+#[cfg(feature = "async")]
+pub(crate) async fn kill_group_with_grace(group: &mut GroupKillGuard, grace: Option<Duration>) {
+    if let Some(g) = grace
+        && !g.is_zero()
+        && group.is_armed()
+    {
+        group.term_now();
+        tokio::time::sleep(g).await;
+    }
+    group.kill_now();
+}
+
+/// Blocking mirror of [`kill_group_with_grace`].
+#[cfg(feature = "sync")]
+pub(crate) fn kill_group_with_grace_sync(group: &mut GroupKillGuard, grace: Option<Duration>) {
+    if let Some(g) = grace
+        && !g.is_zero()
+        && group.is_armed()
+    {
+        group.term_now();
+        std::thread::sleep(g);
+    }
+    group.kill_now();
 }
 
 /// Run a claude command with the given arguments.
@@ -290,6 +346,7 @@ async fn run_claude_with_stdin_prompt_internal(
             working_dir,
             claude.process_group,
             timeout,
+            claude.kill_grace,
             stdin_content,
         )
         .await
@@ -404,6 +461,7 @@ async fn run_internal_stdin(
 }
 
 #[cfg(feature = "async")]
+#[allow(clippy::too_many_arguments)]
 async fn run_with_timeout_stdin(
     binary: &std::path::Path,
     args: &[String],
@@ -411,6 +469,7 @@ async fn run_with_timeout_stdin(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     timeout: Duration,
+    kill_grace: Option<Duration>,
     stdin_content: String,
 ) -> Result<CommandOutput> {
     use tokio::io::AsyncWriteExt;
@@ -500,9 +559,10 @@ async fn run_with_timeout_stdin(
             working_dir: working_dir.map(|p| p.to_path_buf()),
         }),
         Err(_) => {
-            // Timeout: SIGKILL the whole group first (subprocesses may
-            // hold our pipe fds), then kill+reap the direct child.
-            group.kill_now();
+            // Timeout: take down the whole group first (subprocesses
+            // may hold our pipe fds), honoring the optional SIGTERM
+            // grace, then kill+reap the direct child.
+            kill_group_with_grace(&mut group, kill_grace).await;
             let _ = child.kill().await;
             let drain_budget = Duration::from_millis(200);
             let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout_handle))
@@ -542,6 +602,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             claude.working_dir.as_deref(),
             claude.process_group,
             timeout,
+            claude.kill_grace,
         )
         .await?
     } else {
@@ -689,6 +750,7 @@ async fn run_with_timeout(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     timeout: Duration,
+    kill_grace: Option<Duration>,
 ) -> Result<CommandOutput> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
@@ -763,11 +825,12 @@ async fn run_with_timeout(
             working_dir: working_dir.map(|p| p.to_path_buf()),
         }),
         Err(_) => {
-            // Timeout: SIGKILL the whole group, then kill+reap the
-            // direct child. The group kill takes down subprocesses
-            // that could otherwise hold our pipe fds open forever;
-            // the capped drain below stays as a backstop.
-            group.kill_now();
+            // Timeout: take down the whole group, honoring the
+            // optional SIGTERM grace, then kill+reap the direct
+            // child. The group kill takes down subprocesses that
+            // could otherwise hold our pipe fds open forever; the
+            // capped drain below stays as a backstop.
+            kill_group_with_grace(&mut group, kill_grace).await;
             let _ = child.kill().await;
             let drain_budget = Duration::from_millis(200);
             let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout))
@@ -895,6 +958,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             claude.working_dir.as_deref(),
             claude.process_group,
             timeout,
+            claude.kill_grace,
             stdin_content,
         )
     } else {
@@ -1000,6 +1064,7 @@ fn run_internal_stdin_sync(
 }
 
 #[cfg(feature = "sync")]
+#[allow(clippy::too_many_arguments)]
 fn run_with_timeout_stdin_sync(
     binary: &std::path::Path,
     args: &[String],
@@ -1007,6 +1072,7 @@ fn run_with_timeout_stdin_sync(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     timeout: Duration,
+    kill_grace: Option<Duration>,
     stdin_content: String,
 ) -> Result<CommandOutput> {
     use std::io::Write;
@@ -1093,9 +1159,10 @@ fn run_with_timeout_stdin_sync(
             })
         }
         None => {
-            // Timeout: SIGKILL the whole group first (subprocesses may
-            // hold our pipe fds), then kill+reap the direct child.
-            group.kill_now();
+            // Timeout: take down the whole group first (subprocesses
+            // may hold our pipe fds), honoring the optional SIGTERM
+            // grace, then kill+reap the direct child.
+            kill_group_with_grace_sync(&mut group, kill_grace);
             let _ = child.kill();
             let _ = child.wait();
             let (stdout_str, stderr_str) =
@@ -1131,6 +1198,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             claude.working_dir.as_deref(),
             claude.process_group,
             timeout,
+            claude.kill_grace,
         )
     } else {
         run_internal_sync(
@@ -1242,6 +1310,7 @@ fn run_with_timeout_sync(
     working_dir: Option<&std::path::Path>,
     process_group: bool,
     timeout: Duration,
+    kill_grace: Option<Duration>,
 ) -> Result<CommandOutput> {
     use std::process::{Command as StdCommand, Stdio};
     use std::thread;
@@ -1313,12 +1382,13 @@ fn run_with_timeout_sync(
             })
         }
         None => {
-            // Timeout: SIGKILL the whole group, then kill+reap the
-            // direct child. The group kill takes down subprocesses
-            // that could otherwise hold our pipe fds open and block
-            // the drain threads; the capped join below stays as a
+            // Timeout: take down the whole group, honoring the
+            // optional SIGTERM grace, then kill+reap the direct
+            // child. The group kill takes down subprocesses that
+            // could otherwise hold our pipe fds open and block the
+            // drain threads; the capped join below stays as a
             // backstop.
-            group.kill_now();
+            kill_group_with_grace_sync(&mut group, kill_grace);
             let _ = child.kill();
             let _ = child.wait();
 
@@ -1958,6 +2028,76 @@ mod tests {
         let _ = std::process::Command::new("kill")
             .args(["-9", &gpid.to_string()])
             .status();
+    }
+
+    /// Fake script that traps SIGTERM, records a marker, and exits
+    /// cleanly. The marker can only exist if TERM arrived before the
+    /// KILL: SIGKILL cannot be trapped. `sleep` runs as a background
+    /// job with `wait` so bash stays alive to handle the signal
+    /// (an `exec sleep` would replace bash and drop the trap).
+    fn term_trap_script(marker: &std::path::Path) -> (tempfile::TempDir, std::path::PathBuf) {
+        fake_script(&format!(
+            concat!(
+                "trap 'echo term > \"{m}\"; exit 0' TERM\n",
+                "sleep 300 &\n",
+                "wait $!",
+            ),
+            m = marker.display(),
+        ))
+    }
+
+    // With a kill grace configured, a fired timeout SIGTERMs the group
+    // before the SIGKILL, giving the child a chance to flush. Retries
+    // on a heavily loaded host where the child is killed before it
+    // installs its trap: the kill still happened, but there is nothing
+    // to observe, so run it again.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_timeout_with_grace_delivers_sigterm_first() {
+        let mut observed = false;
+        for _ in 0..5 {
+            let workdir = tempfile::tempdir().expect("workdir");
+            let marker = workdir.path().join("term-marker");
+            let (_dir, path) = term_trap_script(&marker);
+            let claude = Claude::builder()
+                .binary(&path)
+                .timeout(Duration::from_millis(500))
+                .kill_grace(Duration::from_secs(1))
+                .build()
+                .expect("build");
+            let err = run_claude(&claude, vec![]).await.unwrap_err();
+            assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+            if marker.exists() {
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "TERM marker never appeared within 5 timeout runs");
+    }
+
+    // Blocking mirror of async_timeout_with_grace_delivers_sigterm_first.
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_timeout_with_grace_delivers_sigterm_first() {
+        let mut observed = false;
+        for _ in 0..5 {
+            let workdir = tempfile::tempdir().expect("workdir");
+            let marker = workdir.path().join("term-marker");
+            let (_dir, path) = term_trap_script(&marker);
+            let claude = Claude::builder()
+                .binary(&path)
+                .timeout(Duration::from_millis(500))
+                .kill_grace(Duration::from_secs(1))
+                .build()
+                .expect("build");
+            let err = run_claude_sync(&claude, vec![]).unwrap_err();
+            assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+            if marker.exists() {
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "TERM marker never appeared within 5 timeout runs");
     }
 
     // Same guarantee for the stdin-prompt path.
