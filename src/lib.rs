@@ -463,6 +463,8 @@ pub struct Claude {
     pub(crate) kill_grace: Option<Duration>,
     #[allow(dead_code)]
     pub(crate) on_spawn: Option<SpawnObserver>,
+    #[allow(dead_code)]
+    pub(crate) die_with_parent: bool,
 }
 
 impl std::fmt::Debug for Claude {
@@ -760,6 +762,7 @@ pub struct ClaudeBuilder {
     process_group: Option<bool>,
     kill_grace: Option<Duration>,
     on_spawn: Option<SpawnObserver>,
+    die_with_parent: bool,
 }
 
 impl std::fmt::Debug for ClaudeBuilder {
@@ -1007,6 +1010,50 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Ask the kernel to kill spawned children when this process dies.
+    ///
+    /// **Linux only.** Check [`die_with_parent_supported`](crate::exec::die_with_parent_supported)
+    /// rather than assuming; elsewhere this is accepted and does nothing.
+    ///
+    /// # The problem it addresses
+    ///
+    /// Every other cleanup path in this crate is a destructor: `kill_on_drop`,
+    /// and the process-group kill on drop, timeout, or stream error. None of
+    /// them run when *this* process is SIGKILLed. The child is then reparented
+    /// to init, and because it leads its own process group (see
+    /// [`process_group`](Self::process_group)) terminal signals cannot reach it
+    /// either. It keeps running, keeps billing, and keeps appending to the
+    /// session transcript, so a restarted supervisor that resumes the same
+    /// session id can find itself interleaving with an orphan still writing.
+    ///
+    /// On Linux `PR_SET_PDEATHSIG` closes that: the kernel delivers SIGKILL to
+    /// the child the moment its parent dies, with no cooperation from either
+    /// side.
+    ///
+    /// # What it does not cover
+    ///
+    /// - **Non-Linux targets.** macOS has no equivalent. A supervisor that
+    ///   needs the guarantee there has to poll and kill by pid; recording the
+    ///   pid is what [`on_spawn`](Self::on_spawn) is for.
+    /// - **Re-parenting.** The signal fires when the *immediate* parent dies.
+    ///   If the crate's caller is itself an intermediate process that exits
+    ///   normally, the child dies then, which is usually what you want but is
+    ///   worth knowing if you daemonize between building the client and
+    ///   spawning.
+    /// - **The fork/prctl window.** Handled: the hook re-checks `getppid()`
+    ///   after arming and exits if the parent already changed. Without that
+    ///   check a parent dying in that window leaves exactly the orphan this
+    ///   option exists to prevent.
+    ///
+    /// Off by default, because killing children on parent exit is the right
+    /// default for a supervisor and the wrong one for a CLI that deliberately
+    /// backgrounds work.
+    #[must_use]
+    pub fn die_with_parent(mut self, enabled: bool) -> Self {
+        self.die_with_parent = enabled;
+        self
+    }
+
     /// Build the Claude client, resolving the binary path.
     pub fn build(self) -> Result<Claude> {
         let binary = match self.binary {
@@ -1025,6 +1072,7 @@ impl ClaudeBuilder {
             process_group: self.process_group.unwrap_or(true),
             kill_grace: self.kill_grace,
             on_spawn: self.on_spawn,
+            die_with_parent: self.die_with_parent,
         })
     }
 }

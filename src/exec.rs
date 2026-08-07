@@ -131,18 +131,32 @@ pub struct CommandOutput {
 /// Kept together so the two cannot disagree about whether the child leads its
 /// own group: the `pgid` reported is `Some` exactly when the guard is armed,
 /// which is exactly when the pid is safe to `killpg`.
-/// The spawn-policy knobs the timeout paths carry together.
+/// The spawn-policy knobs every spawn path carries together.
 ///
-/// Bundled because those two functions otherwise exceed clippy's argument
-/// threshold, and because these three always travel as a set: whether the
-/// child leads its own group, how long to wait before escalating a kill, and
-/// who to tell that it exists.
+/// Bundled because they always travel as a set and because threading them
+/// individually pushed the timeout paths past clippy's argument threshold:
+/// whether the child leads its own group, how long to wait before escalating a
+/// kill, whether the child should die with its parent, and who to tell that it
+/// exists.
 #[cfg(any(feature = "async", feature = "sync"))]
 #[derive(Clone, Copy)]
 pub(crate) struct SpawnPolicy<'a> {
     pub(crate) process_group: bool,
     pub(crate) kill_grace: Option<Duration>,
+    pub(crate) die_with_parent: bool,
     pub(crate) on_spawn: Option<&'a crate::SpawnObserver>,
+}
+
+impl SpawnPolicy<'_> {
+    /// The policy a [`Claude`] client describes.
+    pub(crate) fn of(claude: &Claude) -> SpawnPolicy<'_> {
+        SpawnPolicy {
+            process_group: claude.process_group,
+            kill_grace: claude.kill_grace,
+            die_with_parent: claude.die_with_parent,
+            on_spawn: claude.on_spawn.as_ref(),
+        }
+    }
 }
 
 #[cfg(any(feature = "async", feature = "sync"))]
@@ -241,6 +255,95 @@ impl GroupKillGuard {
 impl Drop for GroupKillGuard {
     fn drop(&mut self) {
         self.kill_now();
+    }
+}
+
+/// Whether [`ClaudeBuilder::die_with_parent`](crate::ClaudeBuilder::die_with_parent)
+/// does anything on this platform.
+///
+/// `true` only on Linux, which is the only target with a kernel-level
+/// parent-death signal (`PR_SET_PDEATHSIG`). Elsewhere the option is accepted
+/// and has no effect, so a supervisor that needs the guarantee everywhere must
+/// check this and run its own watchdog rather than assume coverage it does not
+/// have.
+#[must_use]
+pub const fn die_with_parent_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+/// Ask the kernel to SIGKILL the child when this process dies.
+///
+/// Linux only. Two things make this correct rather than merely present:
+///
+/// - **The fork/prctl race.** `PR_SET_PDEATHSIG` is set by the child *after*
+///   the fork. If the parent dies in that window the signal never arrives and
+///   the child orphans anyway, which is the exact case this exists to prevent.
+///   So the hook re-reads `getppid()` immediately afterwards and exits if the
+///   parent already changed.
+/// - **Async-signal-safety.** Everything called here (`prctl`, `getppid`,
+///   `_exit`) is on the post-fork allowlist. Anything that allocates or takes a
+///   lock would risk deadlocking the child.
+///
+/// The signal is also cleared across `execve` only for setuid binaries, which
+/// `claude` is not, so it survives into the CLI itself.
+#[cfg(all(unix, any(feature = "async", feature = "sync")))]
+fn pdeathsig_hook() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
+    // Read the parent pid before the fork: inside the child, "the parent we
+    // meant" is this value, not whatever getppid happens to return later.
+    let parent = std::process::id();
+    move || {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: async-signal-safe calls only, as required post-fork.
+            unsafe {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Lost the race: the parent died before the signal was armed.
+                if libc::getppid() as u32 != parent {
+                    libc::_exit(1);
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = parent;
+        }
+        Ok(())
+    }
+}
+
+/// Apply the parent-death policy to an async spawn. No-op off Linux; see
+/// [`die_with_parent_supported`].
+#[cfg(feature = "async")]
+pub(crate) fn apply_die_with_parent(cmd: &mut Command, enabled: bool) {
+    #[cfg(unix)]
+    if enabled {
+        // SAFETY: the hook is async-signal-safe; see `pdeathsig_hook`.
+        unsafe {
+            cmd.pre_exec(pdeathsig_hook());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cmd, enabled);
+    }
+}
+
+/// Blocking mirror of [`apply_die_with_parent`].
+#[cfg(feature = "sync")]
+pub(crate) fn apply_die_with_parent_sync(cmd: &mut std::process::Command, enabled: bool) {
+    #[cfg(unix)]
+    if enabled {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the hook is async-signal-safe; see `pdeathsig_hook`.
+        unsafe {
+            cmd.pre_exec(pdeathsig_hook());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cmd, enabled);
     }
 }
 
@@ -378,11 +481,9 @@ async fn run_claude_with_stdin_prompt_internal(
             &command_args,
             env,
             working_dir,
-            claude.process_group,
             timeout,
-            claude.kill_grace,
             stdin_content,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
         .await
     } else {
@@ -391,9 +492,8 @@ async fn run_claude_with_stdin_prompt_internal(
             &command_args,
             env,
             working_dir,
-            claude.process_group,
             stdin_content,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
         .await
     };
@@ -410,10 +510,15 @@ async fn run_internal_stdin(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     stdin_content: String,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace: _, // no kill site on this path
+        die_with_parent,
+        on_spawn,
+    } = policy;
     use tokio::io::AsyncWriteExt;
 
     let mut cmd = Command::new(binary);
@@ -428,6 +533,7 @@ async fn run_internal_stdin(
     // tree, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
+    apply_die_with_parent(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -504,12 +610,16 @@ async fn run_with_timeout_stdin(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     timeout: Duration,
-    kill_grace: Option<Duration>,
     stdin_content: String,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace,
+        die_with_parent,
+        on_spawn,
+    } = policy;
     use tokio::io::AsyncWriteExt;
 
     let mut cmd = Command::new(binary);
@@ -524,6 +634,7 @@ async fn run_with_timeout_stdin(
     // tree, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
+    apply_die_with_parent(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -639,11 +750,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &claude.env,
             claude.working_dir.as_deref(),
             timeout,
-            SpawnPolicy {
-                process_group: claude.process_group,
-                kill_grace: claude.kill_grace,
-                on_spawn: claude.on_spawn.as_ref(),
-            },
+            SpawnPolicy::of(claude),
         )
         .await?
     } else {
@@ -652,8 +759,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
         .await?
     };
@@ -695,9 +801,14 @@ async fn run_internal(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace: _, // no kill site on this path
+        die_with_parent,
+        on_spawn,
+    } = policy;
     let mut cmd = Command::new(binary);
     cmd.args(args);
 
@@ -713,6 +824,7 @@ async fn run_internal(
     // tree, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
+    apply_die_with_parent(&mut cmd, die_with_parent);
 
     // Remove Claude Code env vars to prevent nested session detection
     cmd.env_remove("CLAUDECODE");
@@ -797,6 +909,7 @@ async fn run_with_timeout(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        die_with_parent,
         on_spawn,
     } = policy;
     let mut cmd = Command::new(binary);
@@ -811,6 +924,7 @@ async fn run_with_timeout(
     // tree, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
+    apply_die_with_parent(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1003,11 +1117,9 @@ pub fn run_claude_with_stdin_prompt_sync(
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
             timeout,
-            claude.kill_grace,
             stdin_content,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
     } else {
         run_internal_stdin_sync(
@@ -1015,9 +1127,8 @@ pub fn run_claude_with_stdin_prompt_sync(
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
             stdin_content,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
     };
 
@@ -1033,10 +1144,15 @@ fn run_internal_stdin_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     stdin_content: String,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace: _, // no kill site on this path
+        die_with_parent,
+        on_spawn,
+    } = policy;
     use std::io::Write;
     use std::process::{Command as StdCommand, Stdio};
 
@@ -1049,6 +1165,7 @@ fn run_internal_stdin_sync(
     // not just the direct child (see GroupKillGuard). Opt out via
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
+    apply_die_with_parent_sync(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1120,12 +1237,16 @@ fn run_with_timeout_stdin_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
     timeout: Duration,
-    kill_grace: Option<Duration>,
     stdin_content: String,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace,
+        die_with_parent,
+        on_spawn,
+    } = policy;
     use std::io::Write;
     use std::process::{Command as StdCommand, Stdio};
     use std::thread;
@@ -1140,6 +1261,7 @@ fn run_with_timeout_stdin_sync(
     // not just the direct child (see GroupKillGuard). Opt out via
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
+    apply_die_with_parent_sync(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1248,11 +1370,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &claude.env,
             claude.working_dir.as_deref(),
             timeout,
-            SpawnPolicy {
-                process_group: claude.process_group,
-                kill_grace: claude.kill_grace,
-                on_spawn: claude.on_spawn.as_ref(),
-            },
+            SpawnPolicy::of(claude),
         )
     } else {
         run_internal_sync(
@@ -1260,8 +1378,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &command_args,
             &claude.env,
             claude.working_dir.as_deref(),
-            claude.process_group,
-            claude.on_spawn.as_ref(),
+            SpawnPolicy::of(claude),
         )
     };
 
@@ -1300,9 +1417,14 @@ fn run_internal_sync(
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
-    process_group: bool,
-    on_spawn: Option<&crate::SpawnObserver>,
+    policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    let SpawnPolicy {
+        process_group,
+        kill_grace: _, // no kill site on this path
+        die_with_parent,
+        on_spawn,
+    } = policy;
     use std::process::{Command as StdCommand, Stdio};
 
     let mut cmd = StdCommand::new(binary);
@@ -1313,6 +1435,7 @@ fn run_internal_sync(
     // there is no guard to arm -- but the child still exists and a
     // supervisor still wants its pid, so the spawn is observed below.
     apply_process_group_sync(&mut cmd, process_group);
+    apply_die_with_parent_sync(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1374,6 +1497,7 @@ fn run_with_timeout_sync(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        die_with_parent,
         on_spawn,
     } = policy;
     use std::process::{Command as StdCommand, Stdio};
@@ -1389,6 +1513,7 @@ fn run_with_timeout_sync(
     // not just the direct child (see GroupKillGuard). Opt out via
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
+    apply_die_with_parent_sync(&mut cmd, die_with_parent);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
