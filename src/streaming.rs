@@ -422,12 +422,13 @@ where
         Some(d) => match tokio::time::timeout(d, combined).await {
             Ok(pair) => pair,
             Err(_) => {
-                // Timeout: SIGKILL the whole group, then kill+reap the
-                // direct child, and try to drain whatever stderr
-                // remains. The group kill takes down subprocesses that
-                // could otherwise hold our pipe fds open; the capped
-                // drain below stays as a backstop.
-                group.kill_now();
+                // Timeout: take down the whole group, honoring the
+                // optional SIGTERM grace, then kill+reap the direct
+                // child, and try to drain whatever stderr remains.
+                // The group kill takes down subprocesses that could
+                // otherwise hold our pipe fds open; the capped drain
+                // below stays as a backstop.
+                crate::exec::kill_group_with_grace(&mut group, claude.kill_grace).await;
                 let _ = child.kill().await;
                 let drain_budget = Duration::from_millis(200);
                 let stderr_str = tokio::time::timeout(drain_budget, drain_stderr(&mut stderr))
@@ -684,9 +685,10 @@ where
     }
 
     if timed_out {
-        // SIGKILL the whole group first, so grandchildren holding our
-        // pipe fds die too, then kill+reap the direct child.
-        group.kill_now();
+        // Take down the whole group first, honoring the optional
+        // SIGTERM grace, so grandchildren holding our pipe fds die
+        // too, then kill+reap the direct child.
+        crate::exec::kill_group_with_grace_sync(&mut group, claude.kill_grace);
         let _ = child.kill();
         let _ = child.wait();
         // Both worker threads can block indefinitely if an orphaned

@@ -1213,6 +1213,7 @@ impl DuplexSession {
             run_session(
                 child,
                 group,
+                claude.kill_grace,
                 stdin,
                 stdout,
                 outbound_rx,
@@ -1484,6 +1485,7 @@ const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 async fn run_session(
     mut child: Child,
     mut group: crate::exec::GroupKillGuard,
+    kill_grace: Option<Duration>,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
@@ -1665,9 +1667,10 @@ async fn run_session(
         }
         Err(_) => {
             warn!("duplex child did not exit within shutdown budget; killing");
-            // SIGKILL the whole group (Unix) so subprocesses spawned
-            // for tool use die too, then kill+reap the direct child.
-            group.kill_now();
+            // Take down the whole group (Unix), honoring the optional
+            // SIGTERM grace, so subprocesses spawned for tool use die
+            // too, then kill+reap the direct child.
+            crate::exec::kill_group_with_grace(&mut group, kill_grace).await;
             let _ = child.kill().await;
         }
     }
