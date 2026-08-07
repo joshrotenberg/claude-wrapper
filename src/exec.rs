@@ -11,7 +11,8 @@
 //! Every spawn places the child in its own process group on Unix, and
 //! every async spawn sets `kill_on_drop(true)`. Dropping an in-flight
 //! execute future (a lost `tokio::select!` race, a caller-side timeout)
-//! SIGKILLs the whole group via [`GroupKillGuard`], so subprocesses the
+//! SIGKILLs the whole group (via the crate-internal `GroupKillGuard`),
+//! so subprocesses the
 //! CLI spawned for tool use (shells, MCP servers, test runners) die
 //! with it rather than being reparented and running on. The same
 //! group-kill runs when a configured timeout fires, on both the async
