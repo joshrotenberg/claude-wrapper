@@ -152,9 +152,20 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = crate::error::Result<T>>,
 {
+    // A retry span parents every attempt, so the exec spans nest under
+    // one identifiable unit of work instead of appearing as unrelated
+    // siblings. `attempts` is recorded on close: a caller reading logs
+    // wants "this took 3 tries", not three disconnected warnings.
+    let span = tracing::debug_span!(
+        "claude.retry",
+        max_attempts = policy.max_attempts,
+        attempts = tracing::field::Empty,
+    );
+    let _enter = span.enter();
     let mut last_error = None;
 
     for attempt in 0..policy.max_attempts {
+        span.record("attempts", attempt + 1);
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
@@ -189,9 +200,16 @@ pub(crate) fn with_retry_sync<F, T>(
 where
     F: FnMut() -> crate::error::Result<T>,
 {
+    let span = tracing::debug_span!(
+        "claude.retry",
+        max_attempts = policy.max_attempts,
+        attempts = tracing::field::Empty,
+    );
+    let _enter = span.enter();
     let mut last_error = None;
 
     for attempt in 0..policy.max_attempts {
+        span.record("attempts", attempt + 1);
         match operation() {
             Ok(result) => return Ok(result),
             Err(e) => {

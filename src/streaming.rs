@@ -339,6 +339,26 @@ where
     command_args.extend(claude.global_args.clone());
     command_args.extend(args);
 
+    // A stream has three outcomes and the failure one is the easy one
+    // to miss, so `outcome` is recorded on every exit path: completed,
+    // failed, or timeout. `events` counts what the handler actually
+    // saw, which is the difference between "produced nothing" and
+    // "never started".
+    let span = tracing::debug_span!(
+        "claude.stream",
+        command = crate::exec::span_command(&command_args),
+        binary = %claude.binary.display(),
+        cwd = claude.working_dir.as_deref().map(|d| d.display().to_string()),
+        timeout_secs = timeout.map(|t| t.as_secs()),
+        outcome = tracing::field::Empty,
+        events = tracing::field::Empty,
+        exit_code = tracing::field::Empty,
+        duration_ms = tracing::field::Empty,
+    );
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
+    let mut event_count: u64 = 0;
+
     debug!(
         binary = %claude.binary.display(),
         args = ?command_args,
@@ -382,7 +402,17 @@ where
     // tokio::join! polls both futures on the same task (no tokio::spawn
     // needed, so we avoid pulling in the `rt` feature).
     let drain = drain_stderr(&mut stderr);
-    let read_future = read_lines(&mut reader, &mut handler, claude.working_dir.clone());
+    // Wrap the caller's handler so the span can report how many events
+    // were dispatched without the handler needing to care.
+    let mut counting_handler = |event: StreamEvent| {
+        event_count += 1;
+        handler(event);
+    };
+    let read_future = read_lines(
+        &mut reader,
+        &mut counting_handler,
+        claude.working_dir.clone(),
+    );
     let combined = async {
         let (line_result, stderr_str) = tokio::join!(read_future, drain);
         (line_result, stderr_str)
@@ -406,6 +436,9 @@ where
                 if !stderr_str.is_empty() {
                     warn!(stderr = %stderr_str, "stderr from timed-out streaming process");
                 }
+                span.record("outcome", "timeout");
+                span.record("events", event_count);
+                span.record("duration_ms", started.elapsed().as_millis() as u64);
                 return Err(Error::Timeout {
                     timeout_seconds: d.as_secs(),
                 });
@@ -431,7 +464,12 @@ where
 
     let exit_code = status.code().unwrap_or(-1);
 
+    span.record("events", event_count);
+    span.record("exit_code", exit_code);
+    span.record("duration_ms", started.elapsed().as_millis() as u64);
+
     if !status.success() {
+        span.record("outcome", "failed");
         return Err(Error::CommandFailed {
             command: format!("{} {}", claude.binary.display(), command_args.join(" ")),
             exit_code,
@@ -441,6 +479,7 @@ where
         });
     }
 
+    span.record("outcome", "completed");
     Ok(CommandOutput {
         stdout: String::new(), // already consumed via streaming
         stderr: stderr_str,
