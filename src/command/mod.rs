@@ -41,9 +41,11 @@ pub trait ClaudeCommand: Send + Sync {
     /// Execute the command using the given claude client.
     ///
     /// Dropping the returned future mid-flight kills the spawned CLI
-    /// process (SIGKILL): a caller that races `execute` against
-    /// cancellation (e.g. `tokio::select!`) does not leave an abandoned
-    /// run executing in the background.
+    /// process and, on Unix, its whole process group (SIGKILL): a
+    /// caller that races `execute` against cancellation (e.g.
+    /// `tokio::select!`) does not leave an abandoned run executing in
+    /// the background, and subprocesses the CLI spawned for tool use
+    /// die with it.
     #[cfg(feature = "async")]
     fn execute(&self, claude: &Claude) -> impl Future<Output = Result<Self::Output>> + Send;
 }

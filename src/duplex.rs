@@ -1164,6 +1164,10 @@ impl DuplexSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Own process group (Unix) so shutdown can signal the whole
+        // tree, not just the direct child (see exec::GroupKillGuard).
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if let Some(ref dir) = claude.working_dir {
             cmd.current_dir(dir);
@@ -1174,6 +1178,7 @@ impl DuplexSession {
             source: e,
             working_dir: claude.working_dir.clone(),
         })?;
+        let group = crate::exec::GroupKillGuard::new(child.id());
 
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -1184,6 +1189,7 @@ impl DuplexSession {
 
         let join = tokio::spawn(run_session(
             child,
+            group,
             stdin,
             stdout,
             outbound_rx,
@@ -1449,8 +1455,10 @@ impl DuplexSession {
 /// it so close() does not hang on a misbehaving subprocess.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     mut child: Child,
+    mut group: crate::exec::GroupKillGuard,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
@@ -1569,12 +1577,17 @@ async fn run_session(
 
     drop(stdin);
     match tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()).await {
-        Ok(Ok(_status)) => {}
+        Ok(Ok(_status)) => {
+            group.disarm();
+        }
         Ok(Err(e)) => {
             warn!(error = %e, "failed to wait for duplex child");
         }
         Err(_) => {
             warn!("duplex child did not exit within shutdown budget; killing");
+            // SIGKILL the whole group (Unix) so subprocesses spawned
+            // for tool use die too, then kill+reap the direct child.
+            group.kill_now();
             let _ = child.kill().await;
         }
     }

@@ -273,9 +273,10 @@ fn parse_block_delta(delta: &serde_json::Value) -> BlockDelta {
 /// and real-time output processing.
 ///
 /// Dropping the returned future mid-flight kills the spawned `claude`
-/// process (SIGKILL): an abandoned run does not keep executing in the
-/// background. Events already dispatched to the handler are not rolled
-/// back.
+/// process and, on Unix, its whole process group (SIGKILL): an
+/// abandoned run does not keep executing in the background, and the
+/// subprocesses it spawned for tool use die with it. Events already
+/// dispatched to the handler are not rolled back.
 ///
 /// # Example
 ///
@@ -355,6 +356,10 @@ where
         // Dropping the in-flight future must kill the child, not leave
         // the CLI running unattended (see the `exec` module docs).
         .kill_on_drop(true);
+    // Own process group (Unix) so cancellation can signal the whole
+    // tree, not just the direct child (see exec::GroupKillGuard).
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     if let Some(ref dir) = claude.working_dir {
         cmd.current_dir(dir);
@@ -365,6 +370,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
+    let mut group = crate::exec::GroupKillGuard::new(child.id());
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -386,11 +392,12 @@ where
         Some(d) => match tokio::time::timeout(d, combined).await {
             Ok(pair) => pair,
             Err(_) => {
-                // Timeout: kill the child (reaps via start_kill + wait)
-                // and try to drain whatever stderr remains. kill() only
-                // targets the direct child, so a subprocess tree holding
-                // our pipe fds could block the drain -- cap it with a
-                // short deadline.
+                // Timeout: SIGKILL the whole group, then kill+reap the
+                // direct child, and try to drain whatever stderr
+                // remains. The group kill takes down subprocesses that
+                // could otherwise hold our pipe fds open; the capped
+                // drain below stays as a backstop.
+                group.kill_now();
                 let _ = child.kill().await;
                 let drain_budget = Duration::from_millis(200);
                 let stderr_str = tokio::time::timeout(drain_budget, drain_stderr(&mut stderr))
@@ -408,8 +415,9 @@ where
     };
 
     // If reading lines failed partway through (IO error, not timeout),
-    // clean up the child before returning.
+    // clean up the child (and its group) before returning.
     if let Err(e) = line_result {
+        group.kill_now();
         let _ = child.kill().await;
         return Err(e);
     }
@@ -419,6 +427,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
+    group.disarm();
 
     let exit_code = status.code().unwrap_or(-1);
 
@@ -486,9 +495,9 @@ where
 ///
 /// The handler is invoked on the caller's thread — no `Send` bound —
 /// so it can capture non-`Send` state. If a timeout is configured on
-/// the [`Claude`] client, the child is SIGKILLed and reaped once the
-/// deadline passes; partial events already dispatched to the handler
-/// are not rolled back.
+/// the [`Claude`] client, the child's whole process group (Unix) is
+/// SIGKILLed and the child reaped once the deadline passes; partial
+/// events already dispatched to the handler are not rolled back.
 ///
 /// # Example
 ///
@@ -550,6 +559,13 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group (Unix) so a kill can signal the whole tree,
+    // not just the direct child (see exec::GroupKillGuard).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd_builder.process_group(0);
+    }
 
     if let Some(ref dir) = claude.working_dir {
         cmd_builder.current_dir(dir);
@@ -560,6 +576,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
+    let mut group = crate::exec::GroupKillGuard::new(Some(child.id()));
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -631,6 +648,9 @@ where
     }
 
     if timed_out {
+        // SIGKILL the whole group first, so grandchildren holding our
+        // pipe fds die too, then kill+reap the direct child.
+        group.kill_now();
         let _ = child.kill();
         let _ = child.wait();
         // Both worker threads can block indefinitely if an orphaned
@@ -653,6 +673,7 @@ where
     // Normal completion: collect reader result (may carry IO error).
     let reader_result = reader_thread.join().unwrap_or(Ok(()));
     if let Err(e) = reader_result {
+        group.kill_now();
         let _ = child.kill();
         let _ = child.wait();
         let _ = stderr_thread.join();
@@ -664,6 +685,7 @@ where
         source: e,
         working_dir: claude.working_dir.clone(),
     })?;
+    group.disarm();
     let stderr_str = stderr_thread.join().unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
 

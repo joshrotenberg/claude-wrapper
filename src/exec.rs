@@ -8,11 +8,20 @@
 //! [`from_command_failure`](crate::error::Error::from_command_failure).
 //! Both the async (tokio) and blocking (`sync` feature) paths live here.
 //!
-//! Every async spawn sets `kill_on_drop(true)`: dropping an in-flight
+//! Every spawn places the child in its own process group on Unix, and
+//! every async spawn sets `kill_on_drop(true)`. Dropping an in-flight
 //! execute future (a lost `tokio::select!` race, a caller-side timeout)
-//! kills the child rather than leaving the CLI running unattended with
-//! nobody reading the result. The blocking paths cannot be dropped
-//! mid-flight, so they need no equivalent.
+//! SIGKILLs the whole group via [`GroupKillGuard`], so subprocesses the
+//! CLI spawned for tool use (shells, MCP servers, test runners) die
+//! with it rather than being reparented and running on. The same
+//! group-kill runs when a configured timeout fires, on both the async
+//! and blocking paths. The blocking paths cannot be dropped mid-flight,
+//! so they have no drop-side equivalent.
+//!
+//! Consequence of the group split: the child no longer shares the
+//! host's terminal process group, so terminal-generated signals
+//! (Ctrl-C) do not reach it directly; terminating a run is the
+//! wrapper's job, via drop, timeout, or an explicit kill.
 
 #[cfg(any(feature = "async", feature = "sync"))]
 use std::time::Duration;
@@ -53,6 +62,74 @@ pub struct CommandOutput {
     pub success: bool,
 }
 
+/// Kills the child's entire process group when dropped, unless disarmed.
+///
+/// Every spawn puts the child in its own process group on Unix
+/// (`process_group(0)`), so the group id equals the child's pid.
+/// `kill_on_drop` and `Child::kill` only reach the direct child; this
+/// guard extends cancellation to the subprocesses the CLI spawns for
+/// tool use (shells, MCP servers, test runners), which would otherwise
+/// be reparented and keep running.
+///
+/// Callers must [`disarm`](Self::disarm) the guard once the child's
+/// exit status has been observed: past that point the pid can be reaped
+/// and recycled, and signalling a recycled group would hit unrelated
+/// processes. While the child is unreaped (running or zombie) its pid
+/// cannot be recycled, so firing is safe.
+///
+/// On non-Unix targets the guard is a no-op.
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) struct GroupKillGuard {
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+#[cfg(any(feature = "async", feature = "sync"))]
+impl GroupKillGuard {
+    /// Arm a guard for the child with the given pid (as returned by
+    /// `Child::id`). A `None` pid (child already reaped) leaves the
+    /// guard disarmed.
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        #[cfg(unix)]
+        {
+            Self {
+                pgid: pid.and_then(|p| i32::try_from(p).ok()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Self {}
+        }
+    }
+
+    /// Stop the guard from firing: the child's exit status has been
+    /// observed, so the group id is no longer safe to signal.
+    pub(crate) fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.pgid = None;
+        }
+    }
+
+    /// SIGKILL the group immediately and disarm.
+    pub(crate) fn kill_now(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            // SAFETY: plain FFI call with no pointers or invariants;
+            // failure (e.g. ESRCH once the group is gone) is ignored.
+            let _ = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(any(feature = "async", feature = "sync"))]
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        self.kill_now();
+    }
+}
+
 /// Run a claude command with the given arguments.
 ///
 /// If the [`Claude`] client has a retry policy set, transient errors will be
@@ -60,8 +137,9 @@ pub struct CommandOutput {
 /// to override the client default.
 ///
 /// Dropping the returned future mid-flight kills the spawned `claude`
-/// process (SIGKILL): an abandoned run does not keep executing in the
-/// background.
+/// process and, on Unix, its whole process group (SIGKILL): an
+/// abandoned run does not keep executing in the background, and the
+/// subprocesses it spawned for tool use die with it.
 #[cfg(feature = "async")]
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     run_claude_with_retry(claude, args, None).await
@@ -149,6 +227,10 @@ async fn run_internal_stdin(
     // Dropping the in-flight future must kill the child, not leave the
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
+    // Own process group (Unix) so cancellation can signal the whole
+    // tree, not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -167,6 +249,7 @@ async fn run_internal_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
+    let mut group = GroupKillGuard::new(child.id());
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -195,6 +278,7 @@ async fn run_internal_stdin(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
+    group.disarm();
 
     let exit_code = status.code().unwrap_or(-1);
 
@@ -235,6 +319,10 @@ async fn run_with_timeout_stdin(
     // Dropping the in-flight future must kill the child, not leave the
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
+    // Own process group (Unix) so cancellation can signal the whole
+    // tree, not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -253,6 +341,7 @@ async fn run_with_timeout_stdin(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
+    let mut group = GroupKillGuard::new(child.id());
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -281,6 +370,7 @@ async fn run_with_timeout_stdin(
 
     match tokio::time::timeout(timeout, wait_and_drain).await {
         Ok((Ok(status), stdout, stderr)) => {
+            group.disarm();
             let exit_code = status.code().unwrap_or(-1);
 
             if !status.success() {
@@ -306,6 +396,9 @@ async fn run_with_timeout_stdin(
             working_dir: working_dir.map(|p| p.to_path_buf()),
         }),
         Err(_) => {
+            // Timeout: SIGKILL the whole group first (subprocesses may
+            // hold our pipe fds), then kill+reap the direct child.
+            group.kill_now();
             let _ = child.kill().await;
             let drain_budget = Duration::from_millis(200);
             let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout_handle))
@@ -395,11 +488,16 @@ async fn run_internal(
 
     // Prevent child from inheriting/blocking on parent's stdin.
     cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
     // Dropping the in-flight future must kill the child, not leave the
-    // CLI running unattended (see the module docs). The flag carries
-    // into the child spawned inside `Command::output` below.
+    // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
+    // Own process group (Unix) so cancellation can signal the whole
+    // tree, not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     // Remove Claude Code env vars to prevent nested session detection
     cmd.env_remove("CLAUDECODE");
@@ -413,19 +511,36 @@ async fn run_internal(
         cmd.env(key, value);
     }
 
-    let output = output_retrying_txtbsy(&mut cmd)
+    // Spawn explicitly (rather than `Command::output`) so the pid is
+    // available to the group-kill guard while the run is in flight.
+    let mut child = spawn_retrying_txtbsy(&mut cmd)
         .await
         .map_err(|e| Error::Io {
             message: format!("failed to spawn claude: {e}"),
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
+    let mut group = GroupKillGuard::new(child.id());
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
+    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
+    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
 
-    if !output.status.success() {
+    let (status, stdout, stderr) = tokio::join!(
+        child.wait(),
+        drain(&mut stdout_handle),
+        drain(&mut stderr_handle),
+    );
+
+    let status = status.map_err(|e| Error::Io {
+        message: "failed to wait for claude process".to_string(),
+        source: e,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    })?;
+    group.disarm();
+
+    let exit_code = status.code().unwrap_or(-1);
+
+    if !status.success() {
         return Err(Error::from_command_failure(
             format!("{} {}", binary.display(), args.join(" ")),
             exit_code,
@@ -443,7 +558,8 @@ async fn run_internal(
     })
 }
 
-/// Run a command with a timeout, killing and reaping the child on expiration.
+/// Run a command with a timeout, killing the child's whole process
+/// group (Unix) and reaping the child on expiration.
 ///
 /// Spawns the child explicitly (rather than wrapping `Command::output()` in a
 /// `tokio::time::timeout`) so that we retain the handle and can SIGKILL the
@@ -470,6 +586,10 @@ async fn run_with_timeout(
     // Dropping the in-flight future must kill the child, not leave the
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
+    // Own process group (Unix) so cancellation can signal the whole
+    // tree, not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -488,6 +608,7 @@ async fn run_with_timeout(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         })?;
+    let mut group = GroupKillGuard::new(child.id());
 
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -504,6 +625,7 @@ async fn run_with_timeout(
 
     match tokio::time::timeout(timeout, wait_and_drain).await {
         Ok((Ok(status), stdout, stderr)) => {
+            group.disarm();
             let exit_code = status.code().unwrap_or(-1);
 
             if !status.success() {
@@ -529,11 +651,11 @@ async fn run_with_timeout(
             working_dir: working_dir.map(|p| p.to_path_buf()),
         }),
         Err(_) => {
-            // Timeout: kill the child (reaps via start_kill + wait).
-            // Note that kill() only targets the direct child; if it has
-            // spawned its own subprocesses that are holding our pipe
-            // fds open, draining would block. Cap the drain with a
-            // short deadline so the timeout error returns promptly.
+            // Timeout: SIGKILL the whole group, then kill+reap the
+            // direct child. The group kill takes down subprocesses
+            // that could otherwise hold our pipe fds open forever;
+            // the capped drain below stays as a backstop.
+            group.kill_now();
             let _ = child.kill().await;
             let drain_budget = Duration::from_millis(200);
             let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout))
@@ -599,31 +721,6 @@ async fn spawn_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<tokio::proc
     let mut backoff = Duration::from_millis(1);
     loop {
         match cmd.spawn() {
-            Err(e)
-                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
-                    && start.elapsed() < TXTBSY_RETRY_BUDGET =>
-            {
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(TXTBSY_MAX_BACKOFF);
-            }
-            other => return other,
-        }
-    }
-}
-
-/// Run `cmd` to completion, retrying on `ETXTBSY` like
-/// [`spawn_retrying_txtbsy`].
-///
-/// The one-shot capture paths call `Command::output` (spawn, wait, and
-/// collect in one step) rather than holding a `Child`, so they need the
-/// same retry wrapped around `output` itself. The `ETXTBSY` still occurs
-/// at the `execve` inside `output`.
-#[cfg(feature = "async")]
-async fn output_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    let start = std::time::Instant::now();
-    let mut backoff = Duration::from_millis(1);
-    loop {
-        match cmd.output().await {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ExecutableFileBusy
                     && start.elapsed() < TXTBSY_RETRY_BUDGET =>
@@ -711,6 +808,13 @@ fn run_internal_stdin_sync(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Own process group (Unix) so a kill can signal the whole tree,
+    // not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -727,6 +831,7 @@ fn run_internal_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
+    let mut group = GroupKillGuard::new(Some(child.id()));
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -750,6 +855,7 @@ fn run_internal_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
+    group.disarm();
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -792,6 +898,13 @@ fn run_with_timeout_stdin_sync(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Own process group (Unix) so a kill can signal the whole tree,
+    // not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -808,6 +921,7 @@ fn run_with_timeout_stdin_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
+    let mut group = GroupKillGuard::new(Some(child.id()));
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
@@ -838,6 +952,7 @@ fn run_with_timeout_stdin_sync(
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })? {
         Some(status) => {
+            group.disarm();
             let stdout = stdout_thread.join().unwrap_or_default();
             let stderr = stderr_thread.join().unwrap_or_default();
             let exit_code = status.code().unwrap_or(-1);
@@ -860,6 +975,9 @@ fn run_with_timeout_stdin_sync(
             })
         }
         None => {
+            // Timeout: SIGKILL the whole group first (subprocesses may
+            // hold our pipe fds), then kill+reap the direct child.
+            group.kill_now();
             let _ = child.kill();
             let _ = child.wait();
             let (stdout_str, stderr_str) =
@@ -937,6 +1055,14 @@ fn run_internal_sync(
     let mut cmd = StdCommand::new(binary);
     cmd.args(args);
     cmd.stdin(Stdio::null());
+    // Own process group (Unix); see the module docs. This path has no
+    // kill site (a blocking call cannot be cancelled mid-flight), so
+    // there is no guard to arm.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -980,8 +1106,9 @@ fn run_internal_sync(
 /// the child, drains stdout/stderr on dedicated threads so neither
 /// pipe buffer can fill up while we wait, then uses
 /// [`wait_timeout::ChildExt::wait_timeout`] to enforce the deadline.
-/// On timeout, the child is SIGKILLed and reaped; partial output is
-/// logged at warn but the returned [`Error::Timeout`] does not carry it.
+/// On timeout, the child's whole process group (Unix) is SIGKILLed and
+/// the child reaped; partial output is logged at warn but the returned
+/// [`Error::Timeout`] does not carry it.
 #[cfg(feature = "sync")]
 fn run_with_timeout_sync(
     binary: &std::path::Path,
@@ -999,6 +1126,13 @@ fn run_with_timeout_sync(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Own process group (Unix) so a kill can signal the whole tree,
+    // not just the direct child (see GroupKillGuard).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
@@ -1015,6 +1149,7 @@ fn run_with_timeout_sync(
         source: e,
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })?;
+    let mut group = GroupKillGuard::new(Some(child.id()));
 
     // Detach stdout/stderr onto their own threads so neither can block
     // the child by filling its pipe buffer. Each thread owns its half
@@ -1032,6 +1167,7 @@ fn run_with_timeout_sync(
         working_dir: working_dir.map(|p| p.to_path_buf()),
     })? {
         Some(status) => {
+            group.disarm();
             let stdout = stdout_thread.join().unwrap_or_default();
             let stderr = stderr_thread.join().unwrap_or_default();
             let exit_code = status.code().unwrap_or(-1);
@@ -1054,10 +1190,12 @@ fn run_with_timeout_sync(
             })
         }
         None => {
-            // Timeout: SIGKILL and reap. If the child has spawned
-            // subprocesses that inherited our pipe fds, the drain
-            // threads can block indefinitely; cap the join with a
-            // short budget so the timeout error returns promptly.
+            // Timeout: SIGKILL the whole group, then kill+reap the
+            // direct child. The group kill takes down subprocesses
+            // that could otherwise hold our pipe fds open and block
+            // the drain threads; the capped join below stays as a
+            // backstop.
+            group.kill_now();
             let _ = child.kill();
             let _ = child.wait();
 
@@ -1108,8 +1246,13 @@ fn spawn_retrying_txtbsy_sync(
     }
 }
 
-/// Blocking mirror of [`output_retrying_txtbsy`]. See that function for
-/// why the one-shot capture paths need the retry around `output`.
+/// Run `cmd` to completion, retrying on `ETXTBSY` like
+/// [`spawn_retrying_txtbsy_sync`].
+///
+/// The blocking no-timeout capture path calls `Command::output` (spawn,
+/// wait, and collect in one step) rather than holding a `Child`, so it
+/// needs the same retry wrapped around `output` itself. The `ETXTBSY`
+/// still occurs at the `execve` inside `output`.
 #[cfg(feature = "sync")]
 fn output_retrying_txtbsy_sync(
     cmd: &mut std::process::Command,
@@ -1378,19 +1521,6 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
-    // Same guarantee for the one-shot capture path: a missing binary must
-    // surface `NotFound` immediately, not spin until the ETXTBSY budget
-    // elapses.
-    #[cfg(feature = "async")]
-    #[tokio::test]
-    async fn async_output_retry_passes_through_non_txtbsy_error() {
-        let mut cmd = Command::new("/nonexistent/definitely-not-a-real-binary");
-        let err = output_retrying_txtbsy(&mut cmd)
-            .await
-            .expect_err("output of missing binary should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
-    }
-
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn async_allow_exit_codes_permits_listed_code() {
@@ -1517,11 +1647,12 @@ mod tests {
         }
     }
 
-    /// Poll until `pid` is dead or a zombie awaiting reap. `kill_on_drop`
-    /// SIGKILLs at drop time, but reaping happens asynchronously on the
-    /// runtime's process driver, so a transient zombie counts as killed.
-    #[cfg(feature = "async")]
-    async fn assert_pid_killed(pid: u32) {
+    /// Poll until `pid` is dead or a zombie awaiting reap. The kill is
+    /// delivered synchronously (killpg / kill_on_drop's start_kill), but
+    /// reaping happens asynchronously, so a transient zombie counts as
+    /// killed. Blocking on purpose: it runs after the kill has been
+    /// issued, so nothing async needs to make progress.
+    fn assert_pid_killed(pid: u32) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let out = std::process::Command::new("ps")
@@ -1534,10 +1665,47 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "child {pid} still alive (stat {stat}) after future drop"
+                "process {pid} still alive (stat {stat}) after kill"
             );
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    /// Fake script that records its own pid, spawns a same-group
+    /// grandchild that records its pid too, then sleeps far longer than
+    /// any test deadline. The main shell waits for the grandchild pid
+    /// to land before writing its own, so tests that poll for the pid
+    /// file can rely on the grandchild pid being readable as well.
+    /// Non-interactive bash does not create new process groups for
+    /// background jobs, so a group kill must take down both.
+    fn group_script(
+        pid_path: &std::path::Path,
+        gpid_path: &std::path::Path,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        // `bash -c` rather than a subshell because `$$` inside a
+        // subshell still names the parent, and `$BASHPID` needs bash 4
+        // (macOS ships 3.2). The path travels as `$0` so it needs no
+        // extra quoting.
+        fake_script(&format!(
+            concat!(
+                "bash -c 'echo $$ > \"$0\"; exec sleep 300' \"{g}\" &\n",
+                "until [[ -s \"{g}\" ]]; do sleep 0.01; done\n",
+                "echo $$ > \"{p}\"\n",
+                "exec sleep 300",
+            ),
+            g = gpid_path.display(),
+            p = pid_path.display(),
+        ))
+    }
+
+    /// Read a pid recorded by `group_script`, if fully written yet.
+    fn try_read_pid(path: &std::path::Path) -> Option<u32> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
+    /// Read a pid recorded by `group_script`.
+    fn read_pid(path: &std::path::Path) -> u32 {
+        try_read_pid(path).expect("pid file readable")
     }
 
     // Dropping an in-flight execute future must kill the spawned child:
@@ -1556,7 +1724,7 @@ mod tests {
         ));
         let claude = client(&path);
         let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
-        assert_pid_killed(pid).await;
+        assert_pid_killed(pid);
     }
 
     // Same guarantee on the timeout path, which holds a Child from
@@ -1578,7 +1746,54 @@ mod tests {
             .build()
             .expect("build");
         let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
-        assert_pid_killed(pid).await;
+        assert_pid_killed(pid);
+    }
+
+    // Dropping the future must kill the child's whole process group,
+    // not just the direct child: the CLI spawns subprocesses for tool
+    // use, and a cancelled run must leave none of them behind.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_dropping_in_flight_future_kills_process_group() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let gpid_path = workdir.path().join("gpid");
+        let (_dir, path) = group_script(&pid_path, &gpid_path);
+        let claude = client(&path);
+        let pid = drop_in_flight_and_capture_pid(run_claude(&claude, vec![]), &pid_path).await;
+        assert_pid_killed(pid);
+        assert_pid_killed(read_pid(&gpid_path));
+    }
+
+    // A fired timeout must also kill the whole group. Before the group
+    // kill, the timeout path SIGKILLed only the direct child and the
+    // grandchild survived. Retries on a heavily loaded host, where the
+    // child can get killed before it records its pids: the kill still
+    // happened, but there is nothing to observe, so run it again.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_timeout_kills_process_group() {
+        let mut observed = false;
+        for _ in 0..5 {
+            let workdir = tempfile::tempdir().expect("workdir");
+            let pid_path = workdir.path().join("pid");
+            let gpid_path = workdir.path().join("gpid");
+            let (_dir, path) = group_script(&pid_path, &gpid_path);
+            let claude = Claude::builder()
+                .binary(&path)
+                .timeout(Duration::from_millis(1000))
+                .build()
+                .expect("build");
+            let err = run_claude(&claude, vec![]).await.unwrap_err();
+            assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+            if let (Some(pid), Some(gpid)) = (try_read_pid(&pid_path), try_read_pid(&gpid_path)) {
+                assert_pid_killed(pid);
+                assert_pid_killed(gpid);
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "child never recorded pids within 5 timeout runs");
     }
 
     // Same guarantee for the stdin-prompt path.
@@ -1597,7 +1812,7 @@ mod tests {
             &pid_path,
         )
         .await;
-        assert_pid_killed(pid).await;
+        assert_pid_killed(pid);
     }
 
     #[cfg(feature = "async")]
@@ -1700,6 +1915,35 @@ mod tests {
             .expect("build");
         let err = run_claude_sync(&claude, vec![]).unwrap_err();
         assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+    }
+
+    // Blocking mirror of async_timeout_kills_process_group: a fired
+    // timeout on the sync path must kill the whole group too. Same
+    // retry rationale as the async variant.
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_timeout_kills_process_group() {
+        let mut observed = false;
+        for _ in 0..5 {
+            let workdir = tempfile::tempdir().expect("workdir");
+            let pid_path = workdir.path().join("pid");
+            let gpid_path = workdir.path().join("gpid");
+            let (_dir, path) = group_script(&pid_path, &gpid_path);
+            let claude = Claude::builder()
+                .binary(&path)
+                .timeout(Duration::from_millis(1000))
+                .build()
+                .expect("build");
+            let err = run_claude_sync(&claude, vec![]).unwrap_err();
+            assert!(matches!(err, Error::Timeout { .. }), "got: {err:?}");
+            if let (Some(pid), Some(gpid)) = (try_read_pid(&pid_path), try_read_pid(&gpid_path)) {
+                assert_pid_killed(pid);
+                assert_pid_killed(gpid);
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "child never recorded pids within 5 timeout runs");
     }
 
     #[cfg(feature = "sync")]
