@@ -24,12 +24,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["async", "json", "tempfile"]
 # Async API (tokio-backed). In default features for back-compat;
 # disable via `default-features = false` to drop the tokio dep.
-async = ["dep:tokio"]
+async = ["dep:tokio", "dep:libc"]
 json = ["serde_json"]
 tempfile = ["dep:tempfile"]
 # Blocking/synchronous API. With `default-features = false,
 # features = ["json", "sync"]` you get a tokio-free build.
-sync = ["dep:wait-timeout"]
+sync = ["dep:wait-timeout", "dep:libc"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +40,11 @@ tracing = "0.1"
 tempfile = { version = "3", optional = true }
 wait-timeout = { version = "0.2", optional = true }
 which = "8"
+
+# killpg for process-group cancellation; the exec paths put every child
+# in its own group and signal the group on cancel/timeout.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 anyhow = "1"

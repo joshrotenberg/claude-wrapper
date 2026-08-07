@@ -775,27 +775,44 @@ async fn assert_pid_killed(pid: u32) {
     }
 }
 
-/// Dropping an in-flight execute future kills the CLI child instead of
-/// leaving it to run to completion in the background. This is the MCP
-/// server shape: execute_json raced against client cancellation with
-/// tokio::select!. FAKE_CLAUDE_DELAY keeps the child alive far longer
-/// than the test; the drop is what kills it.
+/// Read a pid recorded by fake-claude.sh.
+#[cfg(unix)]
+fn read_pid(path: &std::path::Path) -> u32 {
+    std::fs::read_to_string(path)
+        .expect("read pid file")
+        .trim()
+        .parse()
+        .expect("parse pid")
+}
+
+/// Dropping an in-flight execute future kills the CLI child and its
+/// whole process group instead of leaving anything to run on in the
+/// background. This is the MCP server shape: execute_json raced against
+/// client cancellation with tokio::select!. FAKE_CLAUDE_DELAY keeps the
+/// child alive far longer than the test; the drop is what kills it, and
+/// the grandchild (FAKE_CLAUDE_GRANDCHILD_PID_FILE) must die with it.
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_in_flight_execute_kills_child() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_path = dir.path().join("pid");
+    let gpid_path = dir.path().join("gpid");
     let claude = claude_with_env(&[
         ("FAKE_CLAUDE_DELAY", "30"),
         (
             "FAKE_CLAUDE_PID_FILE",
             pid_path.to_str().expect("utf8 path"),
         ),
+        (
+            "FAKE_CLAUDE_GRANDCHILD_PID_FILE",
+            gpid_path.to_str().expect("utf8 path"),
+        ),
     ]);
 
     let cmd = QueryCommand::new("slow query").no_session_persistence();
     let pid = drop_in_flight_and_capture_pid(cmd.execute(&claude), &pid_path).await;
     assert_pid_killed(pid).await;
+    assert_pid_killed(read_pid(&gpid_path)).await;
 }
 
 /// Same guarantee for the streaming path.
@@ -806,11 +823,16 @@ async fn dropping_in_flight_stream_query_kills_child() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_path = dir.path().join("pid");
+    let gpid_path = dir.path().join("gpid");
     let claude = claude_with_env(&[
         ("FAKE_CLAUDE_DELAY", "30"),
         (
             "FAKE_CLAUDE_PID_FILE",
             pid_path.to_str().expect("utf8 path"),
+        ),
+        (
+            "FAKE_CLAUDE_GRANDCHILD_PID_FILE",
+            gpid_path.to_str().expect("utf8 path"),
         ),
     ]);
 
@@ -821,4 +843,5 @@ async fn dropping_in_flight_stream_query_kills_child() {
         drop_in_flight_and_capture_pid(stream_query(&claude, &cmd, |_: StreamEvent| {}), &pid_path)
             .await;
     assert_pid_killed(pid).await;
+    assert_pid_killed(read_pid(&gpid_path)).await;
 }

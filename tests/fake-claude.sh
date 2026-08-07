@@ -17,6 +17,11 @@
 #   FAKE_CLAUDE_PID_FILE    - if set, write this process's pid there before
 #       any delay or output, so tests can observe the process itself
 #       (e.g. that dropping an in-flight future kills it).
+#   FAKE_CLAUDE_GRANDCHILD_PID_FILE - if set, spawn a long-sleeping
+#       same-process-group grandchild that records its pid there, to
+#       test that cancellation kills the whole group. Written before
+#       FAKE_CLAUDE_PID_FILE, so once the pid file exists the
+#       grandchild pid is readable too.
 #
 # Output format is selected by --output-format argument:
 #   stream-json  ->  three NDJSON lines (system/assistant/result)
@@ -36,6 +41,18 @@ ERROR_MSG="${FAKE_CLAUDE_ERROR_MSG:-command failed}"
 DELAY="${FAKE_CLAUDE_DELAY:-0}"
 COST_USD="${FAKE_CLAUDE_COST_USD:-0.0}"
 NUM_TURNS="${FAKE_CLAUDE_NUM_TURNS:-1}"
+
+# Spawn the grandchild (and wait for its pid to land) before the pid
+# file below, so tests that poll for the pid file can rely on the
+# grandchild pid being readable as well. Non-interactive bash does not
+# create new process groups for background jobs, so the grandchild
+# stays in this process's group.
+if [[ -n "${FAKE_CLAUDE_GRANDCHILD_PID_FILE:-}" ]]; then
+    # bash -c rather than a subshell: $$ inside a subshell still names
+    # the parent, and $BASHPID needs bash 4 (macOS ships 3.2).
+    bash -c 'echo $$ > "$0"; exec sleep 300' "$FAKE_CLAUDE_GRANDCHILD_PID_FILE" &
+    until [[ -s "$FAKE_CLAUDE_GRANDCHILD_PID_FILE" ]]; do sleep 0.01; done
+fi
 
 # Record the pid before any delay so tests can watch the process from
 # the moment it starts.
