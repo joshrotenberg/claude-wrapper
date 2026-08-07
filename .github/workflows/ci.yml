@@ -77,6 +77,46 @@ jobs:
       - name: Doc tests
         run: cargo test --doc --all-features
 
+  contract:
+    name: CLI contract (claude ${{ matrix.claude_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of the range declared in src/version.rs as
+        # TESTED_CLI_VERSION_MIN / MAX. A unit test cross-checks that these
+        # match, so bumping a constant without adding it here fails the build.
+        #
+        # The floor is measured, not assumed: this suite bisected it. 2.1.97
+        # lacks --exclude-dynamic-system-prompt-sections (part of the hermetic
+        # seal) and 2.1.98 has it, which was the last flag to land of the set
+        # the builders emit.
+        claude_version: ["2.1.98", "2.1.999"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "contract"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install claude CLI
+        # 2.1.999 is a placeholder upper bound, not a real release; resolve it
+        # to whatever is currently published so the ceiling is exercised
+        # against something that exists.
+        run: |
+          version="${{ matrix.claude_version }}"
+          if [ "$version" = "2.1.999" ]; then
+            npm install -g @anthropic-ai/claude-code@latest
+          else
+            npm install -g "@anthropic-ai/claude-code@$version"
+          fi
+          claude --version
+      - name: Contract suite
+        # No auth and no tokens: every check reads `--help` only.
+        run: cargo test --test contract --all-features -- --ignored
+
   security:
     name: Security audit
     runs-on: ubuntu-latest
