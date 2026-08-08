@@ -57,6 +57,10 @@ tokio = { version = "1", features = ["full"] }
 # so a test needs to observe what a subscriber actually receives.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
+# The parent-death behavioural test signals processes directly.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 # All examples use the async API; require the feature so they're
 # skipped automatically on sync-only builds.
 [[example]]
