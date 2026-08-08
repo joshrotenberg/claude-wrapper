@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-08-08
+
+### Bug Fixes
+
+- *(frontmatter)* Support YAML block scalars in agent, skill, and command frontmatter 
+- *(exec)* Kill the CLI child when an in-flight execute future is dropped 
+- Quote an empty argument in shell_quote 
+
+### Features
+
+- *(artifacts)* [**breaking**] Parse YAML block sequences, add typed Agent::skills 
+- Declare the tested CLI version range in the crate 
+- *(exec)* Kill the whole process group so a cancelled run leaves no subprocesses behind 
+- Add ensure_tested_cli_version as an opt-in hard version gate 
+- Tracing spans around execution, streaming, retry, and duplex sessions 
+- *(session)* TokenUsage type and per-turn token accounting 
+- Builder opt-out of the process-group split for terminal-attached hosts 
+- Opt-in SIGTERM-then-SIGKILL grace so a killed run can flush its transcript 
+- Report every spawned child's pid via an on_spawn observer 
+- Opt-in parent-death signal so a SIGKILLed supervisor leaves no orphan 
+
+### Miscellaneous
+
+- Remove the cr CLI from this repo 
+- Run the contract suite against the latest published CLI weekly 
+- Add a git-cliff config and a changelog preview workflow 
+
+### Testing
+
+- Add a CLI contract suite checking emitted flags against the binary 
+
+
+
 ## [0.13.5](https://github.com/joshrotenberg/claude-wrapper/compare/v0.13.4...v0.13.5) - 2026-07-30
 
 ### Added
