@@ -54,6 +54,26 @@ pub(crate) fn full_command_args(claude: &Claude, args: Vec<String>) -> Vec<Strin
     command_args
 }
 
+/// Apply the client's environment policy to one CLI child command.
+///
+/// Kept as the single environment assembly point for buffered, streaming,
+/// sync, timeout, retry, stdin, and duplex spawns. Explicit entries are
+/// applied after clearing and after the nested-session scrub, so callers can
+/// deliberately restore an entry when required.
+#[cfg(any(feature = "async", feature = "sync"))]
+pub(crate) fn apply_child_environment(
+    cmd: &mut std::process::Command,
+    clear_env: bool,
+    env: &std::collections::HashMap<String, String>,
+) {
+    if clear_env {
+        cmd.env_clear();
+    }
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    cmd.envs(env);
+}
+
 /// The subcommand label for a span, derived from the argv.
 ///
 /// The first token is the subcommand for subcommand-style invocations
@@ -474,6 +494,7 @@ async fn run_claude_with_stdin_prompt_internal(
 
     let binary = &claude.binary;
     let env = &claude.env;
+    let clear_env = claude.clear_env;
     let working_dir = claude.working_dir.as_deref();
 
     let result = if let Some(timeout) = claude.timeout {
@@ -481,6 +502,7 @@ async fn run_claude_with_stdin_prompt_internal(
             binary,
             &command_args,
             env,
+            clear_env,
             working_dir,
             timeout,
             stdin_content,
@@ -492,6 +514,7 @@ async fn run_claude_with_stdin_prompt_internal(
             binary,
             &command_args,
             env,
+            clear_env,
             working_dir,
             stdin_content,
             SpawnPolicy::of(claude),
@@ -510,6 +533,7 @@ async fn run_internal_stdin(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     stdin_content: String,
     policy: SpawnPolicy<'_>,
@@ -535,15 +559,10 @@ async fn run_internal_stdin(
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(cmd.as_std_mut(), clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy(&mut cmd)
@@ -610,6 +629,7 @@ async fn run_with_timeout_stdin(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     timeout: Duration,
     stdin_content: String,
@@ -636,15 +656,10 @@ async fn run_with_timeout_stdin(
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(cmd.as_std_mut(), clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy(&mut cmd)
@@ -749,6 +764,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             timeout,
             SpawnPolicy::of(claude),
@@ -759,6 +775,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             SpawnPolicy::of(claude),
         )
@@ -801,6 +818,7 @@ async fn run_internal(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
@@ -827,16 +845,10 @@ async fn run_internal(
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
 
-    // Remove Claude Code env vars to prevent nested session detection
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(cmd.as_std_mut(), clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     // Spawn explicitly (rather than `Command::output`) so the pid is
@@ -903,6 +915,7 @@ async fn run_with_timeout(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     timeout: Duration,
     policy: SpawnPolicy<'_>,
@@ -926,15 +939,10 @@ async fn run_with_timeout(
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(cmd.as_std_mut(), clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy(&mut cmd)
@@ -1117,6 +1125,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             timeout,
             stdin_content,
@@ -1127,6 +1136,7 @@ pub fn run_claude_with_stdin_prompt_sync(
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             stdin_content,
             SpawnPolicy::of(claude),
@@ -1144,6 +1154,7 @@ fn run_internal_stdin_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     stdin_content: String,
     policy: SpawnPolicy<'_>,
@@ -1167,15 +1178,10 @@ fn run_internal_stdin_sync(
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
     apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(&mut cmd, clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
@@ -1237,6 +1243,7 @@ fn run_with_timeout_stdin_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     timeout: Duration,
     stdin_content: String,
@@ -1263,15 +1270,10 @@ fn run_with_timeout_stdin_sync(
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
     apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(&mut cmd, clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
@@ -1369,6 +1371,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             timeout,
             SpawnPolicy::of(claude),
@@ -1378,6 +1381,7 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
             &claude.binary,
             &command_args,
             &claude.env,
+            claude.clear_env,
             claude.working_dir.as_deref(),
             SpawnPolicy::of(claude),
         )
@@ -1417,6 +1421,7 @@ fn run_internal_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
@@ -1437,15 +1442,10 @@ fn run_internal_sync(
     // supervisor still wants its pid, so the spawn is observed below.
     apply_process_group_sync(&mut cmd, process_group);
     apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(&mut cmd, clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let output =
@@ -1491,6 +1491,7 @@ fn run_with_timeout_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
     working_dir: Option<&std::path::Path>,
     timeout: Duration,
     policy: SpawnPolicy<'_>,
@@ -1515,15 +1516,10 @@ fn run_with_timeout_sync(
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
     apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    apply_child_environment(&mut cmd, clear_env, env);
 
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
-    }
-
-    for (key, value) in env {
-        cmd.env(key, value);
     }
 
     let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {

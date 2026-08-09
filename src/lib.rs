@@ -450,6 +450,8 @@ pub struct Claude {
     // `sync` feature.
     #[allow(dead_code)]
     pub(crate) env: HashMap<String, String>,
+    #[allow(dead_code)]
+    pub(crate) clear_env: bool,
     pub(crate) global_args: Vec<String>,
     #[allow(dead_code)]
     pub(crate) timeout: Option<Duration>,
@@ -472,6 +474,7 @@ impl std::fmt::Debug for Claude {
         f.debug_struct("Claude")
             .field("binary", &self.binary)
             .field("working_dir", &self.working_dir)
+            .field("clear_env", &self.clear_env)
             .field("global_args", &self.global_args)
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
@@ -755,6 +758,7 @@ pub struct ClaudeBuilder {
     binary: Option<PathBuf>,
     working_dir: Option<PathBuf>,
     env: HashMap<String, String>,
+    clear_env: bool,
     global_args: Vec<String>,
     timeout: Option<Duration>,
     retry_policy: Option<RetryPolicy>,
@@ -772,6 +776,7 @@ impl std::fmt::Debug for ClaudeBuilder {
         f.debug_struct("ClaudeBuilder")
             .field("binary", &self.binary)
             .field("working_dir", &self.working_dir)
+            .field("clear_env", &self.clear_env)
             .field("global_args", &self.global_args)
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
@@ -816,6 +821,43 @@ impl ClaudeBuilder {
         for (k, v) in vars {
             self.env.insert(k.into(), v.into());
         }
+        self
+    }
+
+    /// Clear the inherited environment of every spawned Claude CLI child.
+    ///
+    /// By default, children inherit the parent process environment and
+    /// [`env`](Self::env) / [`envs`](Self::envs) add or replace entries. With
+    /// this option enabled, the inherited environment is cleared first and
+    /// only explicitly configured entries are applied. The order in which
+    /// `clear_env`, `env`, and `envs` are called does not affect the result.
+    ///
+    /// Callers normally need to rebuild a minimal environment including
+    /// `PATH`, locale settings, the Claude config directory, and the intended
+    /// authentication selector.
+    ///
+    /// This controls only the direct child process environment. It is not an
+    /// operating-system sandbox and does not prevent a same-UID child from
+    /// reading accessible files or inspecting other processes where the OS
+    /// permits it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_wrapper::Claude;
+    ///
+    /// # fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder()
+    ///     .clear_env()
+    ///     .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+    ///     .env("CLAUDE_CONFIG_DIR", "/srv/claude/config")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
         self
     }
 
@@ -1065,6 +1107,7 @@ impl ClaudeBuilder {
             binary,
             working_dir: self.working_dir,
             env: self.env,
+            clear_env: self.clear_env,
             global_args: self.global_args,
             timeout: self.timeout,
             retry_policy: self.retry_policy,
@@ -1095,6 +1138,26 @@ mod tests {
             .build()
             .unwrap();
         assert!(!off.process_group);
+    }
+
+    #[test]
+    fn builder_clear_env_defaults_off_and_is_call_order_independent() {
+        let inherited = Claude::builder()
+            .binary("/nonexistent/claude")
+            .build()
+            .unwrap();
+        assert!(!inherited.clear_env);
+
+        let cleared = Claude::builder()
+            .binary("/nonexistent/claude")
+            .env("FIRST", "1")
+            .clear_env()
+            .env("SECOND", "2")
+            .build()
+            .unwrap();
+        assert!(cleared.clear_env);
+        assert_eq!(cleared.env.get("FIRST").map(String::as_str), Some("1"));
+        assert_eq!(cleared.env.get("SECOND").map(String::as_str), Some("2"));
     }
 
     #[test]

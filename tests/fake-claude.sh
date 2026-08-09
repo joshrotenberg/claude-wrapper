@@ -19,6 +19,10 @@
 #   FAKE_CLAUDE_PID_FILE    - if set, write this process's pid there before
 #       any delay or output, so tests can observe the process itself
 #       (e.g. that dropping an in-flight future kills it).
+#   FAKE_CLAUDE_ENV_CAPTURE_FILE - if set, write the complete exported child
+#       environment there before any delay or output.
+#   FAKE_CLAUDE_FAIL_ONCE_FILE - if set, create this marker and exit 75 on
+#       the first invocation, then succeed on later invocations.
 #   FAKE_CLAUDE_GRANDCHILD_PID_FILE - if set, spawn a long-sleeping
 #       same-process-group grandchild that records its pid there, to
 #       test that cancellation kills the whole group. Written before
@@ -63,6 +67,18 @@ fi
 # the moment it starts.
 if [[ -n "${FAKE_CLAUDE_PID_FILE:-}" ]]; then
     echo $$ > "$FAKE_CLAUDE_PID_FILE"
+fi
+
+# Capture the actual child environment before the test-only controls below
+# can exit. This lets tests verify both successful and retried spawn attempts.
+if [[ -n "${FAKE_CLAUDE_ENV_CAPTURE_FILE:-}" ]]; then
+    env > "$FAKE_CLAUDE_ENV_CAPTURE_FILE"
+fi
+
+if [[ -n "${FAKE_CLAUDE_FAIL_ONCE_FILE:-}" && ! -e "$FAKE_CLAUDE_FAIL_ONCE_FILE" ]]; then
+    : > "$FAKE_CLAUDE_FAIL_ONCE_FILE"
+    echo "transient fake failure" >&2
+    exit 75
 fi
 
 # Optional delay before any output - used to test timeouts.

@@ -4,7 +4,7 @@
 
 #![cfg(feature = "async")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use claude_wrapper::{Claude, ClaudeCommand, OutputFormat, QueryCommand, RetryPolicy};
 
@@ -23,6 +23,63 @@ fn claude_with_env(pairs: &[(&str, &str)]) -> Claude {
     builder.build().expect("failed to build Claude client")
 }
 
+fn env_capture_builder(capture_path: &Path) -> claude_wrapper::ClaudeBuilder {
+    Claude::builder()
+        .binary(fake_binary())
+        .clear_env()
+        .env(
+            "FAKE_CLAUDE_ENV_CAPTURE_FILE",
+            capture_path.to_string_lossy(),
+        )
+        .env("FAKE_CLAUDE_OUTPUT", "environment captured")
+        .env("WRAPPER_EXPLICIT", "present")
+}
+
+fn env_capture_client(capture_path: &Path) -> Claude {
+    env_capture_builder(capture_path)
+        .build()
+        .expect("failed to build cleared Claude client")
+}
+
+fn captured_env(path: &Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| {
+            line.split_once('=')
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn assert_cleared_environment(path: &Path) {
+    let env = captured_env(path);
+    let mut keys: Vec<_> = env.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        env.get("WRAPPER_EXPLICIT").map(String::as_str),
+        Some("present")
+    );
+    assert!(
+        !env.contains_key("HOME"),
+        "cleared child unexpectedly inherited HOME; exported keys: {keys:?}"
+    );
+}
+
+async fn wait_for_capture(path: &Path) {
+    for _ in 0..100 {
+        if std::fs::read_to_string(path).is_ok_and(|contents| {
+            contents
+                .lines()
+                .any(|line| line == "WRAPPER_EXPLICIT=present")
+        }) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
 /// Verify that the fake binary executes and returns expected plain-text output.
 #[tokio::test]
 async fn fake_claude_basic_execution() {
@@ -35,6 +92,198 @@ async fn fake_claude_basic_execution() {
 
     assert!(output.success);
     assert!(output.stdout.contains("hello from fake"));
+}
+
+#[tokio::test]
+async fn child_environment_inherits_by_default_and_clears_on_request() {
+    let parent_home = std::env::var("HOME").expect("test process should have HOME");
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let inherited_path = dir.path().join("inherited.env");
+    let inherited = Claude::builder()
+        .binary(fake_binary())
+        .env(
+            "FAKE_CLAUDE_ENV_CAPTURE_FILE",
+            inherited_path.to_string_lossy(),
+        )
+        .env("WRAPPER_EXPLICIT", "present")
+        .build()
+        .expect("inheriting client");
+    claude_wrapper::VersionCommand::new()
+        .execute(&inherited)
+        .await
+        .expect("inheriting spawn");
+    let inherited_env = captured_env(&inherited_path);
+    assert_eq!(
+        inherited_env.get("HOME").map(String::as_str),
+        Some(parent_home.as_str())
+    );
+    assert_eq!(
+        inherited_env.get("WRAPPER_EXPLICIT").map(String::as_str),
+        Some("present")
+    );
+
+    let cleared_path = dir.path().join("cleared.env");
+    claude_wrapper::VersionCommand::new()
+        .execute(&env_capture_client(&cleared_path))
+        .await
+        .expect("cleared spawn");
+    assert_cleared_environment(&cleared_path);
+}
+
+#[tokio::test]
+async fn clear_env_applies_to_all_async_exec_paths() {
+    use claude_wrapper::exec::run_claude_with_stdin_prompt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let buffered_path = dir.path().join("buffered.env");
+    claude_wrapper::VersionCommand::new()
+        .execute(&env_capture_client(&buffered_path))
+        .await
+        .expect("buffered execution");
+    assert_cleared_environment(&buffered_path);
+
+    let buffered_timeout_path = dir.path().join("buffered-timeout.env");
+    let buffered_timeout = env_capture_builder(&buffered_timeout_path)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("timeout client");
+    claude_wrapper::VersionCommand::new()
+        .execute(&buffered_timeout)
+        .await
+        .expect("buffered timeout-path execution");
+    assert_cleared_environment(&buffered_timeout_path);
+
+    let stdin_path = dir.path().join("stdin.env");
+    run_claude_with_stdin_prompt(
+        &env_capture_client(&stdin_path),
+        vec!["--version".to_string()],
+        "prompt on stdin".to_string(),
+    )
+    .await
+    .expect("stdin execution");
+    assert_cleared_environment(&stdin_path);
+
+    let stdin_timeout_path = dir.path().join("stdin-timeout.env");
+    let stdin_timeout = env_capture_builder(&stdin_timeout_path)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("stdin timeout client");
+    run_claude_with_stdin_prompt(
+        &stdin_timeout,
+        vec!["--version".to_string()],
+        "prompt on stdin".to_string(),
+    )
+    .await
+    .expect("stdin timeout-path execution");
+    assert_cleared_environment(&stdin_timeout_path);
+
+    let retry_path = dir.path().join("retry.env");
+    let retry_marker = dir.path().join("retried");
+    let retry = env_capture_builder(&retry_path)
+        .env("FAKE_CLAUDE_FAIL_ONCE_FILE", retry_marker.to_string_lossy())
+        .retry(
+            RetryPolicy::new()
+                .max_attempts(2)
+                .initial_backoff(std::time::Duration::from_millis(1))
+                .retry_on_exit_codes([75]),
+        )
+        .build()
+        .expect("retry client");
+    claude_wrapper::VersionCommand::new()
+        .execute(&retry)
+        .await
+        .expect("second retry attempt should succeed");
+    assert!(retry_marker.is_file(), "first attempt should create marker");
+    assert_cleared_environment(&retry_path);
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn clear_env_applies_to_streaming_and_session_open_resume() {
+    use claude_wrapper::session::Session;
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let stream_path = dir.path().join("stream.env");
+    let stream_client = env_capture_client(&stream_path);
+    let stream_command = QueryCommand::new("stream")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+    stream_query(&stream_client, &stream_command, |_: StreamEvent| {})
+        .await
+        .expect("streaming execution");
+    assert_cleared_environment(&stream_path);
+
+    let fresh_path = dir.path().join("session-fresh.env");
+    let mut fresh = Session::new(Arc::new(env_capture_client(&fresh_path)));
+    fresh.send("fresh").await.expect("fresh session turn");
+    assert_cleared_environment(&fresh_path);
+
+    let resumed_path = dir.path().join("session-resumed.env");
+    let mut resumed = Session::resume(
+        Arc::new(env_capture_client(&resumed_path)),
+        "existing-session-id",
+    );
+    resumed.send("resume").await.expect("resumed session turn");
+    assert_cleared_environment(&resumed_path);
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn clear_env_applies_to_duplex_open_and_resume() {
+    use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let fresh_path = dir.path().join("duplex-fresh.env");
+    let fresh_client = env_capture_client(&fresh_path);
+    let fresh = DuplexSession::spawn(&fresh_client, DuplexOptions::default())
+        .await
+        .expect("fresh duplex spawn");
+    wait_for_capture(&fresh_path).await;
+    assert_cleared_environment(&fresh_path);
+    fresh.close().await.expect("close fresh duplex session");
+
+    let resumed_path = dir.path().join("duplex-resumed.env");
+    let resumed_client = env_capture_client(&resumed_path);
+    let resumed = DuplexSession::spawn(
+        &resumed_client,
+        DuplexOptions::default().resume("existing-session-id"),
+    )
+    .await
+    .expect("resumed duplex spawn");
+    wait_for_capture(&resumed_path).await;
+    assert_cleared_environment(&resumed_path);
+    resumed.close().await.expect("close resumed duplex session");
+}
+
+#[tokio::test]
+async fn environment_values_are_absent_from_debug_and_errors() {
+    let secret = "issue-782-environment-secret";
+    let builder = Claude::builder()
+        .binary(fake_binary())
+        .clear_env()
+        .env("WRAPPER_SECRET", secret);
+    assert!(!format!("{builder:?}").contains(secret));
+
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .clear_env()
+        .env("WRAPPER_SECRET", secret)
+        .env("FAKE_CLAUDE_EXIT_CODE", "1")
+        .env("FAKE_CLAUDE_ERROR_MSG", "generic failure")
+        .build()
+        .expect("client");
+    assert!(!format!("{claude:?}").contains(secret));
+    let error = claude_wrapper::VersionCommand::new()
+        .execute(&claude)
+        .await
+        .expect_err("fake failure");
+    assert!(!error.to_string().contains(secret));
 }
 
 /// Verify that stream-json NDJSON output is parsed correctly by execute_json.
