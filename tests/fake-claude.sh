@@ -6,6 +6,8 @@
 #   FAKE_CLAUDE_EXIT_CODE   - exit code to return (default: 0)
 #   FAKE_CLAUDE_SESSION_ID  - session_id in JSON output (default: "fake-session-id")
 #   FAKE_CLAUDE_ERROR_MSG   - error message for stderr on non-zero exit
+#   FAKE_CLAUDE_STDOUT_AUTH_ERROR - if set, emit two valid stream events,
+#       then a stdout-only authentication error and exit non-zero
 #   FAKE_CLAUDE_DELAY       - seconds to sleep before any output (default: 0)
 #   FAKE_CLAUDE_COST_USD    - cost in JSON output (default: 0.0)
 #   FAKE_CLAUDE_NUM_TURNS   - num_turns in JSON output (default: 1)
@@ -66,6 +68,15 @@ fi
 # Optional delay before any output - used to test timeouts.
 if [[ "$DELAY" -gt 0 ]]; then
     sleep "$DELAY"
+fi
+
+# Deterministic mixed stream failure: valid events remain stream
+# callbacks, while the final non-JSON stdout line is an auth diagnostic.
+if [[ -n "${FAKE_CLAUDE_STDOUT_AUTH_ERROR:-}" ]]; then
+    printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
+    printf '{"type":"assistant","message":{"role":"assistant","content":[]},"session_id":"%s"}\n' "$SESSION_ID"
+    printf 'Not authenticated. Run `claude login`.\n'
+    exit 1
 fi
 
 if [[ "$EXIT_CODE" -ne 0 ]]; then

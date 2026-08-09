@@ -264,6 +264,38 @@ fn sync_stream_result_event_carries_metadata() {
 
 #[cfg(feature = "json")]
 #[test]
+fn sync_stream_stdout_auth_error_preserves_only_diagnostics() {
+    use claude_wrapper::auth::AuthErrorKind;
+    use claude_wrapper::streaming::{StreamEvent, stream_query_sync};
+    use claude_wrapper::{Error, OutputFormat, QueryCommand};
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_STDOUT_AUTH_ERROR", "1")]);
+    let cmd = QueryCommand::new("test prompt")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let error = stream_query_sync(&claude, &cmd, |event| events.push(event))
+        .expect_err("stdout-only auth failure should return an error");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(StreamEvent::event_type)
+            .collect::<Vec<_>>(),
+        ["system", "assistant"]
+    );
+    match error {
+        Error::Auth { kind, message, .. } => {
+            assert_eq!(kind, AuthErrorKind::NotAuthenticated);
+            assert_eq!(message, "Not authenticated. Run `claude login`.");
+        }
+        other => panic!("expected Auth, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "json")]
+#[test]
 fn sync_stream_timeout_fires_and_returns_promptly() {
     use claude_wrapper::streaming::stream_query_sync;
     use claude_wrapper::{OutputFormat, QueryCommand};
