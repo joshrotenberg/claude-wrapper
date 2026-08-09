@@ -54,13 +54,15 @@ fn assert_cleared_environment(path: &Path) {
                 .map(|(key, value)| (key.to_string(), value.to_string()))
         })
         .collect();
+    let mut keys: Vec<_> = env.keys().cloned().collect();
+    keys.sort();
     assert_eq!(
         env.get("WRAPPER_EXPLICIT").map(String::as_str),
         Some("present")
     );
     assert!(
         !env.contains_key("HOME"),
-        "cleared child unexpectedly inherited HOME: {env:?}"
+        "cleared child unexpectedly inherited HOME; exported keys: {keys:?}"
     );
 }
 

@@ -54,13 +54,15 @@ fn captured_env(path: &Path) -> std::collections::HashMap<String, String> {
 
 fn assert_cleared_environment(path: &Path) {
     let env = captured_env(path);
+    let mut keys: Vec<_> = env.keys().cloned().collect();
+    keys.sort();
     assert_eq!(
         env.get("WRAPPER_EXPLICIT").map(String::as_str),
         Some("present")
     );
     assert!(
         !env.contains_key("HOME"),
-        "cleared child unexpectedly inherited HOME: {env:?}"
+        "cleared child unexpectedly inherited HOME; exported keys: {keys:?}"
     );
 }
 
