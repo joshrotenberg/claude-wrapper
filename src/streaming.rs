@@ -6,6 +6,8 @@
 //! whole run. Requires the `json` feature.
 
 #[cfg(feature = "json")]
+use std::collections::VecDeque;
+#[cfg(feature = "json")]
 use std::time::Duration;
 
 #[cfg(all(feature = "json", feature = "async"))]
@@ -21,6 +23,57 @@ use crate::Claude;
 use crate::error::{Error, Result};
 #[cfg(feature = "json")]
 use crate::exec::CommandOutput;
+
+#[cfg(feature = "json")]
+const STREAM_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
+
+/// Bounded stdout retained only for lines that are not stream events.
+#[cfg(feature = "json")]
+#[derive(Default)]
+struct ParseFailureDiagnostics {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+
+#[cfg(feature = "json")]
+impl ParseFailureDiagnostics {
+    fn push(&mut self, line: &str) {
+        // Reserve one byte per line for the separator added by
+        // `into_string`. A single oversized line keeps its prefix,
+        // where CLI diagnostics normally put the error category.
+        let max_line_bytes = STREAM_DIAGNOSTIC_MAX_BYTES - 1;
+        let line = if line.len() > max_line_bytes {
+            let mut end = max_line_bytes;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            &line[..end]
+        } else {
+            line
+        };
+        let line_bytes = line.len() + 1;
+
+        while self.bytes + line_bytes > STREAM_DIAGNOSTIC_MAX_BYTES {
+            let Some(removed) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes -= removed.len() + 1;
+        }
+
+        self.lines.push_back(line.to_string());
+        self.bytes += line_bytes;
+    }
+
+    fn into_string(self) -> String {
+        let mut output = String::with_capacity(self.bytes);
+        for line in self.lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output.pop();
+        output
+    }
+}
 
 /// A single line from `--output-format stream-json` output.
 ///
@@ -451,11 +504,14 @@ where
 
     // If reading lines failed partway through (IO error, not timeout),
     // clean up the child (and its group) before returning.
-    if let Err(e) = line_result {
-        group.kill_now();
-        let _ = child.kill().await;
-        return Err(e);
-    }
+    let stdout_diagnostics = match line_result {
+        Ok(diagnostics) => diagnostics.into_string(),
+        Err(e) => {
+            group.kill_now();
+            let _ = child.kill().await;
+            return Err(e);
+        }
+    };
 
     let status = child.wait().await.map_err(|e| Error::Io {
         message: "failed to wait for claude process".to_string(),
@@ -472,13 +528,13 @@ where
 
     if !status.success() {
         span.record("outcome", "failed");
-        return Err(Error::CommandFailed {
-            command: format!("{} {}", claude.binary.display(), command_args.join(" ")),
+        return Err(Error::from_command_failure(
+            format!("{} {}", claude.binary.display(), command_args.join(" ")),
             exit_code,
-            stdout: String::new(),
-            stderr: stderr_str,
-            working_dir: claude.working_dir.clone(),
-        });
+            stdout_diagnostics,
+            stderr_str,
+            claude.working_dir.clone(),
+        ));
     }
 
     span.record("outcome", "completed");
@@ -502,10 +558,11 @@ async fn read_lines<F>(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     handler: &mut F,
     working_dir: Option<std::path::PathBuf>,
-) -> Result<()>
+) -> Result<ParseFailureDiagnostics>
 where
     F: FnMut(StreamEvent),
 {
+    let mut diagnostics = ParseFailureDiagnostics::default();
     while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
         message: "failed to read stdout line".to_string(),
         source: e,
@@ -518,11 +575,12 @@ where
             Ok(event) => handler(event),
             Err(e) => {
                 debug!(line = %line, error = %e, "failed to parse stream event, skipping");
+                diagnostics.push(&line);
             }
         }
     }
 
-    Ok(())
+    Ok(diagnostics)
 }
 
 // ---------- sync streaming ----------
@@ -628,8 +686,9 @@ where
     // need Send. Bubbles IO errors out via the thread's return value.
     let (tx, rx) = mpsc::channel::<StreamEvent>();
     let reader_wd = claude.working_dir.clone();
-    let reader_thread = thread::spawn(move || -> Result<()> {
+    let reader_thread = thread::spawn(move || -> Result<ParseFailureDiagnostics> {
         let reader = std::io::BufReader::new(stdout);
+        let mut diagnostics = ParseFailureDiagnostics::default();
         for line_res in reader.lines() {
             let line = line_res.map_err(|e| Error::Io {
                 message: "failed to read stdout line".to_string(),
@@ -643,15 +702,16 @@ where
                 Ok(event) => {
                     if tx.send(event).is_err() {
                         // Receiver gone — main thread has bailed out.
-                        return Ok(());
+                        return Ok(diagnostics);
                     }
                 }
                 Err(e) => {
                     debug!(line = %line, error = %e, "failed to parse stream event, skipping");
+                    diagnostics.push(&line);
                 }
             }
         }
-        Ok(())
+        Ok(diagnostics)
     });
 
     let stderr_thread = thread::spawn(move || -> String {
@@ -714,14 +774,19 @@ where
     }
 
     // Normal completion: collect reader result (may carry IO error).
-    let reader_result = reader_thread.join().unwrap_or(Ok(()));
-    if let Err(e) = reader_result {
-        group.kill_now();
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stderr_thread.join();
-        return Err(e);
-    }
+    let reader_result = reader_thread
+        .join()
+        .unwrap_or_else(|_| Ok(ParseFailureDiagnostics::default()));
+    let stdout_diagnostics = match reader_result {
+        Ok(diagnostics) => diagnostics.into_string(),
+        Err(e) => {
+            group.kill_now();
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_thread.join();
+            return Err(e);
+        }
+    };
 
     let status = child.wait().map_err(|e| Error::Io {
         message: "failed to wait for claude process".to_string(),
@@ -733,13 +798,13 @@ where
     let exit_code = status.code().unwrap_or(-1);
 
     if !status.success() {
-        return Err(Error::CommandFailed {
-            command: format!("{} {}", claude.binary.display(), command_args.join(" ")),
+        return Err(Error::from_command_failure(
+            format!("{} {}", claude.binary.display(), command_args.join(" ")),
             exit_code,
-            stdout: String::new(),
-            stderr: stderr_str,
-            working_dir: claude.working_dir.clone(),
-        });
+            stdout_diagnostics,
+            stderr_str,
+            claude.working_dir.clone(),
+        ));
     }
 
     Ok(CommandOutput {
@@ -788,6 +853,17 @@ mod tests {
             "parent_tool_use_id": null,
             "uuid": "11111111-1111-1111-1111-111111111111"
         }))
+    }
+
+    #[test]
+    fn parse_failure_diagnostics_are_bounded_and_keep_recent_lines() {
+        let mut diagnostics = ParseFailureDiagnostics::default();
+        diagnostics.push(&"x".repeat(STREAM_DIAGNOSTIC_MAX_BYTES));
+        diagnostics.push("Not authenticated. Run `claude login`.");
+
+        let output = diagnostics.into_string();
+        assert!(output.len() <= STREAM_DIAGNOSTIC_MAX_BYTES);
+        assert_eq!(output, "Not authenticated. Run `claude login`.");
     }
 
     #[test]

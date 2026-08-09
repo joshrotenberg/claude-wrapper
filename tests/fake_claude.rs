@@ -116,6 +116,40 @@ async fn streaming_extracts_cost_and_session() {
     assert_eq!(result.cost_usd(), Some(0.0));
 }
 
+/// A stdout-only auth diagnostic on a failed stream is classified,
+/// while valid JSON lines remain ordered callback events only.
+#[tokio::test]
+async fn streaming_stdout_auth_error_preserves_only_diagnostics() {
+    use claude_wrapper::Error;
+    use claude_wrapper::auth::AuthErrorKind;
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = claude_with_env(&[("FAKE_CLAUDE_STDOUT_AUTH_ERROR", "1")]);
+    let cmd = QueryCommand::new("test prompt")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let error = stream_query(&claude, &cmd, |event| events.push(event))
+        .await
+        .expect_err("stdout-only auth failure should return an error");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(StreamEvent::event_type)
+            .collect::<Vec<_>>(),
+        ["system", "assistant"]
+    );
+    match error {
+        Error::Auth { kind, message, .. } => {
+            assert_eq!(kind, AuthErrorKind::NotAuthenticated);
+            assert_eq!(message, "Not authenticated. Run `claude login`.");
+        }
+        other => panic!("expected Auth, got {other:?}"),
+    }
+}
+
 /// Verify that a short timeout fires before the fake binary finishes sleeping.
 #[tokio::test]
 async fn fake_claude_timeout_fires() {
