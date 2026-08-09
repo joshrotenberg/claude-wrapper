@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.1] - 2026-08-09
+
+### Bug Fixes
+
+- *(streaming)* Preserve stdout failure diagnostics 
+
+### Features
+
+- *(process)* Support cleared child environments 
+
+
+
 ## [0.14.0] - 2026-08-08
 
 ### Bug Fixes

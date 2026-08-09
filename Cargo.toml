@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "claude-wrapper"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
