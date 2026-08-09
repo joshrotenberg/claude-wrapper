@@ -1157,13 +1157,11 @@ impl DuplexSession {
 
         let mut cmd = Command::new(&claude.binary);
         cmd.args(&command_args)
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CODE_ENTRYPOINT")
-            .envs(&claude.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        crate::exec::apply_child_environment(cmd.as_std_mut(), claude.clear_env, &claude.env);
         // Own process group (Unix) so shutdown can signal the whole
         // tree, not just the direct child (see exec::GroupKillGuard).
         // Opt out via ClaudeBuilder::process_group.

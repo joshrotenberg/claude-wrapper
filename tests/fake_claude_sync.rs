@@ -7,7 +7,7 @@
 
 #![cfg(feature = "sync")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use claude_wrapper::Claude;
@@ -27,6 +27,43 @@ fn claude_with_env(pairs: &[(&str, &str)]) -> Claude {
     builder.build().expect("failed to build Claude client")
 }
 
+fn env_capture_builder(capture_path: &Path) -> claude_wrapper::ClaudeBuilder {
+    Claude::builder()
+        .binary(fake_binary())
+        .clear_env()
+        .env(
+            "FAKE_CLAUDE_ENV_CAPTURE_FILE",
+            capture_path.to_string_lossy(),
+        )
+        .env("FAKE_CLAUDE_OUTPUT", "environment captured")
+        .env("WRAPPER_EXPLICIT", "present")
+}
+
+fn env_capture_client(capture_path: &Path) -> Claude {
+    env_capture_builder(capture_path)
+        .build()
+        .expect("failed to build cleared Claude client")
+}
+
+fn assert_cleared_environment(path: &Path) {
+    let env: std::collections::HashMap<String, String> = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| {
+            line.split_once('=')
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+        })
+        .collect();
+    assert_eq!(
+        env.get("WRAPPER_EXPLICIT").map(String::as_str),
+        Some("present")
+    );
+    assert!(
+        !env.contains_key("HOME"),
+        "cleared child unexpectedly inherited HOME: {env:?}"
+    );
+}
+
 #[test]
 fn sync_basic_execution_returns_stdout() {
     let claude = claude_with_env(&[("FAKE_CLAUDE_OUTPUT", "hello sync")]);
@@ -39,6 +76,85 @@ fn sync_basic_execution_returns_stdout() {
         output.stdout
     );
     assert_eq!(output.exit_code, 0);
+}
+
+#[test]
+fn clear_env_applies_to_all_sync_exec_paths() {
+    use claude_wrapper::exec::run_claude_with_stdin_prompt_sync;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let buffered_path = dir.path().join("buffered.env");
+    run_claude_sync(
+        &env_capture_client(&buffered_path),
+        vec!["--version".to_string()],
+    )
+    .expect("buffered sync execution");
+    assert_cleared_environment(&buffered_path);
+
+    let buffered_timeout_path = dir.path().join("buffered-timeout.env");
+    let buffered_timeout = env_capture_builder(&buffered_timeout_path)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("timeout client");
+    run_claude_sync(&buffered_timeout, vec!["--version".to_string()])
+        .expect("buffered sync timeout-path execution");
+    assert_cleared_environment(&buffered_timeout_path);
+
+    let stdin_path = dir.path().join("stdin.env");
+    run_claude_with_stdin_prompt_sync(
+        &env_capture_client(&stdin_path),
+        vec!["--version".to_string()],
+        "prompt on stdin".to_string(),
+    )
+    .expect("stdin sync execution");
+    assert_cleared_environment(&stdin_path);
+
+    let stdin_timeout_path = dir.path().join("stdin-timeout.env");
+    let stdin_timeout = env_capture_builder(&stdin_timeout_path)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("stdin timeout client");
+    run_claude_with_stdin_prompt_sync(
+        &stdin_timeout,
+        vec!["--version".to_string()],
+        "prompt on stdin".to_string(),
+    )
+    .expect("stdin sync timeout-path execution");
+    assert_cleared_environment(&stdin_timeout_path);
+
+    let retry_path = dir.path().join("retry.env");
+    let retry_marker = dir.path().join("retried");
+    let retry = env_capture_builder(&retry_path)
+        .env("FAKE_CLAUDE_FAIL_ONCE_FILE", retry_marker.to_string_lossy())
+        .retry(
+            claude_wrapper::RetryPolicy::new()
+                .max_attempts(2)
+                .initial_backoff(Duration::from_millis(1))
+                .retry_on_exit_codes([75]),
+        )
+        .build()
+        .expect("retry client");
+    run_claude_sync(&retry, vec!["--version".to_string()])
+        .expect("second sync retry attempt should succeed");
+    assert!(retry_marker.is_file(), "first attempt should create marker");
+    assert_cleared_environment(&retry_path);
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn clear_env_applies_to_sync_streaming() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query_sync};
+    use claude_wrapper::{OutputFormat, QueryCommand};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let capture_path = dir.path().join("stream.env");
+    let claude = env_capture_client(&capture_path);
+    let command = QueryCommand::new("stream")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+    stream_query_sync(&claude, &command, |_: StreamEvent| {}).expect("sync streaming execution");
+    assert_cleared_environment(&capture_path);
 }
 
 #[test]

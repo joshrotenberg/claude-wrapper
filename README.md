@@ -106,6 +106,7 @@ let claude = Claude::builder()
 - `binary()` -- path to the `claude` binary (auto-detected from PATH by default)
 - `working_dir()` / `with_working_dir()` -- working directory for commands
 - `env()` / `envs()` -- environment variables applied to every command
+- `clear_env()` -- clear inherited child environment before applying `env()` / `envs()`
 - `arg()` -- global arg applied before every subcommand
 - `timeout_secs()` / `timeout()` -- command timeout (no default)
 - `retry()` -- default `RetryPolicy` applied to every command
@@ -114,6 +115,31 @@ let claude = Claude::builder()
 
 - `cli_version()` / `cli_version_sync()` -- parsed `CliVersion`
 - `check_version()` / `check_version_sync()` -- assert a minimum version
+
+### Child environment policy
+
+Children inherit the parent process environment by default for compatibility.
+Hosts that need an explicitly constructed environment can opt into clearing it:
+
+```rust
+let claude = Claude::builder()
+    .clear_env()
+    .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+    .env("LANG", "C.UTF-8")
+    .env("CLAUDE_CONFIG_DIR", "/srv/claude/config")
+    .build()?;
+```
+
+`clear_env()` is call-order independent: explicit entries survive whether
+`env()` / `envs()` appear before or after it. Every buffered, stdin, timeout,
+retry, streaming, sync, and duplex child uses the same policy.
+
+Clearing the environment controls only what the direct Claude CLI child
+inherits. It is not operating-system or process isolation. A same-UID child
+may still read accessible files or inspect other processes where the OS
+permits it. Callers are responsible for choosing the minimal `PATH`, locale,
+config-home, credential, proxy, Git, and SSH entries appropriate for their
+deployment.
 
 ## Command builders
 

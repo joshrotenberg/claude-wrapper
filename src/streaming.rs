@@ -421,14 +421,13 @@ where
 
     let mut cmd = Command::new(&claude.binary);
     cmd.args(&command_args)
-        .env_remove("CLAUDECODE")
-        .envs(&claude.env)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
         // Dropping the in-flight future must kill the child, not leave
         // the CLI running unattended (see the `exec` module docs).
         .kill_on_drop(true);
+    crate::exec::apply_child_environment(cmd.as_std_mut(), claude.clear_env, &claude.env);
     // Own process group (Unix) so cancellation can signal the whole
     // tree, not just the direct child (see exec::GroupKillGuard). Opt
     // out via ClaudeBuilder::process_group.
@@ -652,12 +651,10 @@ where
     let mut cmd_builder = StdCommand::new(&claude.binary);
     cmd_builder
         .args(&command_args)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .envs(&claude.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::exec::apply_child_environment(&mut cmd_builder, claude.clear_env, &claude.env);
     // Own process group (Unix) so a kill can signal the whole tree,
     // not just the direct child (see exec::GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
