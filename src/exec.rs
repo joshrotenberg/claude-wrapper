@@ -416,6 +416,86 @@ pub(crate) async fn kill_group_with_grace(group: &mut GroupKillGuard, grace: Opt
     group.kill_now();
 }
 
+#[cfg(feature = "async")]
+enum StopReason {
+    Timeout { timeout_seconds: u64 },
+    Cancelled,
+}
+
+#[cfg(feature = "async")]
+impl StopReason {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Timeout { timeout_seconds } => Error::Timeout { timeout_seconds },
+            Self::Cancelled => Error::Cancelled,
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+type StopFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = StopReason> + Send + 'a>>;
+
+#[cfg(feature = "async")]
+fn timeout_stop(timeout: Duration) -> StopFuture<'static> {
+    Box::pin(async move {
+        tokio::time::sleep(timeout).await;
+        StopReason::Timeout {
+            timeout_seconds: timeout.as_secs(),
+        }
+    })
+}
+
+#[cfg(feature = "async")]
+fn cancellation_or_timeout<'a, C>(cancel: C, timeout: Option<Duration>) -> StopFuture<'a>
+where
+    C: std::future::Future<Output = ()> + Send + 'a,
+{
+    Box::pin(async move {
+        match timeout {
+            Some(timeout) => tokio::select! {
+                () = cancel => StopReason::Cancelled,
+                () = tokio::time::sleep(timeout) => StopReason::Timeout {
+                    timeout_seconds: timeout.as_secs(),
+                },
+            },
+            None => {
+                cancel.await;
+                StopReason::Cancelled
+            }
+        }
+    })
+}
+
+#[cfg(feature = "async")]
+async fn stop_and_reap(
+    child: &mut tokio::process::Child,
+    group: &mut GroupKillGuard,
+    grace: Option<Duration>,
+    working_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    kill_group_with_grace(group, grace).await;
+    if child
+        .try_wait()
+        .map_err(|e| wait_error(e, working_dir))?
+        .is_none()
+        && let Err(error) = child.start_kill()
+        && error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        return Err(wait_error(error, working_dir));
+    }
+    child.wait().await.map_err(|e| wait_error(e, working_dir))?;
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+fn wait_error(error: std::io::Error, working_dir: Option<&std::path::Path>) -> Error {
+    Error::Io {
+        message: "failed to wait for claude process".to_string(),
+        source: error,
+        working_dir: working_dir.map(|p| p.to_path_buf()),
+    }
+}
+
 /// Blocking mirror of [`kill_group_with_grace`].
 #[cfg(feature = "sync")]
 pub(crate) fn kill_group_with_grace_sync(group: &mut GroupKillGuard, grace: Option<Duration>) {
@@ -442,6 +522,39 @@ pub(crate) fn kill_group_with_grace_sync(group: &mut GroupKillGuard, grace: Opti
 #[cfg(feature = "async")]
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     run_claude_with_retry(claude, args, None).await
+}
+
+/// Run a Claude command with an explicit cancellation signal.
+///
+/// Retry does not apply. When `cancel` resolves, the wrapper terminates the
+/// owned process group and reaps the direct child before returning
+/// [`Error::Cancelled`]. A configured client timeout uses the same path.
+#[cfg(feature = "async")]
+pub async fn run_claude_cancellable<C>(
+    claude: &Claude,
+    args: Vec<String>,
+    cancel: C,
+) -> Result<CommandOutput>
+where
+    C: std::future::Future<Output = ()> + Send,
+{
+    let command_args = full_command_args(claude, args);
+    let span = exec_span(claude, &command_args, "cancellable");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
+    let stop = cancellation_or_timeout(cancel, claude.timeout);
+    let output = run_with_stop(
+        &claude.binary,
+        &command_args,
+        &claude.env,
+        claude.clear_env,
+        claude.working_dir.as_deref(),
+        stop,
+        SpawnPolicy::of(claude),
+    )
+    .await?;
+    record_exec_outcome(&span, output.exit_code, started);
+    Ok(output)
 }
 
 /// Run a claude command with an optional per-command retry policy override.
@@ -477,6 +590,40 @@ pub async fn run_claude_with_stdin_prompt(
     stdin_content: String,
 ) -> Result<CommandOutput> {
     run_claude_with_stdin_prompt_internal(claude, args, stdin_content).await
+}
+
+/// Run Claude with a stdin prompt and an explicit cancellation signal.
+///
+/// Cancellation, timeout, and stdin communication failures settle process
+/// ownership before returning. Retry does not apply.
+#[cfg(feature = "async")]
+pub async fn run_claude_with_stdin_prompt_cancellable<C>(
+    claude: &Claude,
+    args: Vec<String>,
+    stdin_content: String,
+    cancel: C,
+) -> Result<CommandOutput>
+where
+    C: std::future::Future<Output = ()> + Send,
+{
+    let command_args = full_command_args(claude, args);
+    let span = exec_span(claude, &command_args, "stdin-cancellable");
+    let _enter = span.enter();
+    let started = std::time::Instant::now();
+    let stop = cancellation_or_timeout(cancel, claude.timeout);
+    let output = run_stdin_with_stop(
+        &claude.binary,
+        &command_args,
+        &claude.env,
+        claude.clear_env,
+        claude.working_dir.as_deref(),
+        stdin_content,
+        stop,
+        SpawnPolicy::of(claude),
+    )
+    .await?;
+    record_exec_outcome(&span, output.exit_code, started);
+    Ok(output)
 }
 
 #[cfg(feature = "async")]
@@ -540,7 +687,7 @@ async fn run_internal_stdin(
 ) -> Result<CommandOutput> {
     let SpawnPolicy {
         process_group,
-        kill_grace: _, // no kill site on this path
+        kill_grace,
         die_with_parent,
         on_spawn,
     } = policy;
@@ -575,16 +722,16 @@ async fn run_internal_stdin(
     let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_content.as_bytes())
-            .await
-            .map_err(|e| Error::Io {
-                message: format!("failed to write to claude stdin: {e}"),
-                source: e,
-                working_dir: working_dir.map(|p| p.to_path_buf()),
-            })?;
-        // Drop stdin so the child sees EOF.
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(stdin_content.as_bytes()).await
+    {
+        let error = Error::Io {
+            message: format!("failed to write to claude stdin: {error}"),
+            source: error,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        };
+        stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+        return Err(error);
     }
 
     let mut stdout_handle = child.stdout.take().expect("stdout was piped");
@@ -635,6 +782,31 @@ async fn run_with_timeout_stdin(
     stdin_content: String,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    run_stdin_with_stop(
+        binary,
+        args,
+        env,
+        clear_env,
+        working_dir,
+        stdin_content,
+        timeout_stop(timeout),
+        policy,
+    )
+    .await
+}
+
+#[cfg(feature = "async")]
+#[allow(clippy::too_many_arguments)]
+async fn run_stdin_with_stop(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
+    working_dir: Option<&std::path::Path>,
+    stdin_content: String,
+    stop: StopFuture<'_>,
+    policy: SpawnPolicy<'_>,
+) -> Result<CommandOutput> {
     let SpawnPolicy {
         process_group,
         kill_grace,
@@ -671,8 +843,13 @@ async fn run_with_timeout_stdin(
         })?;
     let mut group = arm_and_notify(process_group, child.id(), on_spawn);
 
-    // Write the prompt to stdin, then drop the handle so the child sees EOF.
-    if let Some(mut stdin) = child.stdin.take() {
+    let child_stdin = child.stdin.take();
+    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
+    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
+    let write = async move {
+        let Some(mut stdin) = child_stdin else {
+            return Ok(());
+        };
         stdin
             .write_all(stdin_content.as_bytes())
             .await
@@ -680,24 +857,37 @@ async fn run_with_timeout_stdin(
                 message: format!("failed to write to claude stdin: {e}"),
                 source: e,
                 working_dir: working_dir.map(|p| p.to_path_buf()),
-            })?;
-        // Drop stdin so the child sees EOF.
-    }
-
-    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
-    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
-
-    let wait_and_drain = async {
-        let (status, stdout_str, stderr_str) = tokio::join!(
-            child.wait(),
-            drain(&mut stdout_handle),
-            drain(&mut stderr_handle),
-        );
-        (status, stdout_str, stderr_str)
+            })
+    };
+    let read_stdout = async {
+        drain_result(&mut stdout_handle)
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to read claude stdout: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })
+    };
+    let read_stderr = async {
+        drain_result(&mut stderr_handle)
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to read claude stderr: {e}"),
+                source: e,
+                working_dir: working_dir.map(|p| p.to_path_buf()),
+            })
+    };
+    let wait = async { child.wait().await.map_err(|e| wait_error(e, working_dir)) };
+    let run = async {
+        let ((), status, stdout, stderr) = tokio::try_join!(write, wait, read_stdout, read_stderr)?;
+        Ok::<_, Error>((status, stdout, stderr))
     };
 
-    match tokio::time::timeout(timeout, wait_and_drain).await {
-        Ok((Ok(status), stdout, stderr)) => {
+    match tokio::select! {
+        outcome = run => Ok(outcome),
+        reason = stop => Err(reason),
+    } {
+        Ok(Ok((status, stdout, stderr))) => {
             group.disarm();
             let exit_code = status.code().unwrap_or(-1);
 
@@ -718,34 +908,16 @@ async fn run_with_timeout_stdin(
                 success: true,
             })
         }
-        Ok((Err(e), _stdout, _stderr)) => Err(Error::Io {
-            message: "failed to wait for claude process".to_string(),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        }),
-        Err(_) => {
-            // Timeout: take down the whole group first (subprocesses
-            // may hold our pipe fds), honoring the optional SIGTERM
-            // grace, then kill+reap the direct child.
-            kill_group_with_grace(&mut group, kill_grace).await;
-            let _ = child.kill().await;
-            let drain_budget = Duration::from_millis(200);
-            let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout_handle))
-                .await
-                .unwrap_or_default();
-            let stderr_str = tokio::time::timeout(drain_budget, drain(&mut stderr_handle))
-                .await
-                .unwrap_or_default();
-            if !stdout_str.is_empty() || !stderr_str.is_empty() {
-                warn!(
-                    stdout = %stdout_str,
-                    stderr = %stderr_str,
-                    "partial output from timed-out process",
-                );
-            }
-            Err(Error::Timeout {
-                timeout_seconds: timeout.as_secs(),
-            })
+        Ok(Err(error)) => {
+            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            Err(error)
+        }
+        Err(reason) => {
+            // Take down the whole group first (subprocesses may hold our pipe
+            // fds), honoring the optional SIGTERM grace, then kill+reap the
+            // direct child.
+            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            Err(reason.into_error())
         }
     }
 }
@@ -920,6 +1092,28 @@ async fn run_with_timeout(
     timeout: Duration,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
+    run_with_stop(
+        binary,
+        args,
+        env,
+        clear_env,
+        working_dir,
+        timeout_stop(timeout),
+        policy,
+    )
+    .await
+}
+
+#[cfg(feature = "async")]
+async fn run_with_stop(
+    binary: &std::path::Path,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    clear_env: bool,
+    working_dir: Option<&std::path::Path>,
+    stop: StopFuture<'_>,
+    policy: SpawnPolicy<'_>,
+) -> Result<CommandOutput> {
     let SpawnPolicy {
         process_group,
         kill_grace,
@@ -967,7 +1161,10 @@ async fn run_with_timeout(
         (status, stdout_str, stderr_str)
     };
 
-    match tokio::time::timeout(timeout, wait_and_drain).await {
+    match tokio::select! {
+        outcome = wait_and_drain => Ok(outcome),
+        reason = stop => Err(reason),
+    } {
         Ok((Ok(status), stdout, stderr)) => {
             group.disarm();
             let exit_code = status.code().unwrap_or(-1);
@@ -994,14 +1191,12 @@ async fn run_with_timeout(
             source: e,
             working_dir: working_dir.map(|p| p.to_path_buf()),
         }),
-        Err(_) => {
-            // Timeout: take down the whole group, honoring the
-            // optional SIGTERM grace, then kill+reap the direct
-            // child. The group kill takes down subprocesses that
-            // could otherwise hold our pipe fds open forever; the
-            // capped drain below stays as a backstop.
-            kill_group_with_grace(&mut group, kill_grace).await;
-            let _ = child.kill().await;
+        Err(reason) => {
+            // Take down the whole group, honoring the optional SIGTERM grace,
+            // then kill+reap the direct child. The group kill takes down
+            // subprocesses that could otherwise hold our pipe fds open
+            // forever; the capped drain below stays as a backstop.
+            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
             let drain_budget = Duration::from_millis(200);
             let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout))
                 .await
@@ -1013,12 +1208,10 @@ async fn run_with_timeout(
                 warn!(
                     stdout = %stdout_str,
                     stderr = %stderr_str,
-                    "partial output from timed-out process",
+                    "partial output from stopped process",
                 );
             }
-            Err(Error::Timeout {
-                timeout_seconds: timeout.as_secs(),
-            })
+            Err(reason.into_error())
         }
     }
 }
@@ -1028,6 +1221,13 @@ async fn drain<R: AsyncReadExt + Unpin>(reader: &mut R) -> String {
     let mut buf = Vec::new();
     let _ = reader.read_to_end(&mut buf).await;
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[cfg(feature = "async")]
+async fn drain_result<R: AsyncReadExt + Unpin>(reader: &mut R) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Total wall-clock time to keep retrying a spawn that reports `ETXTBSY`.
@@ -2073,6 +2273,19 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "async")]
+    fn assert_pid_not_live_now(pid: u32) {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            !out.status.success() || stat.is_empty() || stat.starts_with('Z'),
+            "process {pid} still live after terminal settlement (stat {stat})"
+        );
+    }
+
     /// Fake script that records its own pid, spawns a same-group
     /// grandchild that records its pid too, then sleeps far longer than
     /// any test deadline. The main shell waits for the grandchild pid
@@ -2199,6 +2412,64 @@ mod tests {
             }
         }
         assert!(observed, "child never recorded pids within 5 timeout runs");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_explicit_cancellation_settles_process_group() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let gpid_path = workdir.path().join("gpid");
+        let (_dir, path) = group_script(&pid_path, &gpid_path);
+        let claude = Claude::builder()
+            .binary(&path)
+            .kill_grace(Duration::from_millis(10))
+            .build()
+            .expect("build");
+        let cancel = async {
+            while !pid_path.exists() || !gpid_path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        let error = run_claude_cancellable(&claude, vec![], cancel)
+            .await
+            .expect_err("run must be cancelled");
+        assert!(matches!(error, Error::Cancelled));
+        assert_pid_not_live_now(read_pid(&pid_path));
+        assert_pid_not_live_now(read_pid(&gpid_path));
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdin_failure_settles_process_group() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let gpid_path = workdir.path().join("gpid");
+        let (_dir, path) = fake_script(&format!(
+            concat!(
+                "sleep 300 </dev/null &\n",
+                "child=$!\n",
+                "echo $$ > '{p}'\n",
+                "echo $child > '{g}'\n",
+                "exec 0<&-\n",
+                "wait $child",
+            ),
+            p = pid_path.display(),
+            g = gpid_path.display(),
+        ));
+        let claude = Claude::builder()
+            .binary(&path)
+            .kill_grace(Duration::from_millis(10))
+            .build()
+            .expect("build");
+
+        let error = run_claude_with_stdin_prompt(&claude, vec![], "x".repeat(4 * 1024 * 1024))
+            .await
+            .expect_err("stdin write must fail");
+        assert!(matches!(error, Error::Io { .. }));
+        assert_pid_not_live_now(read_pid(&pid_path));
+        assert_pid_not_live_now(read_pid(&gpid_path));
     }
 
     // With the process-group split opted out, dropping the future still

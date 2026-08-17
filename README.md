@@ -110,11 +110,24 @@ let claude = Claude::builder()
 - `arg()` -- global arg applied before every subcommand
 - `timeout_secs()` / `timeout()` -- command timeout (no default)
 - `retry()` -- default `RetryPolicy` applied to every command
+- `process_group()` -- isolate each child in its own Unix process group (enabled by default)
+- `kill_grace()` -- optional SIGTERM grace before SIGKILL on awaited shutdown paths
 
 `Claude` also exposes:
 
 - `cli_version()` / `cli_version_sync()` -- parsed `CliVersion`
 - `check_version()` / `check_version_sync()` -- assert a minimum version
+
+### Awaited cancellation
+
+`QueryCommand::execute_cancellable` and `execute_json_cancellable` accept any
+future that resolves to `()`. When it resolves, the wrapper terminates the
+owned process group and reaps the direct child before returning
+`Error::Cancelled`. A configured timeout uses the same settlement path.
+
+Dropping an ordinary execute future still triggers immediate process-group
+cleanup, but a destructor cannot wait for reaping. Use the cancellable methods
+when the caller needs terminal settlement before it records a run as stopped.
 
 ### Child environment policy
 

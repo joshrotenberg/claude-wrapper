@@ -1003,7 +1003,7 @@ async fn working_dir_set_on_subprocess() {
     assert!(output.success);
 }
 
-// ── Cancellation: dropping an in-flight future kills the child ──────
+// ── Cancellation and process settlement ──────
 
 /// Drive `fut` just long enough for fake-claude.sh to write its pid file
 /// (FAKE_CLAUDE_PID_FILE), then drop it mid-flight (on return) and hand
@@ -1068,12 +1068,47 @@ fn read_pid(path: &std::path::Path) -> u32 {
         .expect("parse pid")
 }
 
+/// The public query API does not report cancellation until the direct child
+/// and its same-group descendant have stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellable_json_query_settles_process_group() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_path = dir.path().join("pid");
+    let gpid_path = dir.path().join("gpid");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "30")
+        .env("FAKE_CLAUDE_PID_FILE", pid_path.to_string_lossy())
+        .env(
+            "FAKE_CLAUDE_GRANDCHILD_PID_FILE",
+            gpid_path.to_string_lossy(),
+        )
+        .kill_grace(std::time::Duration::from_millis(10))
+        .build()
+        .expect("failed to build Claude client");
+    let cancel = async {
+        while !pid_path.exists() || !gpid_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    let error = QueryCommand::new("slow query")
+        .prompt_via_stdin(true)
+        .execute_json_cancellable(&claude, cancel)
+        .await
+        .expect_err("query must be cancelled");
+
+    assert!(matches!(error, claude_wrapper::Error::Cancelled));
+    assert_pid_killed(read_pid(&pid_path)).await;
+    assert_pid_killed(read_pid(&gpid_path)).await;
+}
+
 /// Dropping an in-flight execute future kills the CLI child and its
 /// whole process group instead of leaving anything to run on in the
-/// background. This is the MCP server shape: execute_json raced against
-/// client cancellation with tokio::select!. FAKE_CLAUDE_DELAY keeps the
-/// child alive far longer than the test; the drop is what kills it, and
-/// the grandchild (FAKE_CLAUDE_GRANDCHILD_PID_FILE) must die with it.
+/// background. FAKE_CLAUDE_DELAY keeps the child alive far longer than the
+/// test; the drop is what kills it, and the grandchild
+/// (FAKE_CLAUDE_GRANDCHILD_PID_FILE) must die with it.
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_in_flight_execute_kills_child() {
