@@ -58,6 +58,14 @@ pub enum Error {
         timeout_seconds: u64,
     },
 
+    /// The caller explicitly cancelled an in-flight command.
+    ///
+    /// The wrapper does not return this error until it has terminated the
+    /// owned process group and reaped the direct child.
+    #[cfg(feature = "async")]
+    #[error("claude command cancelled")]
+    Cancelled,
+
     /// JSON parsing failed.
     #[cfg(feature = "json")]
     #[error("json parse error: {message}")]

@@ -662,6 +662,28 @@ impl QueryCommand {
         format!("{} {}", claude.binary().display(), quoted_args.join(" "))
     }
 
+    /// Execute the query with an explicit cancellation signal.
+    ///
+    /// Cancellation and the client timeout terminate the owned process group
+    /// and reap the direct child before returning. Retry does not apply.
+    #[cfg(feature = "async")]
+    pub async fn execute_cancellable<C>(&self, claude: &Claude, cancel: C) -> Result<CommandOutput>
+    where
+        C: std::future::Future<Output = ()> + Send,
+    {
+        if self.prompt_via_stdin {
+            exec::run_claude_with_stdin_prompt_cancellable(
+                claude,
+                self.build_args(),
+                self.prompt.clone(),
+                cancel,
+            )
+            .await
+        } else {
+            exec::run_claude_cancellable(claude, self.args(), cancel).await
+        }
+    }
+
     /// Execute the query and parse the JSON result.
     ///
     /// This is a convenience method that sets `OutputFormat::Json` and
@@ -676,6 +698,38 @@ impl QueryCommand {
             exec::run_claude_with_stdin_prompt(claude, args, self.prompt.clone()).await?
         } else {
             exec::run_claude_with_retry(claude, args, self.retry_policy.as_ref()).await?
+        };
+
+        serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
+            message: format!("failed to parse query result: {e}"),
+            source: e,
+        })
+    }
+
+    /// Execute the query cancellably and parse the JSON result.
+    ///
+    /// Process cleanup is complete before a cancellation, timeout, or stdin
+    /// communication error is returned.
+    #[cfg(all(feature = "json", feature = "async"))]
+    pub async fn execute_json_cancellable<C>(
+        &self,
+        claude: &Claude,
+        cancel: C,
+    ) -> Result<crate::types::QueryResult>
+    where
+        C: std::future::Future<Output = ()> + Send,
+    {
+        let args = self.build_args_with_forced_json();
+        let output = if self.prompt_via_stdin {
+            exec::run_claude_with_stdin_prompt_cancellable(
+                claude,
+                args,
+                self.prompt.clone(),
+                cancel,
+            )
+            .await?
+        } else {
+            exec::run_claude_cancellable(claude, args, cancel).await?
         };
 
         serde_json::from_str(&output.stdout).map_err(|e| crate::error::Error::Json {
