@@ -565,7 +565,13 @@ fn maximal_duplex_command() -> String {
         .mcp_config("/tmp/mcp.json")
         .strict_mcp_config()
         .session_id("11111111-1111-1111-1111-111111111111");
+    // An explicit path rather than PATH resolution: `build()` only calls
+    // `which` when no binary is set, and the flags this renders do not depend
+    // on where the binary lives. Without this, every caller of
+    // `all_root_flags` needs a real CLI installed, including the inventory
+    // tests that otherwise run in ordinary CI.
     let claude = claude_wrapper::Claude::builder()
+        .binary("claude")
         .build()
         .expect("building a client for the command preview");
     opts.to_command_string(&claude)
