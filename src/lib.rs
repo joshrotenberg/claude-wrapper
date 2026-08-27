@@ -399,7 +399,7 @@ pub use duplex::{
     DuplexOptions, DuplexSession, InboundEvent, PermissionDecision, PermissionHandler,
     PermissionRequest, TurnResult,
 };
-pub use error::{Error, Result};
+pub use error::{Error, OutputStream, Result};
 pub use exec::CommandOutput;
 #[cfg(feature = "tempfile")]
 pub use mcp_config::TempMcpConfig;
@@ -464,6 +464,8 @@ pub struct Claude {
     #[allow(dead_code)]
     pub(crate) kill_grace: Option<Duration>,
     #[allow(dead_code)]
+    pub(crate) output_limit: Option<usize>,
+    #[allow(dead_code)]
     pub(crate) on_spawn: Option<SpawnObserver>,
     #[allow(dead_code)]
     pub(crate) die_with_parent: bool,
@@ -479,6 +481,7 @@ impl std::fmt::Debug for Claude {
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
             .field("kill_grace", &self.kill_grace)
+            .field("output_limit", &self.output_limit)
             // A closure cannot be rendered, and env may hold credentials, so
             // neither is printed: only whether an observer is installed.
             .field("on_spawn", &self.on_spawn.is_some())
@@ -765,6 +768,7 @@ pub struct ClaudeBuilder {
     tested_cli_version_range: Option<(CliVersion, CliVersion)>,
     process_group: Option<bool>,
     kill_grace: Option<Duration>,
+    output_limit: Option<usize>,
     on_spawn: Option<SpawnObserver>,
     die_with_parent: bool,
 }
@@ -781,6 +785,7 @@ impl std::fmt::Debug for ClaudeBuilder {
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
             .field("kill_grace", &self.kill_grace)
+            .field("output_limit", &self.output_limit)
             .field("on_spawn", &self.on_spawn.is_some())
             .finish_non_exhaustive()
     }
@@ -1013,6 +1018,28 @@ impl ClaudeBuilder {
         self
     }
 
+    /// Ceiling, in bytes, on stdout and stderr captured from a buffered
+    /// run. Default: none; capture grows to whatever the child prints.
+    ///
+    /// The limit applies to each stream independently, so a client with
+    /// a 1 MiB ceiling holds at most 2 MiB across the pair. Reaching it
+    /// on either stream terminates the child's process group (honoring
+    /// [`kill_grace`](Self::kill_grace)), reaps the direct child, and
+    /// returns [`Error::OutputLimitExceeded`] rather than a truncated
+    /// success: continuing to read past the ceiling would defeat the
+    /// bound, and presenting a partial answer as a complete one is worse
+    /// than failing. Output captured before the ceiling tripped is
+    /// logged at warn.
+    ///
+    /// This bounds the buffered paths (`execute`, `execute_json`, and
+    /// their cancellable and blocking forms). Streaming runs deliver
+    /// events as they arrive and are not affected.
+    #[must_use]
+    pub fn output_limit(mut self, bytes: usize) -> Self {
+        self.output_limit = Some(bytes);
+        self
+    }
+
     /// Observe every child this client spawns, at spawn time.
     ///
     /// The observer receives a [`SpawnInfo`] before the run produces output,
@@ -1114,6 +1141,7 @@ impl ClaudeBuilder {
             tested_cli_version_range: self.tested_cli_version_range,
             process_group: self.process_group.unwrap_or(true),
             kill_grace: self.kill_grace,
+            output_limit: self.output_limit,
             on_spawn: self.on_spawn,
             die_with_parent: self.die_with_parent,
         })
