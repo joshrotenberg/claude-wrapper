@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.3] - 2026-08-27
+
+### Features
+
+- *(exec)* Bound captured child output by bytes  
+
+
+
 ## [0.14.2] - 2026-08-17
 
 
