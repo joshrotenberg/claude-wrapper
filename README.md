@@ -112,6 +112,7 @@ let claude = Claude::builder()
 - `retry()` -- default `RetryPolicy` applied to every command
 - `process_group()` -- isolate each child in its own Unix process group (enabled by default)
 - `kill_grace()` -- optional SIGTERM grace before SIGKILL on awaited shutdown paths
+- `output_limit()` -- byte ceiling on captured stdout and stderr (no default)
 
 `Claude` also exposes:
 
@@ -128,6 +129,32 @@ owned process group and reaps the direct child before returning
 Dropping an ordinary execute future still triggers immediate process-group
 cleanup, but a destructor cannot wait for reaping. Use the cancellable methods
 when the caller needs terminal settlement before it records a run as stopped.
+
+### Bounded output capture
+
+A buffered run reads the child's stdout and stderr to EOF, so peak memory is
+whatever the CLI decides to print. `output_limit()` sets a ceiling:
+
+```rust
+let claude = Claude::builder()
+    .output_limit(4 * 1024 * 1024)
+    .build()?;
+```
+
+The ceiling applies to each stream independently, so the pair holds at most
+twice the configured bytes. Reaching it terminates the child's process group
+(honoring `kill_grace`), reaps the direct child, and returns
+`Error::OutputLimitExceeded { stream, limit_bytes }` naming which stream ran
+over. It is not a truncated success: a caller can tell a complete answer from
+one that exceeded what it agreed to hold. Output captured before the ceiling
+tripped is logged at warn rather than returned.
+
+There is no default ceiling. With `output_limit()` unset, capture behavior is
+unchanged.
+
+This bounds the buffered paths (`execute`, `execute_json`, and their
+cancellable and blocking forms). Streaming runs deliver events as they arrive
+and are unaffected.
 
 ### Child environment policy
 

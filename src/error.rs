@@ -10,6 +10,25 @@ use std::path::PathBuf;
 
 use crate::auth::AuthErrorKind;
 
+/// Which of a child's captured streams an [`Error::OutputLimitExceeded`]
+/// refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputStream {
+    /// The child's standard output.
+    Stdout,
+    /// The child's standard error.
+    Stderr,
+}
+
+impl std::fmt::Display for OutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
 /// Errors returned by claude-wrapper operations.
 ///
 /// This enum is `#[non_exhaustive]`: new variants may be added in
@@ -65,6 +84,28 @@ pub enum Error {
     #[cfg(feature = "async")]
     #[error("claude command cancelled")]
     Cancelled,
+
+    /// The child wrote more to a captured stream than the configured
+    /// ceiling allows.
+    ///
+    /// Returned instead of a truncated success, so a caller can tell a
+    /// complete answer from one that exceeded what it agreed to hold.
+    /// The wrapper does not return this error until it has terminated the
+    /// owned process group and reaped the direct child, on the same path
+    /// as [`Error::Cancelled`] and [`Error::Timeout`]. Output captured
+    /// before the ceiling tripped is logged at warn rather than carried
+    /// here.
+    ///
+    /// Configure the ceiling with
+    /// [`ClaudeBuilder::output_limit`](crate::ClaudeBuilder::output_limit);
+    /// it is off by default and this error cannot occur while it is unset.
+    #[error("claude {stream} exceeded the {limit_bytes}-byte capture limit")]
+    OutputLimitExceeded {
+        /// Which captured stream exceeded the ceiling.
+        stream: OutputStream,
+        /// The configured ceiling, in bytes, that was exceeded.
+        limit_bytes: usize,
+    },
 
     /// JSON parsing failed.
     #[cfg(feature = "json")]

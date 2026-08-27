@@ -163,6 +163,7 @@ pub struct CommandOutput {
 pub(crate) struct SpawnPolicy<'a> {
     pub(crate) process_group: bool,
     pub(crate) kill_grace: Option<Duration>,
+    pub(crate) output_limit: Option<usize>,
     pub(crate) die_with_parent: bool,
     pub(crate) on_spawn: Option<&'a crate::SpawnObserver>,
 }
@@ -174,6 +175,7 @@ impl SpawnPolicy<'_> {
         SpawnPolicy {
             process_group: claude.process_group,
             kill_grace: claude.kill_grace,
+            output_limit: claude.output_limit,
             die_with_parent: claude.die_with_parent,
             on_spawn: claude.on_spawn.as_ref(),
         }
@@ -432,6 +434,13 @@ impl StopReason {
     }
 }
 
+/// A stop that never fires, for the paths with neither a deadline nor a
+/// cancellation signal.
+#[cfg(feature = "async")]
+fn never_stop() -> StopFuture<'static> {
+    Box::pin(std::future::pending())
+}
+
 #[cfg(feature = "async")]
 type StopFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = StopReason> + Send + 'a>>;
 
@@ -675,6 +684,13 @@ async fn run_claude_with_stdin_prompt_internal(
     result
 }
 
+/// Run a command with a stdin prompt, no deadline and no cancellation.
+///
+/// Delegates to [`run_stdin_with_stop`] with a stop that never fires,
+/// for the same reason as [`run_internal`]. This also makes the write
+/// concurrent with the drain on this path rather than sequential, so a
+/// prompt large enough to fill the stdin pipe cannot deadlock against a
+/// child that is blocked writing stdout.
 #[cfg(feature = "async")]
 async fn run_internal_stdin(
     binary: &std::path::Path,
@@ -685,89 +701,17 @@ async fn run_internal_stdin(
     stdin_content: String,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
-    let SpawnPolicy {
-        process_group,
-        kill_grace,
-        die_with_parent,
-        on_spawn,
-    } = policy;
-    use tokio::io::AsyncWriteExt;
-
-    let mut cmd = Command::new(binary);
-    cmd.args(args);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    // Dropping the in-flight future must kill the child, not leave the
-    // CLI running unattended (see the module docs).
-    cmd.kill_on_drop(true);
-    // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard). Opt out
-    // via ClaudeBuilder::process_group.
-    apply_process_group(&mut cmd, process_group);
-    apply_die_with_parent(&mut cmd, die_with_parent);
-    apply_child_environment(cmd.as_std_mut(), clear_env, env);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let mut child = spawn_retrying_txtbsy(&mut cmd)
-        .await
-        .map_err(|e| Error::Io {
-            message: format!("failed to spawn claude: {e}"),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        })?;
-    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
-
-    // Write the prompt to stdin, then drop the handle so the child sees EOF.
-    if let Some(mut stdin) = child.stdin.take()
-        && let Err(error) = stdin.write_all(stdin_content.as_bytes()).await
-    {
-        let error = Error::Io {
-            message: format!("failed to write to claude stdin: {error}"),
-            source: error,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        };
-        stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
-        return Err(error);
-    }
-
-    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
-    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
-
-    let (status, stdout_str, stderr_str) = tokio::join!(
-        child.wait(),
-        drain(&mut stdout_handle),
-        drain(&mut stderr_handle),
-    );
-
-    let status = status.map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
-    group.disarm();
-
-    let exit_code = status.code().unwrap_or(-1);
-
-    if !status.success() {
-        return Err(Error::from_command_failure(
-            format!("{} {}", binary.display(), args.join(" ")),
-            exit_code,
-            stdout_str,
-            stderr_str,
-            working_dir.map(|p| p.to_path_buf()),
-        ));
-    }
-
-    Ok(CommandOutput {
-        stdout: stdout_str,
-        stderr: stderr_str,
-        exit_code,
-        success: true,
-    })
+    run_stdin_with_stop(
+        binary,
+        args,
+        env,
+        clear_env,
+        working_dir,
+        stdin_content,
+        never_stop(),
+        policy,
+    )
+    .await
 }
 
 #[cfg(feature = "async")]
@@ -810,6 +754,7 @@ async fn run_stdin_with_stop(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        output_limit,
         die_with_parent,
         on_spawn,
     } = policy;
@@ -859,24 +804,18 @@ async fn run_stdin_with_stop(
                 working_dir: working_dir.map(|p| p.to_path_buf()),
             })
     };
-    let read_stdout = async {
-        drain_result(&mut stdout_handle)
-            .await
-            .map_err(|e| Error::Io {
-                message: format!("failed to read claude stdout: {e}"),
-                source: e,
-                working_dir: working_dir.map(|p| p.to_path_buf()),
-            })
-    };
-    let read_stderr = async {
-        drain_result(&mut stderr_handle)
-            .await
-            .map_err(|e| Error::Io {
-                message: format!("failed to read claude stderr: {e}"),
-                source: e,
-                working_dir: working_dir.map(|p| p.to_path_buf()),
-            })
-    };
+    let read_stdout = capture_stream(
+        &mut stdout_handle,
+        output_limit,
+        crate::OutputStream::Stdout,
+        working_dir,
+    );
+    let read_stderr = capture_stream(
+        &mut stderr_handle,
+        output_limit,
+        crate::OutputStream::Stderr,
+        working_dir,
+    );
     let wait = async { child.wait().await.map_err(|e| wait_error(e, working_dir)) };
     let run = async {
         let ((), status, stdout, stderr) = tokio::try_join!(write, wait, read_stdout, read_stderr)?;
@@ -985,6 +924,13 @@ pub async fn run_claude_allow_exit_codes(
     }
 }
 
+/// Run a command with no deadline and no cancellation.
+///
+/// Delegates to [`run_with_stop`] with a stop that never fires, so the
+/// spawn setup, concurrent drain, capture ceiling, and kill-and-reap
+/// handling live in exactly one place. Without a stop future the only
+/// reachable kill site is a capture ceiling breach, which is why this
+/// path now honours `kill_grace`.
 #[cfg(feature = "async")]
 async fn run_internal(
     binary: &std::path::Path,
@@ -994,80 +940,16 @@ async fn run_internal(
     working_dir: Option<&std::path::Path>,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
-    let SpawnPolicy {
-        process_group,
-        kill_grace: _, // no kill site on this path
-        die_with_parent,
-        on_spawn,
-    } = policy;
-    let mut cmd = Command::new(binary);
-    cmd.args(args);
-
-    // Prevent child from inheriting/blocking on parent's stdin.
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    // Dropping the in-flight future must kill the child, not leave the
-    // CLI running unattended (see the module docs).
-    cmd.kill_on_drop(true);
-    // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard). Opt out
-    // via ClaudeBuilder::process_group.
-    apply_process_group(&mut cmd, process_group);
-    apply_die_with_parent(&mut cmd, die_with_parent);
-
-    apply_child_environment(cmd.as_std_mut(), clear_env, env);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    // Spawn explicitly (rather than `Command::output`) so the pid is
-    // available to the group-kill guard while the run is in flight.
-    let mut child = spawn_retrying_txtbsy(&mut cmd)
-        .await
-        .map_err(|e| Error::Io {
-            message: format!("failed to spawn claude: {e}"),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        })?;
-    let mut group = arm_and_notify(process_group, child.id(), on_spawn);
-
-    let mut stdout_handle = child.stdout.take().expect("stdout was piped");
-    let mut stderr_handle = child.stderr.take().expect("stderr was piped");
-
-    let (status, stdout, stderr) = tokio::join!(
-        child.wait(),
-        drain(&mut stdout_handle),
-        drain(&mut stderr_handle),
-    );
-
-    let status = status.map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
-    group.disarm();
-
-    let exit_code = status.code().unwrap_or(-1);
-
-    if !status.success() {
-        return Err(Error::from_command_failure(
-            format!("{} {}", binary.display(), args.join(" ")),
-            exit_code,
-            stdout,
-            stderr,
-            working_dir.map(|p| p.to_path_buf()),
-        ));
-    }
-
-    Ok(CommandOutput {
-        stdout,
-        stderr,
-        exit_code,
-        success: true,
-    })
+    run_with_stop(
+        binary,
+        args,
+        env,
+        clear_env,
+        working_dir,
+        never_stop(),
+        policy,
+    )
+    .await
 }
 
 /// Run a command with a timeout, killing the child's whole process
@@ -1117,6 +999,7 @@ async fn run_with_stop(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        output_limit,
         die_with_parent,
         on_spawn,
     } = policy;
@@ -1153,19 +1036,33 @@ async fn run_with_stop(
 
     // Drain stdout and stderr concurrently with the process wait so
     // neither pipe buffer can fill up and deadlock the child.
-    // tokio::join! polls all three on the same task; no tokio::spawn
-    // (and therefore no `rt` feature) required.
+    // tokio::try_join! polls all three on the same task; no tokio::spawn
+    // (and therefore no `rt` feature) required. try_join rather than
+    // join so a read failure or a ceiling breach abandons the run at
+    // once instead of waiting on a child that is no longer being read.
     let wait_and_drain = async {
-        let (status, stdout_str, stderr_str) =
-            tokio::join!(child.wait(), drain(&mut stdout), drain(&mut stderr));
-        (status, stdout_str, stderr_str)
+        tokio::try_join!(
+            async { child.wait().await.map_err(|e| wait_error(e, working_dir)) },
+            capture_stream(
+                &mut stdout,
+                output_limit,
+                crate::OutputStream::Stdout,
+                working_dir
+            ),
+            capture_stream(
+                &mut stderr,
+                output_limit,
+                crate::OutputStream::Stderr,
+                working_dir
+            ),
+        )
     };
 
     match tokio::select! {
         outcome = wait_and_drain => Ok(outcome),
         reason = stop => Err(reason),
     } {
-        Ok((Ok(status), stdout, stderr)) => {
+        Ok(Ok((status, stdout, stderr))) => {
             group.disarm();
             let exit_code = status.code().unwrap_or(-1);
 
@@ -1186,24 +1083,31 @@ async fn run_with_stop(
                 success: true,
             })
         }
-        Ok((Err(e), _stdout, _stderr)) => Err(Error::Io {
-            message: "failed to wait for claude process".to_string(),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        }),
+        // A wait failure, a read failure, or a ceiling breach. The
+        // child is still ours in every case, so settle it on the same
+        // path a stop takes before surfacing what went wrong.
+        Ok(Err(error)) => {
+            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            Err(error)
+        }
         Err(reason) => {
             // Take down the whole group, honoring the optional SIGTERM grace,
             // then kill+reap the direct child. The group kill takes down
             // subprocesses that could otherwise hold our pipe fds open
             // forever; the capped drain below stays as a backstop.
             stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
-            let drain_budget = Duration::from_millis(200);
-            let stdout_str = tokio::time::timeout(drain_budget, drain(&mut stdout))
-                .await
-                .unwrap_or_default();
-            let stderr_str = tokio::time::timeout(drain_budget, drain(&mut stderr))
-                .await
-                .unwrap_or_default();
+            let stdout_str = tokio::time::timeout(
+                PARTIAL_CAPTURE_BUDGET,
+                capture_partial(&mut stdout, output_limit),
+            )
+            .await
+            .unwrap_or_default();
+            let stderr_str = tokio::time::timeout(
+                PARTIAL_CAPTURE_BUDGET,
+                capture_partial(&mut stderr, output_limit),
+            )
+            .await
+            .unwrap_or_default();
             if !stdout_str.is_empty() || !stderr_str.is_empty() {
                 warn!(
                     stdout = %stdout_str,
@@ -1216,18 +1120,119 @@ async fn run_with_stop(
     }
 }
 
-#[cfg(feature = "async")]
-async fn drain<R: AsyncReadExt + Unpin>(reader: &mut R) -> String {
-    let mut buf = Vec::new();
-    let _ = reader.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).into_owned()
+/// Read size for a bounded capture. Only used when a ceiling is set;
+/// the unbounded path stays on `read_to_end` and its own growth policy.
+#[cfg(any(feature = "async", feature = "sync"))]
+const CAPTURE_CHUNK: usize = 8 * 1024;
+
+/// How much of an over-ceiling stream is kept to log. The captured
+/// prefix can be as large as the ceiling itself, which is not something
+/// to hand to a logger, but the first few KiB usually name the runaway.
+#[cfg(any(feature = "async", feature = "sync"))]
+const BREACH_LOG_BYTES: usize = 2 * 1024;
+
+/// How long to wait for partial output after a kill, on both the async
+/// and blocking paths. The child is already gone; this only feeds a
+/// warn log, so it is deliberately short.
+#[cfg(any(feature = "async", feature = "sync"))]
+const PARTIAL_CAPTURE_BUDGET: Duration = Duration::from_millis(200);
+
+/// Result of reading one captured stream to EOF or to its ceiling.
+#[cfg(any(feature = "async", feature = "sync"))]
+enum Captured {
+    /// EOF was reached within the ceiling.
+    Complete(String),
+    /// The child wrote past the ceiling. Carries at most
+    /// [`BREACH_LOG_BYTES`] of the prefix, for diagnostics only: the
+    /// rest is dropped rather than returned, since returning it is the
+    /// truncated success this exists to avoid.
+    Exceeded { head: String },
 }
 
+/// Read `reader` to EOF, or stop once it passes `limit` bytes.
+///
+/// With no limit this is `read_to_end`, unchanged. With a limit the
+/// buffer never exceeds `limit`, so peak memory for a run is bounded by
+/// the ceiling times the two captured streams.
 #[cfg(feature = "async")]
-async fn drain_result<R: AsyncReadExt + Unpin>(reader: &mut R) -> std::io::Result<String> {
+async fn capture<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    limit: Option<usize>,
+) -> std::io::Result<Captured> {
+    let Some(limit) = limit else {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await?;
+        return Ok(Captured::Complete(
+            String::from_utf8_lossy(&buf).into_owned(),
+        ));
+    };
+
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    let mut chunk = [0u8; CAPTURE_CHUNK];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(Captured::Complete(
+                String::from_utf8_lossy(&buf).into_owned(),
+            ));
+        }
+        if buf.len() + read > limit {
+            buf.truncate(BREACH_LOG_BYTES.min(buf.len()));
+            return Ok(Captured::Exceeded {
+                head: String::from_utf8_lossy(&buf).into_owned(),
+            });
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// Capture one stream of a live child, reporting a ceiling breach and a
+/// read failure as typed errors.
+///
+/// The read failure is the reason this returns a `Result` at all: the
+/// previous `drain` discarded it with `let _`, which left a capture
+/// failure indistinguishable from an empty stream.
+#[cfg(feature = "async")]
+async fn capture_stream<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    limit: Option<usize>,
+    stream: crate::OutputStream,
+    working_dir: Option<&std::path::Path>,
+) -> Result<String> {
+    match capture(reader, limit).await {
+        Ok(Captured::Complete(text)) => Ok(text),
+        Ok(Captured::Exceeded { head }) => {
+            let limit_bytes = limit.unwrap_or_default();
+            warn!(
+                %stream,
+                limit_bytes,
+                head = %head,
+                "captured output exceeded its ceiling; terminating the child",
+            );
+            Err(Error::OutputLimitExceeded {
+                stream,
+                limit_bytes,
+            })
+        }
+        Err(source) => Err(Error::Io {
+            message: format!("failed to read claude {stream}: {source}"),
+            source,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        }),
+    }
+}
+
+/// Capture whatever is left in a pipe after the child has been killed.
+///
+/// Best-effort by construction: the process is already gone and this
+/// only feeds a warn log, so a read failure and a ceiling breach both
+/// degrade to whatever text is in hand.
+#[cfg(feature = "async")]
+async fn capture_partial<R: AsyncReadExt + Unpin>(reader: &mut R, limit: Option<usize>) -> String {
+    match capture(reader, limit).await {
+        Ok(Captured::Complete(text) | Captured::Exceeded { head: text }) => text,
+        Err(_) => String::new(),
+    }
 }
 
 /// Total wall-clock time to keep retrying a spawn that reports `ETXTBSY`.
@@ -1321,13 +1326,13 @@ pub fn run_claude_with_stdin_prompt_sync(
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt, sync)");
 
     let result = if let Some(timeout) = claude.timeout {
-        run_with_timeout_stdin_sync(
+        run_with_deadline_stdin_sync(
             &claude.binary,
             &command_args,
             &claude.env,
             claude.clear_env,
             claude.working_dir.as_deref(),
-            timeout,
+            Some(timeout),
             stdin_content,
             SpawnPolicy::of(claude),
         )
@@ -1349,6 +1354,9 @@ pub fn run_claude_with_stdin_prompt_sync(
     result
 }
 
+/// Blocking run with a stdin prompt and no deadline. Delegates to
+/// [`run_with_deadline_stdin_sync`], for the same reason as
+/// [`run_internal_sync`].
 #[cfg(feature = "sync")]
 fn run_internal_stdin_sync(
     binary: &std::path::Path,
@@ -1359,106 +1367,42 @@ fn run_internal_stdin_sync(
     stdin_content: String,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
-    let SpawnPolicy {
-        process_group,
-        kill_grace: _, // no kill site on this path
-        die_with_parent,
-        on_spawn,
-    } = policy;
-    use std::io::Write;
-    use std::process::{Command as StdCommand, Stdio};
-
-    let mut cmd = StdCommand::new(binary);
-    cmd.args(args);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    // Own process group (Unix) so a kill can signal the whole tree,
-    // not just the direct child (see GroupKillGuard). Opt out via
-    // ClaudeBuilder::process_group.
-    apply_process_group_sync(&mut cmd, process_group);
-    apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    apply_child_environment(&mut cmd, clear_env, env);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let mut child = spawn_retrying_txtbsy_sync(&mut cmd).map_err(|e| Error::Io {
-        message: format!("failed to spawn claude: {e}"),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
-    let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
-
-    // Write the prompt to stdin, then drop the handle so the child sees EOF.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_content.as_bytes())
-            .map_err(|e| Error::Io {
-                message: format!("failed to write to claude stdin: {e}"),
-                source: e,
-                working_dir: working_dir.map(|p| p.to_path_buf()),
-            })?;
-        stdin.flush().map_err(|e| Error::Io {
-            message: format!("failed to flush claude stdin: {e}"),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        })?;
-        // Drop stdin so the child sees EOF.
-    }
-
-    let output = child.wait_with_output().map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })?;
-    group.disarm();
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    if !output.status.success() {
-        return Err(Error::from_command_failure(
-            format!("{} {}", binary.display(), args.join(" ")),
-            exit_code,
-            stdout,
-            stderr,
-            working_dir.map(|p| p.to_path_buf()),
-        ));
-    }
-
-    Ok(CommandOutput {
-        stdout,
-        stderr,
-        exit_code,
-        success: true,
-    })
+    run_with_deadline_stdin_sync(
+        binary,
+        args,
+        env,
+        clear_env,
+        working_dir,
+        None,
+        stdin_content,
+        policy,
+    )
 }
 
+/// Blocking mirror of [`run_stdin_with_stop`]. See
+/// [`run_with_deadline_sync`] for the wait and kill behavior; this adds
+/// writing the prompt to the child's stdin.
 #[cfg(feature = "sync")]
 #[allow(clippy::too_many_arguments)]
-fn run_with_timeout_stdin_sync(
+fn run_with_deadline_stdin_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     clear_env: bool,
     working_dir: Option<&std::path::Path>,
-    timeout: Duration,
+    deadline: Option<Duration>,
     stdin_content: String,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
     let SpawnPolicy {
         process_group,
         kill_grace,
+        output_limit,
         die_with_parent,
         on_spawn,
     } = policy;
     use std::io::Write;
     use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-    use wait_timeout::ChildExt;
 
     let mut cmd = StdCommand::new(binary);
     cmd.args(args);
@@ -1483,78 +1427,45 @@ fn run_with_timeout_stdin_sync(
     })?;
     let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
 
+    // Start the capture threads before writing, so a prompt larger than
+    // the stdin pipe buffer cannot deadlock against a child that is
+    // blocked writing stdout.
+    let capture = SyncCapture::start(
+        child.stdout.take().expect("stdout was piped"),
+        child.stderr.take().expect("stderr was piped"),
+        output_limit,
+    );
+
     // Write the prompt to stdin, then drop the handle so the child sees EOF.
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
+        let written = stdin
             .write_all(stdin_content.as_bytes())
-            .map_err(|e| Error::Io {
-                message: format!("failed to write to claude stdin: {e}"),
-                source: e,
+            .and_then(|()| stdin.flush());
+        if let Err(source) = written {
+            stop_and_reap_sync(&mut child, &mut group, kill_grace);
+            log_partial(capture, "partial output from process with failed stdin");
+            return Err(Error::Io {
+                message: format!("failed to write to claude stdin: {source}"),
+                source,
                 working_dir: working_dir.map(|p| p.to_path_buf()),
-            })?;
-        stdin.flush().map_err(|e| Error::Io {
-            message: format!("failed to flush claude stdin: {e}"),
-            source: e,
-            working_dir: working_dir.map(|p| p.to_path_buf()),
-        })?;
+            });
+        }
         // Drop stdin so the child sees EOF.
     }
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-
-    let stdout_thread = thread::spawn(move || drain_sync(stdout));
-    let stderr_thread = thread::spawn(move || drain_sync(stderr));
-
-    match child.wait_timeout(timeout).map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })? {
-        Some(status) => {
-            group.disarm();
-            let stdout = stdout_thread.join().unwrap_or_default();
-            let stderr = stderr_thread.join().unwrap_or_default();
-            let exit_code = status.code().unwrap_or(-1);
-
-            if !status.success() {
-                return Err(Error::from_command_failure(
-                    format!("{} {}", binary.display(), args.join(" ")),
-                    exit_code,
-                    stdout,
-                    stderr,
-                    working_dir.map(|p| p.to_path_buf()),
-                ));
-            }
-
-            Ok(CommandOutput {
-                stdout,
-                stderr,
-                exit_code,
-                success: true,
-            })
-        }
-        None => {
-            // Timeout: take down the whole group first (subprocesses
-            // may hold our pipe fds), honoring the optional SIGTERM
-            // grace, then kill+reap the direct child.
-            kill_group_with_grace_sync(&mut group, kill_grace);
-            let _ = child.kill();
-            let _ = child.wait();
-            let (stdout_str, stderr_str) =
-                join_with_deadline(stdout_thread, stderr_thread, Duration::from_millis(200));
-            if !stdout_str.is_empty() || !stderr_str.is_empty() {
-                warn!(
-                    stdout = %stdout_str,
-                    stderr = %stderr_str,
-                    "partial output from timed-out process",
-                );
-            }
-            Err(Error::Timeout {
-                timeout_seconds: timeout.as_secs(),
-            })
-        }
-    }
+    finish_sync_run(
+        &mut child,
+        &mut group,
+        capture,
+        SyncRun {
+            binary,
+            args,
+            working_dir,
+            deadline,
+            kill_grace,
+            output_limit,
+        },
+    )
 }
 
 #[cfg(feature = "sync")]
@@ -1567,13 +1478,13 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
     debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (sync)");
 
     let result = if let Some(timeout) = claude.timeout {
-        run_with_timeout_sync(
+        run_with_deadline_sync(
             &claude.binary,
             &command_args,
             &claude.env,
             claude.clear_env,
             claude.working_dir.as_deref(),
-            timeout,
+            Some(timeout),
             SpawnPolicy::of(claude),
         )
     } else {
@@ -1616,6 +1527,12 @@ pub fn run_claude_allow_exit_codes_sync(
     }
 }
 
+/// Blocking run with no deadline.
+///
+/// Delegates to [`run_with_deadline_sync`] so the spawn setup, capture
+/// ceiling, and kill-and-reap handling live in one place. Without a
+/// deadline the only reachable kill site is a ceiling breach, which is
+/// why this path now honours `kill_grace`.
 #[cfg(feature = "sync")]
 fn run_internal_sync(
     binary: &std::path::Path,
@@ -1625,86 +1542,35 @@ fn run_internal_sync(
     working_dir: Option<&std::path::Path>,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
-    let SpawnPolicy {
-        process_group,
-        kill_grace: _, // no kill site on this path
-        die_with_parent,
-        on_spawn,
-    } = policy;
-    use std::process::{Command as StdCommand, Stdio};
-
-    let mut cmd = StdCommand::new(binary);
-    cmd.args(args);
-    cmd.stdin(Stdio::null());
-    // Own process group (Unix); see the module docs. This path has no
-    // kill site (a blocking call cannot be cancelled mid-flight), so
-    // there is no guard to arm -- but the child still exists and a
-    // supervisor still wants its pid, so the spawn is observed below.
-    apply_process_group_sync(&mut cmd, process_group);
-    apply_die_with_parent_sync(&mut cmd, die_with_parent);
-    apply_child_environment(&mut cmd, clear_env, env);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let output =
-        output_retrying_txtbsy_sync_observed(&mut cmd, process_group, on_spawn).map_err(|e| {
-            Error::Io {
-                message: format!("failed to spawn claude: {e}"),
-                source: e,
-                working_dir: working_dir.map(|p| p.to_path_buf()),
-            }
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    if !output.status.success() {
-        return Err(Error::from_command_failure(
-            format!("{} {}", binary.display(), args.join(" ")),
-            exit_code,
-            stdout,
-            stderr,
-            working_dir.map(|p| p.to_path_buf()),
-        ));
-    }
-
-    Ok(CommandOutput {
-        stdout,
-        stderr,
-        exit_code,
-        success: true,
-    })
+    run_with_deadline_sync(binary, args, env, clear_env, working_dir, None, policy)
 }
 
-/// Blocking run with a timeout. Mirrors [`run_with_timeout`]: spawns
-/// the child, drains stdout/stderr on dedicated threads so neither
-/// pipe buffer can fill up while we wait, then uses
-/// [`wait_timeout::ChildExt::wait_timeout`] to enforce the deadline.
-/// On timeout, the child's whole process group (Unix) is SIGKILLed and
-/// the child reaped; partial output is logged at warn but the returned
-/// [`Error::Timeout`] does not carry it.
+/// Blocking mirror of [`run_with_stop`]. Spawns the child, drains
+/// stdout and stderr on dedicated threads so neither pipe buffer can
+/// fill up while we wait, then waits with an optional deadline.
+///
+/// On a timeout or a capture ceiling breach, the child's whole process
+/// group (Unix) is killed after the optional SIGTERM grace and the child
+/// is reaped. Partial output is logged at warn; neither
+/// [`Error::Timeout`] nor [`Error::OutputLimitExceeded`] carries it.
 #[cfg(feature = "sync")]
-fn run_with_timeout_sync(
+fn run_with_deadline_sync(
     binary: &std::path::Path,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
     clear_env: bool,
     working_dir: Option<&std::path::Path>,
-    timeout: Duration,
+    deadline: Option<Duration>,
     policy: SpawnPolicy<'_>,
 ) -> Result<CommandOutput> {
     let SpawnPolicy {
         process_group,
         kill_grace,
+        output_limit,
         die_with_parent,
         on_spawn,
     } = policy;
     use std::process::{Command as StdCommand, Stdio};
-    use std::thread;
-    use wait_timeout::ChildExt;
 
     let mut cmd = StdCommand::new(binary);
     cmd.args(args);
@@ -1729,34 +1595,313 @@ fn run_with_timeout_sync(
     })?;
     let mut group = arm_and_notify(process_group, Some(child.id()), on_spawn);
 
-    // Detach stdout/stderr onto their own threads so neither can block
-    // the child by filling its pipe buffer. Each thread owns its half
-    // and drops it on completion, which closes the parent's fd and
-    // lets read_to_end() return EOF once the child exits.
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let capture = SyncCapture::start(
+        child.stdout.take().expect("stdout was piped"),
+        child.stderr.take().expect("stderr was piped"),
+        output_limit,
+    );
 
-    let stdout_thread = thread::spawn(move || drain_sync(stdout));
-    let stderr_thread = thread::spawn(move || drain_sync(stderr));
+    finish_sync_run(
+        &mut child,
+        &mut group,
+        capture,
+        SyncRun {
+            binary,
+            args,
+            working_dir,
+            deadline,
+            kill_grace,
+            output_limit,
+        },
+    )
+}
 
-    match child.wait_timeout(timeout).map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: working_dir.map(|p| p.to_path_buf()),
-    })? {
-        Some(status) => {
+#[cfg(feature = "sync")]
+fn capture_sync<R: std::io::Read>(
+    mut reader: R,
+    limit: Option<usize>,
+) -> std::io::Result<Captured> {
+    let Some(limit) = limit else {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        return Ok(Captured::Complete(
+            String::from_utf8_lossy(&buf).into_owned(),
+        ));
+    };
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; CAPTURE_CHUNK];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(Captured::Complete(
+                String::from_utf8_lossy(&buf).into_owned(),
+            ));
+        }
+        if buf.len() + read > limit {
+            buf.truncate(BREACH_LOG_BYTES.min(buf.len()));
+            return Ok(Captured::Exceeded {
+                head: String::from_utf8_lossy(&buf).into_owned(),
+            });
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// Which stream first passed its ceiling, shared between the capture
+/// threads and the thread waiting on the child.
+///
+/// A blocking wait cannot be woken, so the waiter polls this instead:
+/// once a capture thread stops reading, the child blocks on a full pipe
+/// and would otherwise sit there until the timeout (or forever, on a
+/// path with no timeout).
+#[cfg(feature = "sync")]
+mod breach {
+    pub(super) const NONE: u8 = 0;
+    pub(super) const STDOUT: u8 = 1;
+    pub(super) const STDERR: u8 = 2;
+
+    pub(super) fn stream(code: u8) -> Option<crate::OutputStream> {
+        match code {
+            STDOUT => Some(crate::OutputStream::Stdout),
+            STDERR => Some(crate::OutputStream::Stderr),
+            _ => None,
+        }
+    }
+}
+
+/// How often the waiter checks for a ceiling breach. Only paid when a
+/// ceiling is set; without one the waiter blocks outright. The child is
+/// stalled on a full pipe for at most this long before being killed,
+/// which costs latency but no memory.
+#[cfg(feature = "sync")]
+const BREACH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The two capture threads and the breach code they publish.
+#[cfg(feature = "sync")]
+struct SyncCapture {
+    stdout: std::thread::JoinHandle<std::io::Result<Captured>>,
+    stderr: std::thread::JoinHandle<std::io::Result<Captured>>,
+    limit: Option<usize>,
+    breached: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[cfg(feature = "sync")]
+impl SyncCapture {
+    /// Detach stdout and stderr onto their own threads so neither can
+    /// block the child by filling its pipe buffer. Each thread owns its
+    /// half and drops it on completion, which closes the parent's fd and
+    /// lets the read return EOF once the child exits.
+    fn start(
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+        limit: Option<usize>,
+    ) -> Self {
+        let breached = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(breach::NONE));
+        Self {
+            stdout: spawn_capture_thread(stdout, limit, breach::STDOUT, &breached),
+            stderr: spawn_capture_thread(stderr, limit, breach::STDERR, &breached),
+            limit,
+            breached,
+        }
+    }
+
+    /// The flag to poll while waiting, or `None` when no ceiling is set
+    /// and the waiter should block instead.
+    fn watch(&self) -> Option<&std::sync::atomic::AtomicU8> {
+        self.limit.is_some().then(|| self.breached.as_ref())
+    }
+
+    /// Join both threads and resolve them into the captured pair, a
+    /// ceiling breach, or a read failure. Used on the path where the
+    /// child exited on its own, so the threads are already at EOF.
+    fn settle(self, working_dir: Option<&std::path::Path>) -> Result<(String, String)> {
+        let limit = self.limit;
+        let stdout = join_capture(self.stdout, crate::OutputStream::Stdout, limit, working_dir);
+        let stderr = join_capture(self.stderr, crate::OutputStream::Stderr, limit, working_dir);
+        Ok((stdout?, stderr?))
+    }
+
+    /// Best-effort text from both threads, for logging after a kill.
+    /// Threads are not cancellable in std, so a thread still blocked on
+    /// a pipe fd held open by a surviving grandchild contributes "".
+    fn partial(self, budget: Duration) -> (String, String) {
+        let (stdout, stderr) = join_with_deadline(self.stdout, self.stderr, budget);
+        (partial_text(stdout), partial_text(stderr))
+    }
+}
+
+#[cfg(feature = "sync")]
+fn spawn_capture_thread<R: std::io::Read + Send + 'static>(
+    reader: R,
+    limit: Option<usize>,
+    code: u8,
+    breached: &std::sync::Arc<std::sync::atomic::AtomicU8>,
+) -> std::thread::JoinHandle<std::io::Result<Captured>> {
+    let breached = std::sync::Arc::clone(breached);
+    std::thread::spawn(move || {
+        let outcome = capture_sync(reader, limit);
+        if matches!(outcome, Ok(Captured::Exceeded { .. })) {
+            // First breach wins, so the reported stream is the one that
+            // actually stopped the run.
+            let _ = breached.compare_exchange(
+                breach::NONE,
+                code,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        }
+        outcome
+    })
+}
+
+#[cfg(feature = "sync")]
+fn join_capture(
+    handle: std::thread::JoinHandle<std::io::Result<Captured>>,
+    stream: crate::OutputStream,
+    limit: Option<usize>,
+    working_dir: Option<&std::path::Path>,
+) -> Result<String> {
+    match handle.join() {
+        Ok(Ok(Captured::Complete(text))) => Ok(text),
+        Ok(Ok(Captured::Exceeded { head })) => {
+            let limit_bytes = limit.unwrap_or_default();
+            warn!(
+                %stream,
+                limit_bytes,
+                head = %head,
+                "captured output exceeded its ceiling; terminating the child",
+            );
+            Err(Error::OutputLimitExceeded {
+                stream,
+                limit_bytes,
+            })
+        }
+        Ok(Err(source)) => Err(Error::Io {
+            message: format!("failed to read claude {stream}: {source}"),
+            source,
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        }),
+        Err(_) => Err(Error::Io {
+            message: format!("claude {stream} capture thread panicked"),
+            source: std::io::Error::other(format!("{stream} capture thread panicked")),
+            working_dir: working_dir.map(|p| p.to_path_buf()),
+        }),
+    }
+}
+
+#[cfg(feature = "sync")]
+fn partial_text(outcome: Option<std::io::Result<Captured>>) -> String {
+    match outcome {
+        Some(Ok(Captured::Complete(text) | Captured::Exceeded { head: text })) => text,
+        Some(Err(_)) | None => String::new(),
+    }
+}
+
+/// Outcome of waiting on a blocking child.
+#[cfg(feature = "sync")]
+enum SyncWait {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    /// A capture thread passed its ceiling, so the child is stalled on a
+    /// full pipe and has to be taken down.
+    Breached(crate::OutputStream),
+}
+
+/// Wait for `child`, up to `deadline` if there is one, giving up early
+/// if `watch` reports a ceiling breach.
+#[cfg(feature = "sync")]
+fn wait_for_child_sync(
+    child: &mut std::process::Child,
+    deadline: Option<Duration>,
+    watch: Option<&std::sync::atomic::AtomicU8>,
+) -> std::io::Result<SyncWait> {
+    use std::sync::atomic::Ordering;
+    use wait_timeout::ChildExt;
+
+    // No ceiling: nothing can interrupt this, so block rather than
+    // waking up to poll a flag that will never be set.
+    let Some(watch) = watch else {
+        return Ok(match deadline {
+            Some(deadline) => child
+                .wait_timeout(deadline)?
+                .map_or(SyncWait::TimedOut, SyncWait::Exited),
+            None => SyncWait::Exited(child.wait()?),
+        });
+    };
+
+    let expiry = deadline.map(|d| std::time::Instant::now() + d);
+    loop {
+        if let Some(stream) = breach::stream(watch.load(Ordering::Acquire)) {
+            return Ok(SyncWait::Breached(stream));
+        }
+        let mut tick = BREACH_POLL_INTERVAL;
+        if let Some(expiry) = expiry {
+            let remaining = expiry.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(SyncWait::TimedOut);
+            }
+            tick = tick.min(remaining);
+        }
+        if let Some(status) = child.wait_timeout(tick)? {
+            return Ok(SyncWait::Exited(status));
+        }
+    }
+}
+
+/// The per-run settings [`finish_sync_run`] needs, bundled because
+/// threading them individually pushes it past clippy's argument
+/// threshold.
+#[cfg(feature = "sync")]
+struct SyncRun<'a> {
+    binary: &'a std::path::Path,
+    args: &'a [String],
+    working_dir: Option<&'a std::path::Path>,
+    deadline: Option<Duration>,
+    kill_grace: Option<Duration>,
+    output_limit: Option<usize>,
+}
+
+/// Wait out a spawned blocking child whose capture threads are already
+/// running, and turn the result into a [`CommandOutput`] or an error.
+///
+/// Shared by the plain and stdin-prompt blocking paths, which differ
+/// only in what they do between spawning and waiting.
+#[cfg(feature = "sync")]
+fn finish_sync_run(
+    child: &mut std::process::Child,
+    group: &mut GroupKillGuard,
+    capture: SyncCapture,
+    run: SyncRun<'_>,
+) -> Result<CommandOutput> {
+    let waited = match wait_for_child_sync(child, run.deadline, capture.watch()) {
+        Ok(waited) => waited,
+        Err(source) => {
+            stop_and_reap_sync(child, group, run.kill_grace);
+            return Err(Error::Io {
+                message: "failed to wait for claude process".to_string(),
+                source,
+                working_dir: run.working_dir.map(|p| p.to_path_buf()),
+            });
+        }
+    };
+
+    match waited {
+        SyncWait::Exited(status) => {
             group.disarm();
-            let stdout = stdout_thread.join().unwrap_or_default();
-            let stderr = stderr_thread.join().unwrap_or_default();
+            // A ceiling breach can still surface here when the child
+            // exited in the same instant it tripped, which is why the
+            // capture outcome is checked regardless of exit status.
+            let (stdout, stderr) = capture.settle(run.working_dir)?;
             let exit_code = status.code().unwrap_or(-1);
 
             if !status.success() {
                 return Err(Error::from_command_failure(
-                    format!("{} {}", binary.display(), args.join(" ")),
+                    format!("{} {}", run.binary.display(), run.args.join(" ")),
                     exit_code,
                     stdout,
                     stderr,
-                    working_dir.map(|p| p.to_path_buf()),
+                    run.working_dir.map(|p| p.to_path_buf()),
                 ));
             }
 
@@ -1767,40 +1912,46 @@ fn run_with_timeout_sync(
                 success: true,
             })
         }
-        None => {
-            // Timeout: take down the whole group, honoring the
-            // optional SIGTERM grace, then kill+reap the direct
-            // child. The group kill takes down subprocesses that
-            // could otherwise hold our pipe fds open and block the
-            // drain threads; the capped join below stays as a
-            // backstop.
-            kill_group_with_grace_sync(&mut group, kill_grace);
-            let _ = child.kill();
-            let _ = child.wait();
-
-            let (stdout_str, stderr_str) =
-                join_with_deadline(stdout_thread, stderr_thread, Duration::from_millis(200));
-
-            if !stdout_str.is_empty() || !stderr_str.is_empty() {
-                warn!(
-                    stdout = %stdout_str,
-                    stderr = %stderr_str,
-                    "partial output from timed-out process",
-                );
-            }
-
+        // Take down the whole group first (subprocesses may hold our
+        // pipe fds), honoring the optional SIGTERM grace, then kill and
+        // reap the direct child.
+        SyncWait::TimedOut => {
+            stop_and_reap_sync(child, group, run.kill_grace);
+            log_partial(capture, "partial output from timed-out process");
             Err(Error::Timeout {
-                timeout_seconds: timeout.as_secs(),
+                timeout_seconds: run.deadline.unwrap_or_default().as_secs(),
+            })
+        }
+        SyncWait::Breached(stream) => {
+            stop_and_reap_sync(child, group, run.kill_grace);
+            log_partial(capture, "partial output from over-limit process");
+            Err(Error::OutputLimitExceeded {
+                stream,
+                limit_bytes: run.output_limit.unwrap_or_default(),
             })
         }
     }
 }
 
 #[cfg(feature = "sync")]
-fn drain_sync<R: std::io::Read>(mut reader: R) -> String {
-    let mut buf = Vec::new();
-    let _ = reader.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
+fn log_partial(capture: SyncCapture, message: &'static str) {
+    let (stdout, stderr) = capture.partial(PARTIAL_CAPTURE_BUDGET);
+    if !stdout.is_empty() || !stderr.is_empty() {
+        warn!(stdout = %stdout, stderr = %stderr, "{message}");
+    }
+}
+
+/// Kill the child's whole process group (honoring the grace) and reap
+/// the direct child. Blocking mirror of [`stop_and_reap`].
+#[cfg(feature = "sync")]
+fn stop_and_reap_sync(
+    child: &mut std::process::Child,
+    group: &mut GroupKillGuard,
+    grace: Option<Duration>,
+) {
+    kill_group_with_grace_sync(group, grace);
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Blocking mirror of [`spawn_retrying_txtbsy`]. See that function for why
@@ -1835,76 +1986,38 @@ fn spawn_retrying_txtbsy_sync(
 #[cfg(feature = "sync")]
 /// Run to completion, reporting the child to `on_spawn` first.
 ///
-/// `Command::output` is `spawn` followed by `wait_with_output`, so splitting
-/// the two is behaviour-identical and makes the pid observable on a path that
-/// otherwise never exposes it.
+/// Wait for both capture threads to finish, returning `None` for any
+/// that misses the deadline. Threads aren't cancellable in std; if the
+/// child's subprocesses are still holding a pipe fd open after kill(),
+/// the capture thread leaks. That's a pathological case; the common
+/// timeout path with a responsive child joins in microseconds.
 #[cfg(feature = "sync")]
-fn output_retrying_txtbsy_sync_observed(
-    cmd: &mut std::process::Command,
-    process_group: bool,
-    on_spawn: Option<&crate::SpawnObserver>,
-) -> std::io::Result<std::process::Output> {
-    // `Command::output` pipes stdout and stderr implicitly; `spawn` does not,
-    // so setting them here keeps this split behaviour-identical rather than
-    // silently returning empty captures.
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let start = std::time::Instant::now();
-    let mut backoff = Duration::from_millis(1);
-    loop {
-        let spawned = cmd.spawn().inspect(|child| {
-            if let Some(observer) = on_spawn {
-                let pid = child.id();
-                observer(crate::SpawnInfo {
-                    pid,
-                    pgid: process_group.then_some(pid),
-                });
-            }
-        });
-        match spawned.and_then(std::process::Child::wait_with_output) {
-            Err(e)
-                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
-                    && start.elapsed() < TXTBSY_RETRY_BUDGET =>
-            {
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(TXTBSY_MAX_BACKOFF);
-            }
-            other => return other,
-        }
-    }
-}
-
-/// Wait for both drain threads to finish, returning "" for any that
-/// miss the deadline. Threads aren't cancellable in std; if the child's
-/// subprocesses are still holding a pipe fd open after kill(), the
-/// drain thread leaks. That's a pathological case; the common timeout
-/// path with a responsive child joins in microseconds.
-#[cfg(feature = "sync")]
-fn join_with_deadline(
-    stdout_thread: std::thread::JoinHandle<String>,
-    stderr_thread: std::thread::JoinHandle<String>,
+fn join_with_deadline<T: Send + 'static>(
+    stdout_thread: std::thread::JoinHandle<T>,
+    stderr_thread: std::thread::JoinHandle<T>,
     budget: Duration,
-) -> (String, String) {
+) -> (Option<T>, Option<T>) {
     use std::sync::mpsc;
     use std::thread;
 
-    let (tx, rx) = mpsc::channel::<(&'static str, String)>();
+    let (tx, rx) = mpsc::channel::<(&'static str, T)>();
 
     let tx_out = tx.clone();
     let tx_err = tx;
 
     thread::spawn(move || {
-        let s = stdout_thread.join().unwrap_or_default();
-        let _ = tx_out.send(("stdout", s));
+        if let Ok(value) = stdout_thread.join() {
+            let _ = tx_out.send(("stdout", value));
+        }
     });
     thread::spawn(move || {
-        let s = stderr_thread.join().unwrap_or_default();
-        let _ = tx_err.send(("stderr", s));
+        if let Ok(value) = stderr_thread.join() {
+            let _ = tx_err.send(("stderr", value));
+        }
     });
 
-    let mut stdout = String::new();
-    let mut stderr = String::new();
+    let mut stdout = None;
+    let mut stderr = None;
     let deadline = std::time::Instant::now() + budget;
 
     for _ in 0..2 {
@@ -1913,8 +2026,8 @@ fn join_with_deadline(
             break;
         }
         match rx.recv_timeout(deadline - now) {
-            Ok(("stdout", s)) => stdout = s,
-            Ok(("stderr", s)) => stderr = s,
+            Ok(("stdout", value)) => stdout = Some(value),
+            Ok(("stderr", value)) => stderr = Some(value),
             Ok(_) => unreachable!(),
             Err(_) => break,
         }
@@ -2313,6 +2426,190 @@ mod tests {
         ))
     }
 
+    /// A `claude` stand-in that prints `bytes` bytes to `stream` and
+    /// exits successfully.
+    fn spew_script(stream: &str, bytes: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let redirect = if stream == "stderr" { ">&2" } else { "" };
+        fake_script(&format!(
+            "head -c {bytes} /dev/zero | tr '\\0' 'x' {redirect}\nexit 0"
+        ))
+    }
+
+    fn limited_client(path: &std::path::Path, limit: usize) -> Claude {
+        Claude::builder()
+            .binary(path)
+            .output_limit(limit)
+            .build()
+            .expect("build client")
+    }
+
+    fn assert_limit_error(error: &Error, want_stream: crate::OutputStream, want_limit: usize) {
+        match error {
+            Error::OutputLimitExceeded {
+                stream,
+                limit_bytes,
+            } => {
+                assert_eq!(*stream, want_stream);
+                assert_eq!(*limit_bytes, want_limit);
+            }
+            other => panic!("expected OutputLimitExceeded, got: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdout_over_limit_is_typed_not_truncated() {
+        let (_dir, path) = spew_script("stdout", 64 * 1024);
+        let error = run_claude(&limited_client(&path, 4096), vec![])
+            .await
+            .expect_err("over-limit stdout must fail");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stderr_over_limit_names_stderr() {
+        let (_dir, path) = spew_script("stderr", 64 * 1024);
+        let error = run_claude(&limited_client(&path, 4096), vec![])
+            .await
+            .expect_err("over-limit stderr must fail");
+        assert_limit_error(&error, crate::OutputStream::Stderr, 4096);
+    }
+
+    // The ceiling is a ceiling, not a threshold: output exactly at it
+    // is a complete answer and must come back as one.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_output_at_limit_succeeds() {
+        let (_dir, path) = fake_script(r#"printf 'abcde'"#);
+        let out = run_claude(&limited_client(&path, 5), vec![])
+            .await
+            .expect("output at the ceiling is complete");
+        assert_eq!(out.stdout, "abcde");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_unset_limit_leaves_large_output_intact() {
+        let (_dir, path) = spew_script("stdout", 256 * 1024);
+        let out = run_claude(&client(&path), vec![])
+            .await
+            .expect("no ceiling means no failure");
+        assert_eq!(out.stdout.len(), 256 * 1024);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stdin_prompt_path_honors_limit() {
+        let (_dir, path) = spew_script("stdout", 64 * 1024);
+        let error = run_claude_with_stdin_prompt_sync_free(&limited_client(&path, 4096))
+            .await
+            .expect_err("over-limit stdout must fail on the stdin path");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+    }
+
+    #[cfg(feature = "async")]
+    async fn run_claude_with_stdin_prompt_sync_free(claude: &Claude) -> Result<CommandOutput> {
+        run_claude_with_stdin_prompt(claude, vec![], "prompt".to_string()).await
+    }
+
+    // A breach has to settle the child the way a timeout does, or the
+    // ceiling just changes which error the caller sees while the
+    // runaway keeps running.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_limit_breach_kills_process_group() {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let pid_path = workdir.path().join("pid");
+        let gpid_path = workdir.path().join("gpid");
+        let (_dir, path) = fake_script(&format!(
+            concat!(
+                "bash -c 'echo $$ > \"$0\"; exec sleep 300' \"{g}\" &\n",
+                "until [[ -s \"{g}\" ]]; do sleep 0.01; done\n",
+                "echo $$ > \"{p}\"\n",
+                "head -c 65536 /dev/zero | tr '\\0' 'x'\n",
+                "exec sleep 300",
+            ),
+            g = gpid_path.display(),
+            p = pid_path.display(),
+        ));
+        let error = run_claude(&limited_client(&path, 4096), vec![])
+            .await
+            .expect_err("over-limit stdout must fail");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+
+        let pid = try_read_pid(&pid_path).expect("child recorded its pid");
+        let gpid = try_read_pid(&gpid_path).expect("grandchild recorded its pid");
+        assert_pid_killed(pid);
+        assert_pid_killed(gpid);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_stdout_over_limit_is_typed_not_truncated() {
+        let (_dir, path) = spew_script("stdout", 64 * 1024);
+        let error = run_claude_sync(&limited_client(&path, 4096), vec![])
+            .expect_err("over-limit stdout must fail");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_stderr_over_limit_names_stderr() {
+        let (_dir, path) = spew_script("stderr", 64 * 1024);
+        let error = run_claude_sync(&limited_client(&path, 4096), vec![])
+            .expect_err("over-limit stderr must fail");
+        assert_limit_error(&error, crate::OutputStream::Stderr, 4096);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_output_at_limit_succeeds() {
+        let (_dir, path) = fake_script(r#"printf 'abcde'"#);
+        let out = run_claude_sync(&limited_client(&path, 5), vec![])
+            .expect("output at the ceiling is complete");
+        assert_eq!(out.stdout, "abcde");
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_unset_limit_leaves_large_output_intact() {
+        let (_dir, path) = spew_script("stdout", 256 * 1024);
+        let out = run_claude_sync(&client(&path), vec![]).expect("no ceiling means no failure");
+        assert_eq!(out.stdout.len(), 256 * 1024);
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_stdin_prompt_path_honors_limit() {
+        let (_dir, path) = spew_script("stdout", 64 * 1024);
+        let error =
+            run_claude_with_stdin_prompt_sync(&limited_client(&path, 4096), vec![], "p".into())
+                .expect_err("over-limit stdout must fail on the stdin path");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+    }
+
+    // The blocking waiter polls for a breach rather than being woken,
+    // so this also covers the child being unblocked from a full pipe on
+    // a path that has no deadline of its own.
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_limit_breach_terminates_a_child_with_no_deadline() {
+        let (_dir, path) = fake_script(concat!(
+            "head -c 65536 /dev/zero | tr '\\0' 'x'\n",
+            "exec sleep 300",
+        ));
+        let started = std::time::Instant::now();
+        let error = run_claude_sync(&limited_client(&path, 4096), vec![])
+            .expect_err("over-limit stdout must fail");
+        assert_limit_error(&error, crate::OutputStream::Stdout, 4096);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "breach must not wait out the child, took {:?}",
+            started.elapsed(),
+        );
+    }
+
     /// Read a pid recorded by `group_script`, if fully written yet.
     fn try_read_pid(path: &std::path::Path) -> Option<u32> {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -2666,15 +2963,6 @@ mod tests {
         let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
         let err =
             spawn_retrying_txtbsy_sync(&mut cmd).expect_err("spawn of missing binary should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
-    }
-
-    #[cfg(feature = "sync")]
-    #[test]
-    fn sync_output_retry_passes_through_non_txtbsy_error() {
-        let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary");
-        let err = output_retrying_txtbsy_sync_observed(&mut cmd, false, None)
-            .expect_err("output of missing binary should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got: {err:?}");
     }
 
