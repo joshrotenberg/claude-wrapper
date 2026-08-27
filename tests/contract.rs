@@ -5,8 +5,14 @@
 //! remove or rename a flag and CI stays green until a user reports it.
 //!
 //! This suite builds a maximal command from each builder, collects the flags it
-//! emits, and checks them against the live binary's help. It answers one
-//! question: **does the CLI still list what we emit.**
+//! emits, and checks them against the live binary's help. It answers two
+//! questions, one per direction:
+//!
+//! - **Does the CLI still list what we emit.** Catches a removal or a rename
+//!   of something the wrapper depends on.
+//! - **Does the wrapper account for everything the CLI lists.** Catches the
+//!   wrapper falling behind, which is the direction that moves: across
+//!   2.1.98 to 2.1.234 the CLI added eleven root flags and removed one.
 //!
 //! Run it with a `claude` binary on PATH:
 //!
@@ -40,6 +46,17 @@
 //! `Examples:` section whose sample invocations are also two-space indented and
 //! contain flags, which a naive parse would mistake for the contract.
 //!
+//! # Coverage
+//!
+//! A flag the CLI lists is covered when a builder emits it or [`DECLINED`]
+//! records why not. Anything else fails, which is what makes a new upstream
+//! flag visible rather than silently unsupported.
+//!
+//! Alias spellings travel together: `-p, --print` is one option, so emitting
+//! `--print` covers `-p`, and emitting `--allowed-tools` covers the
+//! `--allowedTools` alias listed beside it. [`parse_help_options`] keeps that
+//! grouping; [`parse_help_flags`] flattens it for the other direction.
+//!
 //! # Hidden flags
 //!
 //! A flag can vanish from help while still functioning. That is not a false
@@ -52,8 +69,10 @@
 //!
 //! - **Flag semantics.** A flag that still exists but means something new
 //!   passes here. The wrapper's own tests cover intent, not meaning.
-//! - **Flags the CLI offers that no builder wraps.** That is coverage, tracked
-//!   separately; this suite is about drift in what we already emit.
+//! - **Whether a flag the wrapper declines is one it should wrap.** The
+//!   coverage direction only asks that every flag has been looked at, not that
+//!   the answer was right. [`DECLINED`] carries the reasoning so the answer is
+//!   reviewable.
 //! - **Config keys.** The Claude CLI has no `-c key=value` override surface
 //!   with a strict mode, so the sibling crate's sentinel-probe half has no
 //!   equivalent here. If one appears, it belongs in this file.
@@ -83,12 +102,8 @@ const KNOWN_HIDDEN: &[(&str, &str, &str)] = &[(
          QueryCommand::max_turns and DuplexOptions::max_turns.",
 )];
 
-/// Parse the flags a `claude` help page lists.
-///
-/// Returns every option token, including aliases: the CLI lists
-/// `--allowedTools, --allowed-tools <tools...>` and both spellings count as
-/// present.
-fn help_flags(subcommand: &[&str]) -> HashSet<String> {
+/// The raw help text for `subcommand`.
+fn help_text(subcommand: &[&str]) -> String {
     // `CLAUDE_CONTRACT_BIN` points the suite at a specific binary, which is how
     // a floor gets established: install several versions side by side and run
     // the real check against each rather than hand-maintaining a flag list.
@@ -103,18 +118,41 @@ fn help_flags(subcommand: &[&str]) -> HashSet<String> {
     let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("running `{binary} {} --help`: {e}", subcommand.join(" ")));
-    let text = format!(
+    format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
-    parse_help_flags(&text)
+    )
+}
+
+/// Parse the flags a `claude` help page lists.
+///
+/// Returns every option token, including aliases: the CLI lists
+/// `--allowedTools, --allowed-tools <tools...>` and both spellings count as
+/// present.
+fn help_flags(subcommand: &[&str]) -> HashSet<String> {
+    parse_help_flags(&help_text(subcommand))
+}
+
+/// As [`help_flags`], keeping each option's spellings together.
+fn help_options(subcommand: &[&str]) -> Vec<Vec<String>> {
+    parse_help_options(&help_text(subcommand))
 }
 
 /// The parsing half of [`help_flags`], split out so it is testable without a
 /// binary. See the module docs for the format.
 fn parse_help_flags(text: &str) -> HashSet<String> {
-    let mut flags = HashSet::new();
+    parse_help_options(text).into_iter().flatten().collect()
+}
+
+/// As [`parse_help_flags`], keeping each option's spellings together.
+///
+/// The coverage direction needs the grouping that the flat set throws away:
+/// `-p, --print` is one option, so emitting `--print` covers `-p`, and
+/// emitting `--allowed-tools` covers the `--allowedTools` alias beside it.
+/// Flattened, every alias reads as a separate uncovered flag.
+fn parse_help_options(text: &str) -> Vec<Vec<String>> {
+    let mut options = Vec::new();
     let mut in_options = false;
     for line in text.lines() {
         if line.trim() == "Options:" {
@@ -148,14 +186,17 @@ fn parse_help_flags(text: &str) -> HashSet<String> {
             .split(" [")
             .next()
             .unwrap_or(rest);
-        for token in head.split(',') {
-            let token = token.trim();
-            if token.starts_with('-') {
-                flags.insert(token.to_string());
-            }
+        let spellings: Vec<String> = head
+            .split(',')
+            .map(str::trim)
+            .filter(|token| token.starts_with('-'))
+            .map(str::to_string)
+            .collect();
+        if !spellings.is_empty() {
+            options.push(spellings);
         }
     }
-    flags
+    options
 }
 
 /// The flags a rendered command string carries.
@@ -220,6 +261,205 @@ fn assert_flags_listed(label: &str, subcommand: &[&str], flags: Vec<String>) {
     );
 }
 
+/// Flags the CLI lists that no builder emits, on purpose.
+///
+/// The companion to [`KNOWN_HIDDEN`], in the other direction. An entry records
+/// a decision that this flag is not the wrapper's to wrap, so the coverage
+/// check stays quiet about it; a flag the CLI gains that is not here fails the
+/// suite until someone wraps it or decides not to.
+///
+/// Declaring any one spelling covers the whole option: `-p` and `--print` are
+/// one entry, not two.
+///
+/// Format: `(flag, subcommand-path, reason)`. A subcommand-path of
+/// [`ANY_SUBCOMMAND`] applies everywhere, for the options commander.js puts on
+/// every command.
+const DECLINED: &[(&str, &str, &str)] = &[
+    // Not a wrapper's business: commander.js puts these on every command.
+    (
+        "--help",
+        ANY_SUBCOMMAND,
+        "help output, not a builder option",
+    ),
+    (
+        "--version",
+        ANY_SUBCOMMAND,
+        "read by Claude::cli_version, which spawns `claude --version` \
+         directly rather than through a command builder",
+    ),
+    // Interactive-only: these configure a terminal session, which the wrapper
+    // does not start. Every builder runs headless.
+    (
+        "--ide",
+        "",
+        "connects an interactive session to a running IDE; there is no \
+         session for a headless run to connect",
+    ),
+    (
+        "--chrome",
+        "",
+        "Claude in Chrome integration, interactive-only",
+    ),
+    (
+        "--no-chrome",
+        "",
+        "disables the Chrome integration; listed separately from --chrome \
+         rather than as an alias of it",
+    ),
+    (
+        "--ax-screen-reader",
+        "",
+        "renders screen-reader friendly TUI output; the wrapper parses \
+         stream-json, not rendered text",
+    ),
+    (
+        "--background",
+        "",
+        "starts the session as a background agent, which is the CLI owning a \
+         process lifecycle the wrapper owns itself (--bg is the same option)",
+    ),
+    (
+        "--remote-control",
+        "",
+        "starts an interactive session with Remote Control enabled",
+    ),
+    (
+        "--remote-control-session-name-prefix",
+        "",
+        "names auto-generated Remote Control sessions; only meaningful with \
+         --remote-control",
+    ),
+    // Applicable but not yet wrapped. These are gaps, not decisions: each one
+    // works headless or governs a surface the wrapper already models. Tracked
+    // in https://github.com/joshrotenberg/claude-wrapper/issues/799, and each
+    // entry goes away with the change that wraps it.
+    (
+        "--forward-subagent-text",
+        "",
+        "unwrapped gap, see issue #799: works only with --print and \
+         --output-format=stream-json, which is what the wrapper runs",
+    ),
+    (
+        "--autocompact",
+        "",
+        "unwrapped gap, see issue #799: spawn-time context window setting, \
+         where slash.rs already builds the /compact operation",
+    ),
+    (
+        "--allow-dangerously-skip-permissions",
+        "",
+        "unwrapped gap, see issue #799: the weaker form of the flag \
+         DangerousClient already emits, making bypass available rather than \
+         active",
+    ),
+    (
+        "--cloud",
+        "",
+        "unwrapped gap, see issue #799: a session source alongside --resume \
+         and --from-pr",
+    ),
+    (
+        "--environment",
+        "",
+        "unwrapped gap, see issue #799: selects the self-hosted environment \
+         for a --cloud session",
+    ),
+    (
+        "--teleport",
+        "",
+        "unwrapped gap, see issue #799: resumes a teleport session",
+    ),
+    (
+        "--config",
+        "plugin install",
+        "unwrapped gap, see issue #799: sets a plugin userConfig option \
+         non-interactively",
+    ),
+    (
+        "--mcp-debug",
+        "",
+        "deprecated MCP debug flag present at the declared floor and removed \
+         upstream by 2.1.220; never wrapped, and nothing to wrap now",
+    ),
+    (
+        "--yes",
+        "plugin install",
+        "unwrapped gap, see issue #799: PluginUninstallCommand and \
+         PluginPruneCommand have yes(), PluginInstallCommand does not, and \
+         the CLI documents it as required when stdout is not a TTY",
+    ),
+];
+
+/// A [`DECLINED`] scope matching every subcommand path.
+const ANY_SUBCOMMAND: &str = "*";
+
+/// Every flag the wrapper can emit at the root.
+///
+/// A union across builders rather than one command, because the flags that
+/// conflict with each other (`--continue` against `--resume`, the several
+/// hermetic scopes) still count as covered.
+fn all_root_flags() -> HashSet<String> {
+    let mut flags: HashSet<String> = HashSet::new();
+    flags.extend(emitted_flags(&maximal_query().args()));
+    flags.extend(emitted_flags(
+        &QueryCommand::new("p")
+            .resume("11111111-1111-1111-1111-111111111111")
+            .fork_session()
+            .args(),
+    ));
+    flags.extend(emitted_flags(
+        &QueryCommand::new("p").continue_session().args(),
+    ));
+    flags.extend(emitted_flags(
+        &QueryCommand::new("p").worktree_named("wt").args(),
+    ));
+    flags.extend(emitted_flags(&QueryCommand::new("p").hermetic().args()));
+    flags.extend(emitted_flags(&post_floor_query().args()));
+    for (_, cmd) in exclusive_query_commands() {
+        flags.extend(emitted_flags(&cmd.args()));
+    }
+    flags.extend(flags_in_command_string(&maximal_duplex_command()));
+    flags
+}
+
+/// Whether `flag` is a recorded decline for `sub_path`.
+fn is_declined(flag: &str, sub_path: &str) -> bool {
+    DECLINED.iter().any(|(declined, scope, _)| {
+        *declined == flag && (*scope == sub_path || *scope == ANY_SUBCOMMAND)
+    })
+}
+
+/// Assert the help for `subcommand` lists no option the wrapper neither emits
+/// nor has declined.
+///
+/// The inverse of [`assert_flags_listed`]. That one catches the CLI dropping
+/// something we depend on; this one catches the CLI gaining something we have
+/// not looked at, which is the direction the wrapper falls behind in.
+fn assert_help_is_covered(label: &str, subcommand: &[&str], emitted: &HashSet<String>) {
+    let options = help_options(subcommand);
+    assert!(
+        !options.is_empty(),
+        "{label}: parsed no options from `claude {} --help`; the help format \
+         probably changed and this check is now blind",
+        subcommand.join(" ")
+    );
+    let sub_path = subcommand.join(" ");
+    let mut uncovered: Vec<String> = options
+        .iter()
+        .filter(|spellings| !spellings.iter().any(|flag| emitted.contains(flag)))
+        .filter(|spellings| !spellings.iter().any(|flag| is_declined(flag, &sub_path)))
+        // Name the option by its longest spelling, which is the long form.
+        .filter_map(|spellings| spellings.iter().max_by_key(|s| s.len()).cloned())
+        .collect();
+    uncovered.sort();
+    assert!(
+        uncovered.is_empty(),
+        "{label}: `claude {sub_path} --help` lists {uncovered:?}, which no \
+         builder emits. Either wrap them or add them to DECLINED with a \
+         reason."
+    );
+}
+
 /// A `QueryCommand` exercising every flag-emitting setter we can combine in one
 /// invocation. Conflicting options (`--continue` with `--resume`, the several
 /// hermetic scopes) are covered by the separate cases below.
@@ -255,6 +495,80 @@ fn maximal_query() -> QueryCommand {
         .debug_filter("api")
         .debug_file("/tmp/debug.log")
         .no_session_persistence()
+        // Wrapped but previously unexercised: the coverage check surfaced
+        // that no maximal builder emitted these, so neither direction of the
+        // contract had ever checked them.
+        .bare()
+        .brief()
+        .tmux()
+        .disable_slash_commands()
+        .include_hook_events()
+        .name("contract")
+        .replay_user_messages(true)
+        .exclude_dynamic_system_prompt_sections()
+}
+
+/// Builder flags that the declared floor CLI does not list.
+///
+/// Kept out of [`maximal_query`] deliberately. The forward check runs against
+/// both ends of the declared range, and `claude 2.1.98`
+/// (`TESTED_CLI_VERSION_MIN`) has none of these, so including them there would
+/// fail the pinned floor job.
+///
+/// That failure is a real finding, not a test artifact: the builders emit
+/// flags the declared floor does not accept, so the declared range understates
+/// what the wrapper requires. Tracked in
+/// <https://github.com/joshrotenberg/claude-wrapper/issues/800>. This function
+/// exists so the coverage check still counts them as wrapped while that is
+/// decided; when the floor moves, fold these back into `maximal_query`.
+fn post_floor_query() -> QueryCommand {
+    QueryCommand::new("p")
+        .plugin_url("https://example.test/plugins")
+        .safe_mode()
+        .prompt_suggestions(true)
+}
+
+/// The query flags that cannot share an invocation with [`maximal_query`].
+///
+/// `--from-pr` selects the session source, so it conflicts with the session id
+/// that builder sets, and `--dangerously-skip-permissions` overrides the
+/// permission mode it sets.
+fn exclusive_query_commands() -> Vec<(&'static str, QueryCommand)> {
+    vec![
+        (
+            "QueryCommand::from_pr",
+            QueryCommand::new("p").from_pr("123"),
+        ),
+        (
+            "QueryCommand::dangerously_skip_permissions",
+            QueryCommand::new("p").dangerously_skip_permissions(),
+        ),
+    ]
+}
+
+/// `DuplexOptions` rendered as a command string.
+///
+/// It shares `SharedSpawnArgs` with `QueryCommand` but adds its own spawn-time
+/// flags, and exposes its argv only through `to_command_string`.
+fn maximal_duplex_command() -> String {
+    let opts = DuplexOptions::default()
+        .model("haiku")
+        .effort(Effort::Low)
+        .permission_mode(PermissionMode::Plan)
+        .allowed_tools(["Read"])
+        .disallowed_tools(["Write"])
+        .add_dir("/tmp")
+        .max_turns(2)
+        .max_budget_usd(0.25)
+        .append_system_prompt("x")
+        .agent("reviewer")
+        .mcp_config("/tmp/mcp.json")
+        .strict_mcp_config()
+        .session_id("11111111-1111-1111-1111-111111111111");
+    let claude = claude_wrapper::Claude::builder()
+        .build()
+        .expect("building a client for the command preview");
+    opts.to_command_string(&claude)
 }
 
 #[test]
@@ -262,6 +576,10 @@ fn maximal_query() -> QueryCommand {
 fn query_flags_are_still_documented() {
     let cmd = maximal_query();
     assert_flags_documented("QueryCommand", &[], &cmd.args());
+
+    for (label, cmd) in exclusive_query_commands() {
+        assert_flags_documented(label, &[], &cmd.args());
+    }
 }
 
 #[test]
@@ -294,27 +612,11 @@ fn query_isolation_flags_are_still_documented() {
 #[test]
 #[ignore = "requires a real claude binary"]
 fn duplex_flags_are_still_documented() {
-    // DuplexOptions shares SharedSpawnArgs with QueryCommand but adds its own
-    // spawn-time flags, so it is checked independently.
-    let opts = DuplexOptions::default()
-        .model("haiku")
-        .effort(Effort::Low)
-        .permission_mode(PermissionMode::Plan)
-        .allowed_tools(["Read"])
-        .disallowed_tools(["Write"])
-        .add_dir("/tmp")
-        .max_turns(2)
-        .max_budget_usd(0.25)
-        .append_system_prompt("x")
-        .agent("reviewer")
-        .mcp_config("/tmp/mcp.json")
-        .strict_mcp_config()
-        .session_id("11111111-1111-1111-1111-111111111111");
-    let claude = claude_wrapper::Claude::builder()
-        .build()
-        .expect("building a client for the command preview");
-    let rendered = opts.to_command_string(&claude);
-    assert_flags_listed("DuplexOptions", &[], flags_in_command_string(&rendered));
+    assert_flags_listed(
+        "DuplexOptions",
+        &[],
+        flags_in_command_string(&maximal_duplex_command()),
+    );
 }
 
 #[test]
@@ -344,6 +646,62 @@ fn plugin_family_flags_are_still_documented() {
 
     let install = PluginInstallCommand::new("p").scope(Scope::User);
     assert_flags_documented("plugin install", &["plugin", "install"], &install.args());
+}
+
+#[test]
+#[ignore = "requires a real claude binary"]
+fn root_help_is_fully_covered() {
+    assert_help_is_covered("root", &[], &all_root_flags());
+}
+
+#[test]
+#[ignore = "requires a real claude binary"]
+fn mcp_family_help_is_fully_covered() {
+    let add: HashSet<String> = emitted_flags(
+        &McpAddCommand::new("n", "https://example.test/mcp")
+            .transport(Transport::Http)
+            .scope(Scope::User)
+            .env("K", "V")
+            .header("Authorization: Bearer x")
+            .callback_port(8080)
+            .client_id("cid")
+            .client_secret()
+            .args(),
+    )
+    .into_iter()
+    .collect();
+    assert_help_is_covered("mcp add", &["mcp", "add"], &add);
+
+    let list: HashSet<String> = emitted_flags(&McpListCommand::new().args())
+        .into_iter()
+        .collect();
+    assert_help_is_covered("mcp list", &["mcp", "list"], &list);
+
+    let get: HashSet<String> = emitted_flags(&McpGetCommand::new("n").args())
+        .into_iter()
+        .collect();
+    assert_help_is_covered("mcp get", &["mcp", "get"], &get);
+
+    let remove: HashSet<String> =
+        emitted_flags(&McpRemoveCommand::new("n").scope(Scope::User).args())
+            .into_iter()
+            .collect();
+    assert_help_is_covered("mcp remove", &["mcp", "remove"], &remove);
+}
+
+#[test]
+#[ignore = "requires a real claude binary"]
+fn plugin_family_help_is_fully_covered() {
+    let list: HashSet<String> = emitted_flags(&PluginListCommand::new().json().available().args())
+        .into_iter()
+        .collect();
+    assert_help_is_covered("plugin list", &["plugin", "list"], &list);
+
+    let install: HashSet<String> =
+        emitted_flags(&PluginInstallCommand::new("p").scope(Scope::User).args())
+            .into_iter()
+            .collect();
+    assert_help_is_covered("plugin install", &["plugin", "install"], &install);
 }
 
 /// Guard against a vacuous suite.
@@ -438,6 +796,94 @@ Commands:
             "/b".to_string(),
         ];
         assert_eq!(emitted_flags(&args), vec!["--add-dir"]);
+    }
+
+    #[test]
+    fn parse_help_options_keeps_aliases_together() {
+        let options = parse_help_options(SAMPLE);
+        assert!(
+            options.contains(&vec![
+                "--allowedTools".to_string(),
+                "--allowed-tools".to_string()
+            ]),
+            "alias spellings must stay in one group; got {options:?}"
+        );
+        assert!(
+            options.contains(&vec!["-p".to_string(), "--print".to_string()]),
+            "a short form and its long form are one option; got {options:?}"
+        );
+    }
+
+    /// The flat and grouped parses must describe the same options, or the two
+    /// directions of the suite disagree about what the CLI offers.
+    #[test]
+    fn the_two_parses_agree() {
+        let flat = parse_help_flags(SAMPLE);
+        let grouped: HashSet<String> = parse_help_options(SAMPLE).into_iter().flatten().collect();
+        assert_eq!(flat, grouped);
+    }
+
+    /// Emitting one spelling covers the whole option. Without this, every
+    /// short form and camelCase alias reads as an uncovered flag.
+    #[test]
+    fn covering_one_spelling_covers_its_aliases() {
+        let emitted: HashSet<String> = ["--allowed-tools".to_string()].into_iter().collect();
+        let uncovered: Vec<Vec<String>> = parse_help_options(SAMPLE)
+            .into_iter()
+            .filter(|spellings| !spellings.iter().any(|f| emitted.contains(f)))
+            .collect();
+        assert!(
+            !uncovered
+                .iter()
+                .any(|group| group.iter().any(|f| f == "--allowedTools")),
+            "--allowedTools should be covered by --allowed-tools; got {uncovered:?}"
+        );
+    }
+
+    #[test]
+    fn declined_scopes_match_exactly_or_by_wildcard() {
+        assert!(
+            is_declined("--help", ""),
+            "wildcard scope must match the root"
+        );
+        assert!(
+            is_declined("--help", "mcp add"),
+            "wildcard scope must match a subcommand"
+        );
+        assert!(
+            is_declined("--config", "plugin install"),
+            "an exact scope must match itself"
+        );
+        assert!(
+            !is_declined("--config", ""),
+            "an exact scope must not leak to other subcommands"
+        );
+    }
+
+    #[test]
+    fn declined_entries_carry_a_reason() {
+        for (flag, _, reason) in DECLINED {
+            assert!(
+                reason.len() > 20,
+                "{flag}: DECLINED entries must say why, not just that"
+            );
+        }
+    }
+
+    /// A flag cannot be both emitted and declined: that means someone declined
+    /// something the wrapper actually wraps, and the decline is now a lie.
+    #[test]
+    fn declined_root_flags_are_not_also_emitted() {
+        let emitted = all_root_flags();
+        for (flag, scope, _) in DECLINED {
+            if !scope.is_empty() && *scope != ANY_SUBCOMMAND {
+                continue;
+            }
+            assert!(
+                !emitted.contains(*flag),
+                "{flag} is in DECLINED but a builder emits it"
+            );
+        }
     }
 
     #[test]

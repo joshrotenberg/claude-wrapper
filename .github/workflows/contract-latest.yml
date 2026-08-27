@@ -23,6 +23,11 @@ jobs:
   contract-latest:
     name: CLI contract (latest)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The failure path files an issue; without this the default token is
+      # read-only and the step fails after the drift it was reporting.
+      issues: write
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -54,15 +59,19 @@ jobs:
         # No auth and no tokens: every check reads `--help` only.
         run: cargo test --test contract --all-features -- --ignored
 
-      - name: Explain a failure
+      - name: Capture the failure
         if: failure()
         run: |
+          version=$(claude --version 2>/dev/null || echo "unknown")
           {
-            echo "### Drift detected"
+            echo "The weekly contract run against the latest published CLI failed."
             echo ""
-            echo "The latest published CLI no longer matches what the builders emit."
+            echo "- Resolved CLI: \`$version\`"
+            echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo ""
-            echo "This job does not gate PRs. To act on it:"
+            echo "Two directions can fail here, and they need different fixes."
+            echo ""
+            echo "**The CLI dropped something the builders emit.**"
             echo ""
             echo "1. If a flag was removed or renamed, fix the builder."
             echo "2. If a flag is still accepted but dropped from \`--help\`, add it"
@@ -71,4 +80,34 @@ jobs:
             echo "3. If the range should move, bump \`TESTED_CLI_VERSION_MAX\` and add"
             echo "   the version to the \`claude_version\` matrix in \`ci.yml\`; a unit"
             echo "   test enforces that those two agree."
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "**The CLI gained something no builder covers.**"
+            echo ""
+            echo "1. If the wrapper should support it, wrap it."
+            echo "2. If it is not a wrapper concern (interactive-only, IDE, TUI),"
+            echo "   add it to \`DECLINED\` in \`tests/contract.rs\` with the reason."
+            echo ""
+            echo "The failing test name says which direction: \`*_are_still_documented\`"
+            echo "is the first, \`*_is_fully_covered\` is the second."
+          } > drift-body.md
+          cat drift-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: File an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # One open issue at a time. Drift persists until someone acts on it, so
+        # filing per run would open a fresh issue every Monday for the same
+        # unaddressed problem; a comment on the existing one says it is still
+        # failing without burying the original.
+        run: |
+          title="contract: latest CLI no longer matches the builders"
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file drift-body.md
+            echo "commented on #$existing"
+          else
+            gh issue create --title "$title" --body-file drift-body.md
+          fi
