@@ -97,6 +97,7 @@ impl ClaudeCommand for PluginListCommand {
 pub struct PluginInstallCommand {
     plugin: String,
     scope: Option<Scope>,
+    config: Vec<(String, String)>,
 }
 
 impl PluginInstallCommand {
@@ -106,6 +107,7 @@ impl PluginInstallCommand {
         Self {
             plugin: plugin.into(),
             scope: None,
+            config: Vec::new(),
         }
     }
 
@@ -113,6 +115,15 @@ impl PluginInstallCommand {
     #[must_use]
     pub fn scope(mut self, scope: Scope) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Set a `userConfig` option declared in the plugin's manifest
+    /// (`--config key=value`). Repeatable; each call adds one option.
+    /// Values are validated against the manifest schema.
+    #[must_use]
+    pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.push((key.into(), value.into()));
         self
     }
 }
@@ -125,6 +136,10 @@ impl ClaudeCommand for PluginInstallCommand {
         if let Some(ref scope) = self.scope {
             args.push("--scope".to_string());
             args.push(scope.as_arg().to_string());
+        }
+        for (key, value) in &self.config {
+            args.push("--config".to_string());
+            args.push(format!("{key}={value}"));
         }
         args.push(self.plugin.clone());
         args
@@ -648,6 +663,53 @@ mod tests {
         assert_eq!(
             ClaudeCommand::args(&cmd),
             vec!["plugin", "install", "--scope", "user", "my-plugin"]
+        );
+    }
+
+    #[test]
+    fn test_plugin_install_with_config() {
+        let cmd = PluginInstallCommand::new("my-plugin").config("k", "v");
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec!["plugin", "install", "--config", "k=v", "my-plugin"]
+        );
+    }
+
+    #[test]
+    fn test_plugin_install_with_multiple_config() {
+        let cmd = PluginInstallCommand::new("my-plugin")
+            .config("a", "1")
+            .config("b", "2");
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec![
+                "plugin",
+                "install",
+                "--config",
+                "a=1",
+                "--config",
+                "b=2",
+                "my-plugin"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_plugin_install_with_scope_and_config() {
+        let cmd = PluginInstallCommand::new("my-plugin")
+            .scope(Scope::User)
+            .config("k", "v");
+        assert_eq!(
+            ClaudeCommand::args(&cmd),
+            vec![
+                "plugin",
+                "install",
+                "--scope",
+                "user",
+                "--config",
+                "k=v",
+                "my-plugin"
+            ]
         );
     }
 
