@@ -57,17 +57,42 @@ jobs:
 
       - name: Contract suite
         # No auth and no tokens: every check reads `--help` only.
-        run: cargo test --test contract --all-features -- --ignored
+        #
+        # Output is teed so the failure report can name the flags that drifted
+        # rather than telling a reader to go find this log. pipefail keeps the
+        # step's exit status the test's, not tee's.
+        run: |
+          set -o pipefail
+          cargo test --test contract --all-features -- --ignored 2>&1 \
+            | tee contract-output.txt
 
       - name: Capture the failure
         if: failure()
         run: |
           version=$(claude --version 2>/dev/null || echo "unknown")
+          # The assertion lines carry the flag names; both directions phrase it
+          # with "lists [...]", so one pattern catches either.
+          grep -E "lists \[" contract-output.txt > contract-drift.txt || true
           {
             echo "The weekly contract run against the latest published CLI failed."
             echo ""
             echo "- Resolved CLI: \`$version\`"
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo ""
+            echo "## What drifted"
+            echo ""
+            if [ -s contract-drift.txt ]; then
+              echo '```text'
+              cat contract-drift.txt
+              echo '```'
+            else
+              echo "The suite failed without a flag-level assertion, so the"
+              echo "cause is in the run log rather than here. A parse returning"
+              echo "no flags at all looks like this, and means the help format"
+              echo "changed and the suite is now blind."
+            fi
+            echo ""
+            echo "## How to fix it"
             echo ""
             echo "Two directions can fail here, and they need different fixes."
             echo ""
@@ -111,3 +136,32 @@ jobs:
           else
             gh issue create --title "$title" --body-file drift-body.md
           fi
+
+      - name: Close a resolved drift issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Without this the job can open an issue and never close it, so a
+        # report outlives the drift it describes and the next real failure
+        # comments onto a stale thread.
+        run: |
+          title="contract: latest CLI no longer matches the builders"
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -z "$existing" ]; then
+            echo "no open drift issue"
+            exit 0
+          fi
+          version=$(claude --version 2>/dev/null || echo "unknown")
+          {
+            echo "The weekly contract run is green against \`$version\`."
+            echo ""
+            echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo ""
+            echo "Closed automatically. If drift returns this job opens a new"
+            echo "issue rather than reopening this one, so each report matches"
+            echo "the run that found it."
+          } > resolved-body.md
+          gh issue close "$existing" --comment "$(cat resolved-body.md)"
+          echo "closed #$existing"

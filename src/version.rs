@@ -138,22 +138,33 @@ impl Ord for CliVersion {
     }
 }
 
-/// Lowest `claude` CLI version this crate supports.
+/// Lowest `claude` CLI version this crate is tested against.
 ///
-/// Below this the wrapper emits flags the CLI does not have. This is measured,
-/// not assumed: the contract suite (`tests/contract.rs`) bisected it. 2.1.97
-/// lacks `--exclude-dynamic-system-prompt-sections`, one of the three flags a
-/// hermetic seal emits, and 2.1.98 has it. That was the last flag of the
-/// emitted set to land, so 2.1.98 is the lowest version every builder is
-/// valid against.
+/// Below this the wrapper may emit flags the CLI does not have. The name is
+/// the exact claim: lowest *tested*, not lowest working. 2.1.220 is verified,
+/// by running the contract suite against it with every flag the builders emit;
+/// the true minimum is somewhere below and is not worth the releases it would
+/// take to find, because nothing rests on knowing it.
 ///
-/// Raising this is a support decision. Lowering it is a claim that must be
-/// re-measured, because the failure it prevents is silent: an invocation that
-/// looks right and is rejected by the binary.
+/// This was 2.1.98, described here as bisected. That was true of the subset
+/// the contract suite exercised at the time, and not true of the builders:
+/// `--plugin-url`, `--safe-mode`, and `--prompt-suggestions` were emitted by
+/// builders no maximal command covered, and 2.1.98 has none of them. The
+/// coverage check added in #797 surfaced that, and #800 resolved it by moving
+/// the floor to a version the whole emitted set is checked against rather than
+/// by teaching the suite to describe a range spanning 500-odd releases.
+///
+/// Raising this is a support decision, and a cheap one: the gate is opt-in via
+/// [`Claude::ensure_tested_cli_version`](crate::Claude::ensure_tested_cli_version),
+/// and a host pinned to an older CLI can set its own bounds with
+/// [`ClaudeBuilder::tested_cli_version_range`](crate::ClaudeBuilder::tested_cli_version_range).
+/// Lowering it is a claim that must be measured, because the failure it
+/// prevents is silent: an invocation that looks right and is rejected by the
+/// binary.
 pub const TESTED_CLI_VERSION_MIN: CliVersion = CliVersion {
     major: 2,
     minor: 1,
-    patch: 98,
+    patch: 220,
 };
 
 /// Highest `claude` CLI version this crate has been exercised against.

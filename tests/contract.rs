@@ -406,12 +406,6 @@ const DECLINED: &[(&str, &str, &str)] = &[
         "unwrapped gap, see issue #799: new registry selector needs a typed API audit",
     ),
     (
-        "--mcp-debug",
-        "",
-        "deprecated MCP debug flag present at the declared floor and removed \
-         upstream by 2.1.220; never wrapped, and nothing to wrap now",
-    ),
-    (
         "--yes",
         "plugin install",
         "unwrapped gap, see issue #799: PluginUninstallCommand and \
@@ -444,7 +438,6 @@ fn all_root_flags() -> HashSet<String> {
         &QueryCommand::new("p").worktree_named("wt").args(),
     ));
     flags.extend(emitted_flags(&QueryCommand::new("p").hermetic().args()));
-    flags.extend(emitted_flags(&post_floor_query().args()));
     for (_, cmd) in exclusive_query_commands() {
         flags.extend(emitted_flags(&cmd.args()));
     }
@@ -536,23 +529,6 @@ fn maximal_query() -> QueryCommand {
         .name("contract")
         .replay_user_messages(true)
         .exclude_dynamic_system_prompt_sections()
-}
-
-/// Builder flags that the declared floor CLI does not list.
-///
-/// Kept out of [`maximal_query`] deliberately. The forward check runs against
-/// both ends of the declared range, and `claude 2.1.98`
-/// (`TESTED_CLI_VERSION_MIN`) has none of these, so including them there would
-/// fail the pinned floor job.
-///
-/// That failure is a real finding, not a test artifact: the builders emit
-/// flags the declared floor does not accept, so the declared range understates
-/// what the wrapper requires. Tracked in
-/// <https://github.com/joshrotenberg/claude-wrapper/issues/800>. This function
-/// exists so the coverage check still counts them as wrapped while that is
-/// decided; when the floor moves, fold these back into `maximal_query`.
-fn post_floor_query() -> QueryCommand {
-    QueryCommand::new("p")
         .plugin_url("https://example.test/plugins")
         .safe_mode()
         .prompt_suggestions(true)
