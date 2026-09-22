@@ -477,7 +477,7 @@ where
     let mut stderr = child.stderr.take().expect("stderr was piped");
     let child_stdin = child.stdin.take();
 
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
 
     // Run stdout line reading and stderr draining concurrently so a
     // chatty child can't deadlock by filling the stderr pipe buffer.
@@ -623,7 +623,7 @@ enum StreamStop {
 
 #[cfg(all(feature = "json", feature = "async"))]
 async fn read_lines<F>(
-    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    reader: &mut BufReader<tokio::process::ChildStdout>,
     handler: &mut F,
     working_dir: Option<std::path::PathBuf>,
     output_limit: Option<usize>,
@@ -633,18 +633,9 @@ where
 {
     let mut diagnostics = ParseFailureDiagnostics::default();
     let mut captured_bytes = 0usize;
-    while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
-        message: "failed to read stdout line".to_string(),
-        source: e,
-        working_dir: working_dir.clone(),
-    })? {
-        captured_bytes = captured_bytes.saturating_add(line.len().saturating_add(1));
-        if output_limit.is_some_and(|limit| captured_bytes > limit) {
-            return Err(Error::OutputLimitExceeded {
-                stream: crate::OutputStream::Stdout,
-                limit_bytes: output_limit.unwrap_or_default(),
-            });
-        }
+    while let Some(line) =
+        read_bounded_line(reader, &mut captured_bytes, output_limit, &working_dir).await?
+    {
         if line.trim().is_empty() {
             continue;
         }
@@ -658,6 +649,57 @@ where
     }
 
     Ok(diagnostics)
+}
+
+#[cfg(all(feature = "json", feature = "async"))]
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    captured_bytes: &mut usize,
+    output_limit: Option<usize>,
+    working_dir: &Option<std::path::PathBuf>,
+) -> Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(|source| Error::Io {
+            message: "failed to read stdout line".to_string(),
+            source,
+            working_dir: working_dir.clone(),
+        })?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if output_limit.is_some_and(|limit| captured_bytes.saturating_add(take) > limit) {
+            return Err(Error::OutputLimitExceeded {
+                stream: crate::OutputStream::Stdout,
+                limit_bytes: output_limit.unwrap_or_default(),
+            });
+        }
+        line.extend_from_slice(&available[..take]);
+        *captured_bytes = captured_bytes.saturating_add(take);
+        let complete = line.last() == Some(&b'\n');
+        reader.consume(take);
+        if complete {
+            line.pop();
+            break;
+        }
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|source| Error::Io {
+            message: "failed to decode stdout line".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            working_dir: working_dir.clone(),
+        })
 }
 
 // ---------- sync streaming ----------

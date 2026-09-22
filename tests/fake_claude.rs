@@ -367,9 +367,11 @@ async fn streaming_enforces_the_raw_output_ceiling() {
     use claude_wrapper::streaming::{StreamEvent, stream_query};
 
     let claude = Claude::builder()
-        .binary(fake_binary())
-        .env("FAKE_CLAUDE_OUTPUT_BYTES", "4096")
+        .binary("/bin/bash")
+        .arg("-c")
+        .arg("for ((i=0; i<4096; i++)); do printf x; done; sleep 3")
         .output_limit(128)
+        .timeout(std::time::Duration::from_secs(1))
         .build()
         .expect("failed to build Claude client");
     let cmd = QueryCommand::new("large stream")
