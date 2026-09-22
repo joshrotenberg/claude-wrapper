@@ -362,6 +362,31 @@ async fn streaming_supports_prompts_over_stdin() {
     );
 }
 
+#[tokio::test]
+async fn streaming_enforces_the_raw_output_ceiling() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_OUTPUT_BYTES", "4096")
+        .output_limit(128)
+        .build()
+        .expect("failed to build Claude client");
+    let cmd = QueryCommand::new("large stream")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let result = stream_query(&claude, &cmd, |_: StreamEvent| {}).await;
+
+    assert!(matches!(
+        result,
+        Err(claude_wrapper::Error::OutputLimitExceeded {
+            stream: claude_wrapper::OutputStream::Stdout,
+            limit_bytes: 128,
+        })
+    ));
+}
+
 /// Verify that the result event contains the correct session_id, result text,
 /// and cost fields.
 #[tokio::test]

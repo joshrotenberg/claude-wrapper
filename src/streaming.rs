@@ -11,9 +11,9 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 #[cfg(all(feature = "json", feature = "async"))]
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(all(feature = "json", feature = "async"))]
-use tokio::process::{ChildStderr, Command};
+use tokio::process::Command;
 #[cfg(feature = "json")]
 use tracing::debug;
 #[cfg(all(feature = "json", feature = "sync"))]
@@ -483,7 +483,12 @@ where
     // chatty child can't deadlock by filling the stderr pipe buffer.
     // tokio::join! polls both futures on the same task (no tokio::spawn
     // needed, so we avoid pulling in the `rt` feature).
-    let drain = async { Ok::<_, Error>(drain_stderr(&mut stderr).await) };
+    let drain = crate::exec::capture_stream(
+        &mut stderr,
+        claude.output_limit,
+        crate::OutputStream::Stderr,
+        claude.working_dir.as_deref(),
+    );
     let write = async {
         let (Some(prompt), Some(mut stdin)) = (stdin_prompt, child_stdin) else {
             return Ok::<_, Error>(());
@@ -513,6 +518,7 @@ where
         &mut reader,
         &mut counting_handler,
         claude.working_dir.clone(),
+        claude.output_limit,
     );
     let wait = async {
         child.wait().await.map_err(|source| Error::Io {
@@ -616,27 +622,29 @@ enum StreamStop {
 }
 
 #[cfg(all(feature = "json", feature = "async"))]
-async fn drain_stderr(stderr: &mut ChildStderr) -> String {
-    let mut buf = Vec::new();
-    let _ = stderr.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-#[cfg(all(feature = "json", feature = "async"))]
 async fn read_lines<F>(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     handler: &mut F,
     working_dir: Option<std::path::PathBuf>,
+    output_limit: Option<usize>,
 ) -> Result<ParseFailureDiagnostics>
 where
     F: FnMut(StreamEvent),
 {
     let mut diagnostics = ParseFailureDiagnostics::default();
+    let mut captured_bytes = 0usize;
     while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
         message: "failed to read stdout line".to_string(),
         source: e,
         working_dir: working_dir.clone(),
     })? {
+        captured_bytes = captured_bytes.saturating_add(line.len().saturating_add(1));
+        if output_limit.is_some_and(|limit| captured_bytes > limit) {
+            return Err(Error::OutputLimitExceeded {
+                stream: crate::OutputStream::Stdout,
+                limit_bytes: output_limit.unwrap_or_default(),
+            });
+        }
         if line.trim().is_empty() {
             continue;
         }
