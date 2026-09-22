@@ -370,10 +370,40 @@ const DECLINED: &[(&str, &str, &str)] = &[
         "unwrapped gap, see issue #799: resumes a teleport session",
     ),
     (
+        "--permission-prompts",
+        "",
+        "unwrapped gap, see issue #799: chooses who answers headless permission prompts",
+    ),
+    (
+        "--restricted",
+        "",
+        "unwrapped gap, see issue #799: limits tools, settings, and file access in headless runs",
+    ),
+    (
+        "--system-prompt-snapshot",
+        "",
+        "unwrapped gap, see issue #799: controls prompt recording across requests and resumes",
+    ),
+    (
         "--config",
         "plugin install",
         "unwrapped gap, see issue #799: sets a plugin userConfig option \
          non-interactively",
+    ),
+    (
+        "--accept-command",
+        "plugin install",
+        "unwrapped gap, see issue #799: confirms one displayed plugin install command by hash",
+    ),
+    (
+        "--json",
+        "plugin install",
+        "unwrapped gap, see issue #799: requests a machine-readable install result",
+    ),
+    (
+        "--registry",
+        "plugin install",
+        "unwrapped gap, see issue #799: new registry selector needs a typed API audit",
     ),
     (
         "--mcp-debug",

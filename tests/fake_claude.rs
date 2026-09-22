@@ -336,6 +336,59 @@ async fn streaming_ndjson_parsed_correctly() {
     assert_eq!(events[2].event_type(), Some("result"));
 }
 
+#[tokio::test]
+async fn streaming_supports_prompts_over_stdin() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let capture = dir.path().join("stdin");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_STDIN_CAPTURE_FILE", capture.to_string_lossy())
+        .build()
+        .expect("failed to build Claude client");
+    let cmd = QueryCommand::new("private streamed prompt")
+        .prompt_via_stdin(true)
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    stream_query(&claude, &cmd, |_: StreamEvent| {})
+        .await
+        .expect("streaming stdin query should succeed");
+
+    assert_eq!(
+        std::fs::read_to_string(capture).expect("captured stdin"),
+        "private streamed prompt"
+    );
+}
+
+#[tokio::test]
+async fn streaming_enforces_the_raw_output_ceiling() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query};
+
+    let claude = Claude::builder()
+        .binary("/bin/bash")
+        .arg("-c")
+        .arg("for ((i=0; i<4096; i++)); do printf x; done; sleep 3")
+        .output_limit(128)
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+        .expect("failed to build Claude client");
+    let cmd = QueryCommand::new("large stream")
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+
+    let result = stream_query(&claude, &cmd, |_: StreamEvent| {}).await;
+
+    assert!(matches!(
+        result,
+        Err(claude_wrapper::Error::OutputLimitExceeded {
+            stream: claude_wrapper::OutputStream::Stdout,
+            limit_bytes: 128,
+        })
+    ));
+}
+
 /// Verify that the result event contains the correct session_id, result text,
 /// and cost fields.
 #[tokio::test]
@@ -1098,6 +1151,46 @@ async fn cancellable_json_query_settles_process_group() {
         .execute_json_cancellable(&claude, cancel)
         .await
         .expect_err("query must be cancelled");
+
+    assert!(matches!(error, claude_wrapper::Error::Cancelled));
+    assert_pid_killed(read_pid(&pid_path)).await;
+    assert_pid_killed(read_pid(&gpid_path)).await;
+}
+
+/// Explicit stream cancellation has the same settled process ownership
+/// contract as buffered execution.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellable_stream_query_settles_process_group() {
+    use claude_wrapper::streaming::{StreamEvent, stream_query_cancellable};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_path = dir.path().join("pid");
+    let gpid_path = dir.path().join("gpid");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_DELAY", "30")
+        .env("FAKE_CLAUDE_PID_FILE", pid_path.to_string_lossy())
+        .env(
+            "FAKE_CLAUDE_GRANDCHILD_PID_FILE",
+            gpid_path.to_string_lossy(),
+        )
+        .kill_grace(std::time::Duration::from_millis(10))
+        .build()
+        .expect("failed to build Claude client");
+    let cmd = QueryCommand::new("slow stream")
+        .prompt_via_stdin(true)
+        .output_format(OutputFormat::StreamJson)
+        .no_session_persistence();
+    let cancel = async {
+        while !pid_path.exists() || !gpid_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    let error = stream_query_cancellable(&claude, &cmd, cancel, |_: StreamEvent| {})
+        .await
+        .expect_err("stream must be cancelled");
 
     assert!(matches!(error, claude_wrapper::Error::Cancelled));
     assert_pid_killed(read_pid(&pid_path)).await;

@@ -476,7 +476,7 @@ where
 }
 
 #[cfg(feature = "async")]
-async fn stop_and_reap(
+pub(crate) async fn stop_and_reap(
     child: &mut tokio::process::Child,
     group: &mut GroupKillGuard,
     grace: Option<Duration>,
@@ -1193,7 +1193,7 @@ async fn capture<R: AsyncReadExt + Unpin>(
 /// previous `drain` discarded it with `let _`, which left a capture
 /// failure indistinguishable from an empty stream.
 #[cfg(feature = "async")]
-async fn capture_stream<R: AsyncReadExt + Unpin>(
+pub(crate) async fn capture_stream<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     limit: Option<usize>,
     stream: crate::OutputStream,

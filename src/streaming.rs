@@ -11,11 +11,13 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 #[cfg(all(feature = "json", feature = "async"))]
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(all(feature = "json", feature = "async"))]
-use tokio::process::{ChildStderr, Command};
+use tokio::process::Command;
 #[cfg(feature = "json")]
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(all(feature = "json", feature = "sync"))]
+use tracing::warn;
 
 #[cfg(feature = "json")]
 use crate::Claude;
@@ -360,33 +362,50 @@ pub async fn stream_query<F>(
 where
     F: FnMut(StreamEvent),
 {
-    stream_query_impl(claude, cmd, handler, claude.timeout).await
+    stream_query_impl(claude, cmd, handler, std::future::pending()).await
+}
+
+/// Execute a streaming query until it completes or `cancel` resolves.
+///
+/// Cancellation terminates the owned process group and reaps the direct child
+/// before returning [`Error::Cancelled`]. A configured client timeout uses
+/// the same settled cleanup path. Events dispatched before the stop signal are
+/// not rolled back.
+#[cfg(all(feature = "json", feature = "async"))]
+pub async fn stream_query_cancellable<C, F>(
+    claude: &Claude,
+    cmd: &crate::command::query::QueryCommand,
+    cancel: C,
+    handler: F,
+) -> Result<CommandOutput>
+where
+    C: std::future::Future<Output = ()> + Send,
+    F: FnMut(StreamEvent),
+{
+    stream_query_impl(claude, cmd, handler, cancel).await
 }
 
 /// Unified streaming implementation with optional timeout.
 ///
-/// Reads stderr concurrently in a background task so a chatty child
-/// cannot deadlock by filling the stderr pipe buffer, and so any
-/// captured stderr is available even on timeout or IO error.
-///
-/// On timeout, the child is killed and reaped (`kill().await` sends
-/// SIGKILL and waits), and whatever stderr was produced is logged at
-/// warn level. The returned `Error::Timeout` does not carry partial
-/// output -- streamed stdout events were already dispatched to the
-/// handler as they arrived.
+/// Drains stderr alongside stdout so a chatty child cannot block on a full
+/// pipe. Cancellation, timeout, and stream errors terminate the owned process
+/// group and reap the child before returning. Events already dispatched to the
+/// handler are not rolled back.
 #[cfg(all(feature = "json", feature = "async"))]
-async fn stream_query_impl<F>(
+async fn stream_query_impl<C, F>(
     claude: &Claude,
     cmd: &crate::command::query::QueryCommand,
     mut handler: F,
-    timeout: Option<Duration>,
+    cancel: C,
 ) -> Result<CommandOutput>
 where
+    C: std::future::Future<Output = ()> + Send,
     F: FnMut(StreamEvent),
 {
     use crate::command::ClaudeCommand;
 
     let args = cmd.args();
+    let stdin_prompt = cmd.stdin_prompt();
 
     let mut command_args = Vec::new();
     command_args.extend(claude.global_args.clone());
@@ -402,7 +421,7 @@ where
         command = crate::exec::span_command(&command_args),
         binary = %claude.binary.display(),
         cwd = claude.working_dir.as_deref().map(|d| d.display().to_string()),
-        timeout_secs = timeout.map(|t| t.as_secs()),
+        timeout_secs = claude.timeout.map(|t| t.as_secs()),
         outcome = tracing::field::Empty,
         events = tracing::field::Empty,
         exit_code = tracing::field::Empty,
@@ -415,7 +434,7 @@ where
     debug!(
         binary = %claude.binary.display(),
         args = ?command_args,
-        timeout = ?timeout,
+        timeout = ?claude.timeout,
         "streaming claude command"
     );
 
@@ -423,10 +442,14 @@ where
     cmd.args(&command_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
         // Dropping the in-flight future must kill the child, not leave
         // the CLI running unattended (see the `exec` module docs).
         .kill_on_drop(true);
+    if stdin_prompt.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
     crate::exec::apply_child_environment(cmd.as_std_mut(), claude.clear_env, &claude.env);
     // Own process group (Unix) so cancellation can signal the whole
     // tree, not just the direct child (see exec::GroupKillGuard). Opt
@@ -447,14 +470,39 @@ where
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
+    let child_stdin = child.stdin.take();
 
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
 
     // Run stdout line reading and stderr draining concurrently so a
     // chatty child can't deadlock by filling the stderr pipe buffer.
-    // tokio::join! polls both futures on the same task (no tokio::spawn
+    // tokio::try_join! polls both futures on the same task (no tokio::spawn
     // needed, so we avoid pulling in the `rt` feature).
-    let drain = drain_stderr(&mut stderr);
+    let drain = crate::exec::capture_stream(
+        &mut stderr,
+        claude.output_limit,
+        crate::OutputStream::Stderr,
+        claude.working_dir.as_deref(),
+    );
+    let write = async {
+        let (Some(prompt), Some(mut stdin)) = (stdin_prompt, child_stdin) else {
+            return Ok::<_, Error>(());
+        };
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|source| Error::Io {
+                message: "failed to write the prompt to claude stdin".to_string(),
+                source,
+                working_dir: claude.working_dir.clone(),
+            })?;
+        stdin.shutdown().await.map_err(|source| Error::Io {
+            message: "failed to close claude stdin".to_string(),
+            source,
+            working_dir: claude.working_dir.clone(),
+        })
+    };
     // Wrap the caller's handler so the span can report how many events
     // were dispatched without the handler needing to care.
     let mut counting_handler = |event: StreamEvent| {
@@ -465,58 +513,75 @@ where
         &mut reader,
         &mut counting_handler,
         claude.working_dir.clone(),
+        claude.output_limit,
     );
-    let combined = async {
-        let (line_result, stderr_str) = tokio::join!(read_future, drain);
-        (line_result, stderr_str)
+    let wait = async {
+        child.wait().await.map_err(|source| Error::Io {
+            message: "failed to wait for claude process".to_string(),
+            source,
+            working_dir: claude.working_dir.clone(),
+        })
     };
-
-    let (line_result, stderr_str) = match timeout {
-        Some(d) => match tokio::time::timeout(d, combined).await {
-            Ok(pair) => pair,
-            Err(_) => {
-                // Timeout: take down the whole group, honoring the
-                // optional SIGTERM grace, then kill+reap the direct
-                // child, and try to drain whatever stderr remains.
-                // The group kill takes down subprocesses that could
-                // otherwise hold our pipe fds open; the capped drain
-                // below stays as a backstop.
-                crate::exec::kill_group_with_grace(&mut group, claude.kill_grace).await;
-                let _ = child.kill().await;
-                let drain_budget = Duration::from_millis(200);
-                let stderr_str = tokio::time::timeout(drain_budget, drain_stderr(&mut stderr))
-                    .await
-                    .unwrap_or_default();
-                if !stderr_str.is_empty() {
-                    warn!(stderr = %stderr_str, "stderr from timed-out streaming process");
-                }
-                span.record("outcome", "timeout");
-                span.record("events", event_count);
-                span.record("duration_ms", started.elapsed().as_millis() as u64);
-                return Err(Error::Timeout {
-                    timeout_seconds: d.as_secs(),
-                });
+    let run = async {
+        let ((), diagnostics, stderr_str, status) =
+            tokio::try_join!(write, read_future, drain, wait)?;
+        Ok::<_, Error>((diagnostics, stderr_str, status))
+    };
+    let stop = async {
+        match claude.timeout {
+            Some(timeout) => tokio::select! {
+                () = cancel => StreamStop::Cancelled,
+                () = tokio::time::sleep(timeout) => StreamStop::Timeout(timeout),
+            },
+            None => {
+                cancel.await;
+                StreamStop::Cancelled
             }
-        },
-        None => combined.await,
-    };
-
-    // If reading lines failed partway through (IO error, not timeout),
-    // clean up the child (and its group) before returning.
-    let stdout_diagnostics = match line_result {
-        Ok(diagnostics) => diagnostics.into_string(),
-        Err(e) => {
-            group.kill_now();
-            let _ = child.kill().await;
-            return Err(e);
         }
     };
+    let finished = tokio::select! {
+        result = run => Ok(result),
+        reason = stop => Err(reason),
+    };
 
-    let status = child.wait().await.map_err(|e| Error::Io {
-        message: "failed to wait for claude process".to_string(),
-        source: e,
-        working_dir: claude.working_dir.clone(),
-    })?;
+    let (stdout_diagnostics, stderr_str, status) = match finished {
+        Ok(Ok((diagnostics, stderr, status))) => (diagnostics.into_string(), stderr, status),
+        Ok(Err(error)) => {
+            crate::exec::stop_and_reap(
+                &mut child,
+                &mut group,
+                claude.kill_grace,
+                claude.working_dir.as_deref(),
+            )
+            .await?;
+            span.record("outcome", "failed");
+            span.record("events", event_count);
+            span.record("duration_ms", started.elapsed().as_millis() as u64);
+            return Err(error);
+        }
+        Err(reason) => {
+            crate::exec::stop_and_reap(
+                &mut child,
+                &mut group,
+                claude.kill_grace,
+                claude.working_dir.as_deref(),
+            )
+            .await?;
+            let (outcome, error) = match reason {
+                StreamStop::Cancelled => ("cancelled", Error::Cancelled),
+                StreamStop::Timeout(timeout) => (
+                    "timeout",
+                    Error::Timeout {
+                        timeout_seconds: timeout.as_secs(),
+                    },
+                ),
+            };
+            span.record("outcome", outcome);
+            span.record("events", event_count);
+            span.record("duration_ms", started.elapsed().as_millis() as u64);
+            return Err(error);
+        }
+    };
     group.disarm();
 
     let exit_code = status.code().unwrap_or(-1);
@@ -546,27 +611,26 @@ where
 }
 
 #[cfg(all(feature = "json", feature = "async"))]
-async fn drain_stderr(stderr: &mut ChildStderr) -> String {
-    let mut buf = Vec::new();
-    let _ = stderr.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).into_owned()
+enum StreamStop {
+    Cancelled,
+    Timeout(Duration),
 }
 
 #[cfg(all(feature = "json", feature = "async"))]
 async fn read_lines<F>(
-    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    reader: &mut BufReader<tokio::process::ChildStdout>,
     handler: &mut F,
     working_dir: Option<std::path::PathBuf>,
+    output_limit: Option<usize>,
 ) -> Result<ParseFailureDiagnostics>
 where
     F: FnMut(StreamEvent),
 {
     let mut diagnostics = ParseFailureDiagnostics::default();
-    while let Some(line) = reader.next_line().await.map_err(|e| Error::Io {
-        message: "failed to read stdout line".to_string(),
-        source: e,
-        working_dir: working_dir.clone(),
-    })? {
+    let mut captured_bytes = 0usize;
+    while let Some(line) =
+        read_bounded_line(reader, &mut captured_bytes, output_limit, &working_dir).await?
+    {
         if line.trim().is_empty() {
             continue;
         }
@@ -580,6 +644,57 @@ where
     }
 
     Ok(diagnostics)
+}
+
+#[cfg(all(feature = "json", feature = "async"))]
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    captured_bytes: &mut usize,
+    output_limit: Option<usize>,
+    working_dir: &Option<std::path::PathBuf>,
+) -> Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(|source| Error::Io {
+            message: "failed to read stdout line".to_string(),
+            source,
+            working_dir: working_dir.clone(),
+        })?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if output_limit.is_some_and(|limit| captured_bytes.saturating_add(take) > limit) {
+            return Err(Error::OutputLimitExceeded {
+                stream: crate::OutputStream::Stdout,
+                limit_bytes: output_limit.unwrap_or_default(),
+            });
+        }
+        line.extend_from_slice(&available[..take]);
+        *captured_bytes = captured_bytes.saturating_add(take);
+        let complete = line.last() == Some(&b'\n');
+        reader.consume(take);
+        if complete {
+            line.pop();
+            break;
+        }
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|source| Error::Io {
+            message: "failed to decode stdout line".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            working_dir: working_dir.clone(),
+        })
 }
 
 // ---------- sync streaming ----------

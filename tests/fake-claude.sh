@@ -19,6 +19,8 @@
 #   FAKE_CLAUDE_PID_FILE    - if set, write this process's pid there before
 #       any delay or output, so tests can observe the process itself
 #       (e.g. that dropping an in-flight future kills it).
+#   FAKE_CLAUDE_STDIN_CAPTURE_FILE - if set, copy stdin to this file before
+#       emitting output.
 #   FAKE_CLAUDE_ENV_CAPTURE_FILE - if set, write the complete exported child
 #       environment there before any delay or output.
 #   FAKE_CLAUDE_FAIL_ONCE_FILE - if set, create this marker and exit 75 on
@@ -73,6 +75,10 @@ fi
 # can exit. This lets tests verify both successful and retried spawn attempts.
 if [[ -n "${FAKE_CLAUDE_ENV_CAPTURE_FILE:-}" ]]; then
     env > "$FAKE_CLAUDE_ENV_CAPTURE_FILE"
+fi
+
+if [[ -n "${FAKE_CLAUDE_STDIN_CAPTURE_FILE:-}" ]]; then
+    cat > "$FAKE_CLAUDE_STDIN_CAPTURE_FILE"
 fi
 
 if [[ -n "${FAKE_CLAUDE_FAIL_ONCE_FILE:-}" && ! -e "$FAKE_CLAUDE_FAIL_ONCE_FILE" ]]; then

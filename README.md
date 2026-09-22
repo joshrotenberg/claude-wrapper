@@ -413,6 +413,11 @@ stream_query(&claude, &cmd, |event: StreamEvent| {
 }).await?;
 ```
 
+Use `stream_query_cancellable` when a host has an explicit stop signal. It
+returns only after the owned process group has been terminated and the direct
+child reaped. Streaming also honors `QueryCommand::prompt_via_stdin(true)`, so
+sensitive prompts do not need to appear in process arguments.
+
 Sync: `stream_query_sync`. The handler runs on the caller's thread, so
 it can capture non-`Send` state (`Rc<RefCell<_>>`, etc.).
 
