@@ -805,6 +805,11 @@ impl QueryCommand {
         self
     }
 
+    #[cfg(all(feature = "json", feature = "async"))]
+    pub(crate) fn stdin_prompt(&self) -> Option<&str> {
+        self.prompt_via_stdin.then_some(self.prompt.as_str())
+    }
+
     /// Like [`Self::build_args`], but if `output_format` is unset on
     /// this command, force it to `json`. The naive approach -- call
     /// `build_args` then `args.push("--output-format")` -- breaks

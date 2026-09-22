@@ -476,7 +476,7 @@ where
 }
 
 #[cfg(feature = "async")]
-async fn stop_and_reap(
+pub(crate) async fn stop_and_reap(
     child: &mut tokio::process::Child,
     group: &mut GroupKillGuard,
     grace: Option<Duration>,

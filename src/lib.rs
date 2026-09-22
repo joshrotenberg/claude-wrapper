@@ -219,6 +219,9 @@
 //! Process NDJSON events in real time with [`streaming::stream_query`]
 //! (async) or [`streaming::stream_query_sync`] (blocking; non-`Send`
 //! handler supported).
+//! Hosts with an explicit stop signal can use
+//! [`streaming::stream_query_cancellable`], which settles process cleanup
+//! before returning [`Error::Cancelled`].
 //!
 //! ```no_run
 //! # #[cfg(all(feature = "async", feature = "json"))] {
