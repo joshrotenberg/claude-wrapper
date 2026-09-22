@@ -87,11 +87,11 @@ jobs:
         # TESTED_CLI_VERSION_MIN / MAX. A unit test cross-checks that these
         # match, so bumping a constant without adding it here fails the build.
         #
-        # The floor is measured, not assumed: this suite bisected it. 2.1.97
-        # lacks --exclude-dynamic-system-prompt-sections (part of the hermetic
-        # seal) and 2.1.98 has it, which was the last flag to land of the set
-        # the builders emit.
-        claude_version: ["2.1.98", "2.1.999"]
+        # The floor is verified, not bisected: 2.1.220 accepts every flag the
+        # builders emit, checked by running this suite against it. 2.1.98 held
+        # this slot until #800, when the coverage check showed three emitted
+        # flags that version does not have.
+        claude_version: ["2.1.220", "2.1.999"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
