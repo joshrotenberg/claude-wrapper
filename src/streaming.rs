@@ -387,15 +387,10 @@ where
 
 /// Unified streaming implementation with optional timeout.
 ///
-/// Reads stderr concurrently in a background task so a chatty child
-/// cannot deadlock by filling the stderr pipe buffer, and so any
-/// captured stderr is available even on timeout or IO error.
-///
-/// On timeout, the child is killed and reaped (`kill().await` sends
-/// SIGKILL and waits), and whatever stderr was produced is logged at
-/// warn level. The returned `Error::Timeout` does not carry partial
-/// output -- streamed stdout events were already dispatched to the
-/// handler as they arrived.
+/// Drains stderr alongside stdout so a chatty child cannot block on a full
+/// pipe. Cancellation, timeout, and stream errors terminate the owned process
+/// group and reap the child before returning. Events already dispatched to the
+/// handler are not rolled back.
 #[cfg(all(feature = "json", feature = "async"))]
 async fn stream_query_impl<C, F>(
     claude: &Claude,
@@ -481,7 +476,7 @@ where
 
     // Run stdout line reading and stderr draining concurrently so a
     // chatty child can't deadlock by filling the stderr pipe buffer.
-    // tokio::join! polls both futures on the same task (no tokio::spawn
+    // tokio::try_join! polls both futures on the same task (no tokio::spawn
     // needed, so we avoid pulling in the `rt` feature).
     let drain = crate::exec::capture_stream(
         &mut stderr,
