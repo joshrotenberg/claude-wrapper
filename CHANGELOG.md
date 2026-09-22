@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.4] - 2026-09-22
+
+### Bug Fixes
+
+- *(version)* Raise the tested CLI floor to 2.1.220  
+
+### Features
+
+- *(contract)* Detect CLI flags no builder covers  
+- *(streaming)* Add cancellable bounded query streams 
+
+
+
 ## [0.14.3] - 2026-08-27
 
 ### Features
