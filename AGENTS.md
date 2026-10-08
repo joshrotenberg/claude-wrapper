@@ -221,6 +221,7 @@ have no meaning under `claude -p`:
 
 - `--chrome` / `--no-chrome` -- Claude-in-Chrome integration
 - `--ide` -- IDE auto-connect on startup
+- `--desktop` -- opens a session in the Claude Desktop app
 - `--remote-control [name]`, `--remote-control-session-name-prefix <prefix>` -- Remote Control feature
 - `--ax-screen-reader` -- screen-reader-friendly flat-text rendering
 - `claude plugin init` / `new` -- interactive plugin scaffolding that writes to the user's config dir
