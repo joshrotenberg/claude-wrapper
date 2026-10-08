@@ -296,6 +296,12 @@ const DECLINED: &[(&str, &str, &str)] = &[
          session for a headless run to connect",
     ),
     (
+        "--desktop",
+        "",
+        "opens a session in the Claude Desktop app instead of the terminal; \
+         the wrapper owns a headless child process",
+    ),
+    (
         "--chrome",
         "",
         "Claude in Chrome integration, interactive-only",
@@ -385,6 +391,12 @@ const DECLINED: &[(&str, &str, &str)] = &[
         "unwrapped gap, see issue #799: controls prompt recording across requests and resumes",
     ),
     (
+        "--data-size",
+        "plugin list",
+        "unwrapped gap, see issue #799: measures saved plugin data with --json; \
+         present in 2.1.293 but absent from the supported 2.1.220 floor",
+    ),
+    (
         "--accept-command",
         "plugin install",
         "unwrapped gap, see issue #799: confirms one displayed plugin install command by hash",
@@ -398,6 +410,13 @@ const DECLINED: &[(&str, &str, &str)] = &[
         "--registry",
         "plugin install",
         "unwrapped gap, see issue #799: new registry selector needs a typed API audit",
+    ),
+    (
+        "--marketplace",
+        "plugin install",
+        "unwrapped gap, see issue #799: installs from a marketplace source, \
+         adding it to user settings if needed; present in 2.1.293 but absent \
+         from the supported 2.1.220 floor",
     ),
     (
         "--yes",
@@ -699,12 +718,16 @@ fn mcp_family_help_is_fully_covered() {
 
 #[test]
 #[ignore = "requires a real claude binary"]
-fn plugin_family_help_is_fully_covered() {
+fn plugin_list_help_is_fully_covered() {
     let list: HashSet<String> = emitted_flags(&PluginListCommand::new().json().available().args())
         .into_iter()
         .collect();
     assert_help_is_covered("plugin list", &["plugin", "list"], &list);
+}
 
+#[test]
+#[ignore = "requires a real claude binary"]
+fn plugin_install_help_is_fully_covered() {
     let install: HashSet<String> = emitted_flags(
         &PluginInstallCommand::new("p")
             .scope(Scope::User)
