@@ -91,7 +91,8 @@ jobs:
         # builders emit, checked by running this suite against it. 2.1.98 held
         # this slot until #800, when the coverage check showed three emitted
         # flags that version does not have.
-        claude_version: ["2.1.220", "2.1.999"]
+        # Keep PR checks reproducible; contract-latest.yml audits new releases.
+        claude_version: ["2.1.220", "2.1.293"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -102,16 +103,8 @@ jobs:
         with:
           node-version: "22"
       - name: Install claude CLI
-        # 2.1.999 is a placeholder upper bound, not a real release; resolve it
-        # to whatever is currently published so the ceiling is exercised
-        # against something that exists.
         run: |
-          version="${{ matrix.claude_version }}"
-          if [ "$version" = "2.1.999" ]; then
-            npm install -g @anthropic-ai/claude-code@latest
-          else
-            npm install -g "@anthropic-ai/claude-code@$version"
-          fi
+          npm install -g "@anthropic-ai/claude-code@${{ matrix.claude_version }}"
           claude --version
       - name: Contract suite
         # No auth and no tokens: every check reads `--help` only.

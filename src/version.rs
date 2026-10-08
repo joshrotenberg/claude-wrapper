@@ -183,7 +183,7 @@ pub const TESTED_CLI_VERSION_MIN: CliVersion = CliVersion {
 pub const TESTED_CLI_VERSION_MAX: CliVersion = CliVersion {
     major: 2,
     minor: 1,
-    patch: 999,
+    patch: 293,
 };
 
 impl fmt::Display for CliVersion {
