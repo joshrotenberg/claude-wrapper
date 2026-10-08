@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.5] - 2026-10-08
+
+### Bug Fixes
+
+- *(contract)* Pin verified CLI versions and classify new flags 
+
+### Features
+
+- *(plugin)* Wrap plugin install --config  
+
+
+
 ## [0.14.4] - 2026-09-22
 
 ### Bug Fixes
