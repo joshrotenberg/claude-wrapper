@@ -397,12 +397,6 @@ const DECLINED: &[(&str, &str, &str)] = &[
          present in 2.1.293 but absent from the supported 2.1.220 floor",
     ),
     (
-        "--config",
-        "plugin install",
-        "unwrapped gap, see issue #799: sets a plugin userConfig option \
-         non-interactively",
-    ),
-    (
         "--accept-command",
         "plugin install",
         "unwrapped gap, see issue #799: confirms one displayed plugin install command by hash",
@@ -675,7 +669,9 @@ fn plugin_family_flags_are_still_documented() {
     let list = PluginListCommand::new().json().available();
     assert_flags_documented("plugin list", &["plugin", "list"], &list.args());
 
-    let install = PluginInstallCommand::new("p").scope(Scope::User);
+    let install = PluginInstallCommand::new("p")
+        .scope(Scope::User)
+        .config("k", "v");
     assert_flags_documented("plugin install", &["plugin", "install"], &install.args());
 }
 
@@ -732,10 +728,14 @@ fn plugin_list_help_is_fully_covered() {
 #[test]
 #[ignore = "requires a real claude binary"]
 fn plugin_install_help_is_fully_covered() {
-    let install: HashSet<String> =
-        emitted_flags(&PluginInstallCommand::new("p").scope(Scope::User).args())
-            .into_iter()
-            .collect();
+    let install: HashSet<String> = emitted_flags(
+        &PluginInstallCommand::new("p")
+            .scope(Scope::User)
+            .config("k", "v")
+            .args(),
+    )
+    .into_iter()
+    .collect();
     assert_help_is_covered("plugin install", &["plugin", "install"], &install);
 }
 
@@ -886,11 +886,11 @@ Commands:
             "wildcard scope must match a subcommand"
         );
         assert!(
-            is_declined("--config", "plugin install"),
+            is_declined("--yes", "plugin install"),
             "an exact scope must match itself"
         );
         assert!(
-            !is_declined("--config", ""),
+            !is_declined("--yes", ""),
             "an exact scope must not leak to other subcommands"
         );
     }
