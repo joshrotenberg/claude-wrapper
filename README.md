@@ -111,7 +111,8 @@ let claude = Claude::builder()
 - `timeout_secs()` / `timeout()` -- command timeout (no default)
 - `retry()` -- default `RetryPolicy` applied to every command
 - `process_group()` -- isolate each child in its own Unix process group (enabled by default)
-- `kill_grace()` -- optional SIGTERM grace before SIGKILL on awaited shutdown paths
+- `kill_grace()` -- optional grace before SIGKILL on awaited shutdown paths
+- `termination_signal()` -- SIGTERM (default) or opt-in SIGINT during that grace
 - `output_limit()` -- byte ceiling on captured stdout and stderr (no default)
 
 `Claude` also exposes:
@@ -129,6 +130,33 @@ owned process group and reaps the direct child before returning
 Dropping an ordinary execute future still triggers immediate process-group
 cleanup, but a destructor cannot wait for reaping. Use the cancellable methods
 when the caller needs terminal settlement before it records a run as stopped.
+
+To let the CLI cancel its detached tools before escalation, opt into SIGINT
+and a short grace period:
+
+```rust
+use claude_wrapper::{Claude, TerminationSignal};
+use std::time::Duration;
+
+let claude = Claude::builder()
+    .termination_signal(TerminationSignal::Interrupt)
+    .kill_grace(Duration::from_secs(2))
+    .build()?;
+```
+
+Awaited shutdown drains and discards output with bounded buffers during the
+full grace, then sends SIGKILL to the owned group and reaps the direct child.
+Cancellation and timeout keep their original error even if the CLI exits
+successfully during cleanup. This also applies to blocking timeouts, streaming,
+and duplex shutdown overruns; `DuplexSession::interrupt()` remains a protocol
+request, separate from process termination.
+
+The defaults are unchanged: no grace means immediate SIGKILL. The soft signal
+and grace apply only to owned Unix process groups. With `process_group(false)`
+or on other platforms, shutdown kills only the direct child. Dropping a future
+always uses immediate hard cleanup. Descendants that leave the owned group
+require cooperative cleanup by the CLI; the wrapper cannot guarantee their
+termination.
 
 ### Bounded output capture
 
