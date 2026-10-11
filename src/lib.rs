@@ -440,6 +440,19 @@ pub struct SpawnInfo {
 /// the first read of the child's output.
 pub type SpawnObserver = std::sync::Arc<dyn Fn(SpawnInfo) + Send + Sync>;
 
+/// Signal sent before the configured [`ClaudeBuilder::kill_grace`] elapses.
+///
+/// Applies only to awaited shutdown on Unix with an owned process group and
+/// nonzero grace. Dropping a future always uses immediate SIGKILL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminationSignal {
+    /// Send SIGTERM, the default graceful termination signal.
+    #[default]
+    Terminate,
+    /// Send SIGINT so the CLI can cancel tools before exiting.
+    Interrupt,
+}
+
 /// The Claude CLI client. Holds shared configuration applied to all commands.
 ///
 /// Create one via [`Claude::builder()`] and reuse it across commands.
@@ -467,6 +480,8 @@ pub struct Claude {
     #[allow(dead_code)]
     pub(crate) kill_grace: Option<Duration>,
     #[allow(dead_code)]
+    pub(crate) termination_signal: TerminationSignal,
+    #[allow(dead_code)]
     pub(crate) output_limit: Option<usize>,
     #[allow(dead_code)]
     pub(crate) on_spawn: Option<SpawnObserver>,
@@ -484,6 +499,7 @@ impl std::fmt::Debug for Claude {
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
             .field("kill_grace", &self.kill_grace)
+            .field("termination_signal", &self.termination_signal)
             .field("output_limit", &self.output_limit)
             // A closure cannot be rendered, and env may hold credentials, so
             // neither is printed: only whether an observer is installed.
@@ -771,6 +787,7 @@ pub struct ClaudeBuilder {
     tested_cli_version_range: Option<(CliVersion, CliVersion)>,
     process_group: Option<bool>,
     kill_grace: Option<Duration>,
+    termination_signal: TerminationSignal,
     output_limit: Option<usize>,
     on_spawn: Option<SpawnObserver>,
     die_with_parent: bool,
@@ -788,6 +805,7 @@ impl std::fmt::Debug for ClaudeBuilder {
             .field("timeout", &self.timeout)
             .field("process_group", &self.process_group)
             .field("kill_grace", &self.kill_grace)
+            .field("termination_signal", &self.termination_signal)
             .field("output_limit", &self.output_limit)
             .field("on_spawn", &self.on_spawn.is_some())
             .finish_non_exhaustive()
@@ -983,7 +1001,8 @@ impl ClaudeBuilder {
     /// own process group on Unix. Defaults to `true`.
     ///
     /// Own group (the default): cancellation and timeouts kill the
-    /// child's whole process tree, but the child no longer shares the
+    /// child's owned process group. Descendants that create another group
+    /// require cooperative cleanup by the CLI. The child no longer shares the
     /// host terminal's process group, so terminal-generated signals
     /// (Ctrl-C) do not reach it; terminating a run is the wrapper's
     /// job via drop, timeout, or explicit kill. This is the right
@@ -1003,21 +1022,46 @@ impl ClaudeBuilder {
         self
     }
 
-    /// Grace period between SIGTERM and SIGKILL when a run is killed
-    /// by a timeout or a duplex shutdown overrun (Unix). Default:
-    /// none; kills are immediate SIGKILL.
+    /// Grace period before SIGKILL on timeout, explicit cancellation, or a
+    /// duplex shutdown overrun (Unix). Default: none; kills are immediate.
     ///
-    /// With a grace set, the child's whole process group gets SIGTERM
-    /// first so `claude` can flush its transcript and session state,
-    /// and SIGKILL follows once the grace elapses. The full grace is
-    /// waited before the timeout error returns, so keep it short
-    /// (500ms to 2s). Dropping a future cannot wait, so drop-path
-    /// cancellation stays immediate SIGKILL, and the grace applies
-    /// only while the child is in its own process group (see
-    /// [`process_group`](Self::process_group)).
+    /// With nonzero grace, the owned process group first receives
+    /// [`termination_signal`](Self::termination_signal), SIGTERM by default.
+    /// Output is drained and discarded while the CLI gets a chance to clean
+    /// up, then SIGKILL follows after the full grace. Keep the grace short
+    /// (500ms to 2s). Detached descendants require cooperation from the CLI;
+    /// group signals cannot guarantee their termination.
+    ///
+    /// Dropping a future cannot wait and always uses immediate SIGKILL.
+    /// With [`process_group(false)`](Self::process_group), grace and the soft
+    /// signal are skipped and only the direct child is killed.
     #[must_use]
     pub fn kill_grace(mut self, grace: Duration) -> Self {
         self.kill_grace = Some(grace);
+        self
+    }
+
+    /// Select the first signal for graceful shutdown. Defaults to SIGTERM.
+    ///
+    /// Requires nonzero [`kill_grace`](Self::kill_grace) and an owned Unix
+    /// process group. SIGINT lets a cooperating CLI cancel its detached tools
+    /// before the final group SIGKILL. Other platforms and drop cleanup are
+    /// unchanged. Cancellation and timeout still return their original error
+    /// even when the CLI exits successfully during this grace.
+    ///
+    /// ```no_run
+    /// use claude_wrapper::{Claude, TerminationSignal};
+    /// use std::time::Duration;
+    /// # fn example() -> claude_wrapper::Result<()> {
+    /// let claude = Claude::builder()
+    ///     .termination_signal(TerminationSignal::Interrupt)
+    ///     .kill_grace(Duration::from_secs(2))
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn termination_signal(mut self, signal: TerminationSignal) -> Self {
+        self.termination_signal = signal;
         self
     }
 
@@ -1144,6 +1188,7 @@ impl ClaudeBuilder {
             tested_cli_version_range: self.tested_cli_version_range,
             process_group: self.process_group.unwrap_or(true),
             kill_grace: self.kill_grace,
+            termination_signal: self.termination_signal,
             output_limit: self.output_limit,
             on_spawn: self.on_spawn,
             die_with_parent: self.die_with_parent,
@@ -1205,6 +1250,22 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(on.kill_grace, Some(Duration::from_millis(750)));
+    }
+
+    #[test]
+    fn builder_termination_signal_defaults_to_term_and_can_select_interrupt() {
+        let default = Claude::builder().binary("/unused").build().unwrap();
+        assert_eq!(default.termination_signal, TerminationSignal::Terminate);
+        let interrupt = Claude::builder()
+            .binary("/unused")
+            .termination_signal(TerminationSignal::Interrupt)
+            .build()
+            .unwrap();
+        assert_eq!(interrupt.termination_signal, TerminationSignal::Interrupt);
+        assert!(
+            interrupt.kill_grace.is_none(),
+            "signal alone does not enable grace"
+        );
     }
 
     // -- the version gate ------------------------------------------

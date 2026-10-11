@@ -8,16 +8,13 @@
 //! [`from_command_failure`](crate::error::Error::from_command_failure).
 //! Both the async (tokio) and blocking (`sync` feature) paths live here.
 //!
-//! Every spawn places the child in its own process group on Unix, and
-//! every async spawn sets `kill_on_drop(true)`. Dropping an in-flight
-//! execute future (a lost `tokio::select!` race, a caller-side timeout)
-//! SIGKILLs the whole group (via the crate-internal `GroupKillGuard`),
-//! so subprocesses the
-//! CLI spawned for tool use (shells, MCP servers, test runners) die
-//! with it rather than being reparented and running on. The same
-//! group-kill runs when a configured timeout fires, on both the async
-//! and blocking paths. The blocking paths cannot be dropped mid-flight,
-//! so they have no drop-side equivalent.
+//! By default every spawn places the child in its own Unix process group,
+//! and every async spawn sets `kill_on_drop(true)`. Dropping an in-flight
+//! future SIGKILLs that group. Awaited cancellation and timeouts can first
+//! send a configured soft signal while draining output through a short grace.
+//! Descendants that leave the group require cooperative cleanup by the CLI;
+//! group signals cannot guarantee their termination. Blocking paths cannot
+//! be dropped mid-flight, so they have no drop-side equivalent.
 //!
 //! Consequence of the group split: the child no longer shares the
 //! host's terminal process group, so terminal-generated signals
@@ -26,7 +23,7 @@
 //! Terminal-attached hosts that want the terminal to stay the
 //! supervisor can opt out with
 //! [`ClaudeBuilder::process_group(false)`](crate::ClaudeBuilder::process_group),
-//! trading the tree kill away: kills then reach only the direct child.
+//! trading group cleanup away: kills then reach only the direct child.
 
 #[cfg(any(feature = "async", feature = "sync"))]
 use std::time::Duration;
@@ -136,8 +133,8 @@ pub struct CommandOutput {
 /// (`process_group(0)`), so the group id equals the child's pid.
 /// `kill_on_drop` and `Child::kill` only reach the direct child; this
 /// guard extends cancellation to the subprocesses the CLI spawns for
-/// tool use (shells, MCP servers, test runners), which would otherwise
-/// be reparented and keep running.
+/// tool use that remain in the owned group. Detached groups are outside
+/// the guard's scope.
 ///
 /// Callers must [`disarm`](Self::disarm) the guard once the child's
 /// exit status has been observed: past that point the pid can be reaped
@@ -163,6 +160,7 @@ pub struct CommandOutput {
 pub(crate) struct SpawnPolicy<'a> {
     pub(crate) process_group: bool,
     pub(crate) kill_grace: Option<Duration>,
+    pub(crate) termination_signal: crate::TerminationSignal,
     pub(crate) output_limit: Option<usize>,
     pub(crate) die_with_parent: bool,
     pub(crate) on_spawn: Option<&'a crate::SpawnObserver>,
@@ -175,6 +173,7 @@ impl SpawnPolicy<'_> {
         SpawnPolicy {
             process_group: claude.process_group,
             kill_grace: claude.kill_grace,
+            termination_signal: claude.termination_signal,
             output_limit: claude.output_limit,
             die_with_parent: claude.die_with_parent,
             on_spawn: claude.on_spawn.as_ref(),
@@ -251,15 +250,20 @@ impl GroupKillGuard {
         }
     }
 
-    /// SIGTERM the whole group (Unix) so the CLI can flush its
-    /// transcript and session state. Does not disarm: callers follow
+    /// Signal the owned group (Unix) so the CLI can clean up. Does not disarm: callers follow
     /// up with [`kill_now`](Self::kill_now) once the grace elapses.
-    pub(crate) fn term_now(&self) {
+    pub(crate) fn signal_now(&self, signal: crate::TerminationSignal) {
+        #[cfg(not(unix))]
+        let _ = signal;
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             // SAFETY: plain FFI call with no pointers or invariants;
             // failure (e.g. ESRCH once the group is gone) is ignored.
-            let _ = unsafe { libc::killpg(pgid, libc::SIGTERM) };
+            let signal = match signal {
+                crate::TerminationSignal::Terminate => libc::SIGTERM,
+                crate::TerminationSignal::Interrupt => libc::SIGINT,
+            };
+            let _ = unsafe { libc::killpg(pgid, signal) };
         }
     }
 
@@ -399,7 +403,7 @@ pub(crate) fn apply_process_group_sync(cmd: &mut std::process::Command, enabled:
     }
 }
 
-/// Escalated group kill for the waitable paths: SIGTERM the group,
+/// Escalated group kill for the waitable paths: send the selected signal,
 /// wait out `grace` without reaping (the zombie child keeps the group
 /// id reserved, so a recycled pid can never be signalled), then
 /// SIGKILL whatever remains. With no grace configured, or when the
@@ -407,12 +411,16 @@ pub(crate) fn apply_process_group_sync(cmd: &mut std::process::Command, enabled:
 /// SIGKILL. Drop-path cancellation cannot wait and always SIGKILLs
 /// immediately via the guard's `Drop`.
 #[cfg(feature = "async")]
-pub(crate) async fn kill_group_with_grace(group: &mut GroupKillGuard, grace: Option<Duration>) {
+pub(crate) async fn kill_group_with_grace(
+    group: &mut GroupKillGuard,
+    grace: Option<Duration>,
+    signal: crate::TerminationSignal,
+) {
     if let Some(g) = grace
         && !g.is_zero()
         && group.is_armed()
     {
-        group.term_now();
+        group.signal_now(signal);
         tokio::time::sleep(g).await;
     }
     group.kill_now();
@@ -480,9 +488,10 @@ pub(crate) async fn stop_and_reap(
     child: &mut tokio::process::Child,
     group: &mut GroupKillGuard,
     grace: Option<Duration>,
+    signal: crate::TerminationSignal,
     working_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    kill_group_with_grace(group, grace).await;
+    kill_group_with_grace(group, grace, signal).await;
     if child
         .try_wait()
         .map_err(|e| wait_error(e, working_dir))?
@@ -496,6 +505,31 @@ pub(crate) async fn stop_and_reap(
     Ok(())
 }
 
+/// Keep both pipe handles open and discard shutdown output with fixed-size
+/// buffers. Completion never waits for EOF, since detached writers may survive.
+#[cfg(feature = "async")]
+pub(crate) async fn drain_until<F, O, E>(future: F, stdout: &mut O, stderr: &mut E) -> F::Output
+where
+    F: std::future::Future,
+    O: tokio::io::AsyncRead + Unpin,
+    E: tokio::io::AsyncRead + Unpin,
+{
+    tokio::pin!(future);
+    let drain = async {
+        let mut out_sink = tokio::io::sink();
+        let mut err_sink = tokio::io::sink();
+        tokio::join!(
+            tokio::io::copy(stdout, &mut out_sink),
+            tokio::io::copy(stderr, &mut err_sink),
+        )
+    };
+    tokio::pin!(drain);
+    tokio::select! {
+        result = &mut future => result,
+        _ = &mut drain => future.await,
+    }
+}
+
 #[cfg(feature = "async")]
 fn wait_error(error: std::io::Error, working_dir: Option<&std::path::Path>) -> Error {
     Error::Io {
@@ -507,12 +541,16 @@ fn wait_error(error: std::io::Error, working_dir: Option<&std::path::Path>) -> E
 
 /// Blocking mirror of [`kill_group_with_grace`].
 #[cfg(feature = "sync")]
-pub(crate) fn kill_group_with_grace_sync(group: &mut GroupKillGuard, grace: Option<Duration>) {
+pub(crate) fn kill_group_with_grace_sync(
+    group: &mut GroupKillGuard,
+    grace: Option<Duration>,
+    signal: crate::TerminationSignal,
+) {
     if let Some(g) = grace
         && !g.is_zero()
         && group.is_armed()
     {
-        group.term_now();
+        group.signal_now(signal);
         std::thread::sleep(g);
     }
     group.kill_now();
@@ -525,9 +563,8 @@ pub(crate) fn kill_group_with_grace_sync(group: &mut GroupKillGuard, grace: Opti
 /// to override the client default.
 ///
 /// Dropping the returned future mid-flight kills the spawned `claude`
-/// process and, on Unix, its whole process group (SIGKILL): an
-/// abandoned run does not keep executing in the background, and the
-/// subprocesses it spawned for tool use die with it.
+/// process and its owned Unix process group (SIGKILL). Descendants that
+/// leave that group are outside drop cleanup's scope.
 #[cfg(feature = "async")]
 pub async fn run_claude(claude: &Claude, args: Vec<String>) -> Result<CommandOutput> {
     run_claude_with_retry(claude, args, None).await
@@ -754,6 +791,7 @@ async fn run_stdin_with_stop(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        termination_signal,
         output_limit,
         die_with_parent,
         on_spawn,
@@ -769,7 +807,7 @@ async fn run_stdin_with_stop(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // group, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
@@ -816,9 +854,9 @@ async fn run_stdin_with_stop(
         crate::OutputStream::Stderr,
         working_dir,
     );
-    let wait = async { child.wait().await.map_err(|e| wait_error(e, working_dir)) };
     let run = async {
-        let ((), status, stdout, stderr) = tokio::try_join!(write, wait, read_stdout, read_stderr)?;
+        let ((), stdout, stderr) = tokio::try_join!(write, read_stdout, read_stderr)?;
+        let status = child.wait().await.map_err(|e| wait_error(e, working_dir))?;
         Ok::<_, Error>((status, stdout, stderr))
     };
 
@@ -848,14 +886,36 @@ async fn run_stdin_with_stop(
             })
         }
         Ok(Err(error)) => {
-            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            drain_until(
+                stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    working_dir,
+                ),
+                &mut stdout_handle,
+                &mut stderr_handle,
+            )
+            .await?;
             Err(error)
         }
         Err(reason) => {
             // Take down the whole group first (subprocesses may hold our pipe
-            // fds), honoring the optional SIGTERM grace, then kill+reap the
+            // fds), honoring the configured signal and grace, then kill+reap the
             // direct child.
-            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            drain_until(
+                stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    working_dir,
+                ),
+                &mut stdout_handle,
+                &mut stderr_handle,
+            )
+            .await?;
             Err(reason.into_error())
         }
     }
@@ -958,8 +1018,8 @@ async fn run_internal(
 /// Spawns the child explicitly (rather than wrapping `Command::output()` in a
 /// `tokio::time::timeout`) so that we retain the handle and can SIGKILL the
 /// child and wait for it when the timeout fires. Stdout and stderr are drained
-/// concurrently with `child.wait()` via `tokio::join!` so neither pipe buffer
-/// can fill up and deadlock the child.
+/// concurrently before reaping, within the same deadline, so neither pipe
+/// buffer can fill up and the group leader remains reserved until settlement.
 ///
 /// On timeout, partial stdout/stderr captured before the kill is logged at
 /// warn level; the returned `Error::Timeout` itself does not carry the
@@ -999,6 +1059,7 @@ async fn run_with_stop(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        termination_signal,
         output_limit,
         die_with_parent,
         on_spawn,
@@ -1012,7 +1073,7 @@ async fn run_with_stop(
     // CLI running unattended (see the module docs).
     cmd.kill_on_drop(true);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see GroupKillGuard). Opt out
+    // group, not just the direct child (see GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     apply_process_group(&mut cmd, process_group);
     apply_die_with_parent(&mut cmd, die_with_parent);
@@ -1034,15 +1095,11 @@ async fn run_with_stop(
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
 
-    // Drain stdout and stderr concurrently with the process wait so
-    // neither pipe buffer can fill up and deadlock the child.
-    // tokio::try_join! polls all three on the same task; no tokio::spawn
-    // (and therefore no `rt` feature) required. try_join rather than
-    // join so a read failure or a ceiling breach abandons the run at
-    // once instead of waiting on a child that is no longer being read.
+    // Drain both pipes concurrently, then reap inside the same stop race.
+    // Until all I/O finishes, retaining the unreaped leader reserves the PGID
+    // for a safe group signal if cancellation or a timeout wins.
     let wait_and_drain = async {
-        tokio::try_join!(
-            async { child.wait().await.map_err(|e| wait_error(e, working_dir)) },
+        let (stdout, stderr) = tokio::try_join!(
             capture_stream(
                 &mut stdout,
                 output_limit,
@@ -1055,7 +1112,9 @@ async fn run_with_stop(
                 crate::OutputStream::Stderr,
                 working_dir
             ),
-        )
+        )?;
+        let status = child.wait().await.map_err(|e| wait_error(e, working_dir))?;
+        Ok::<_, Error>((status, stdout, stderr))
     };
 
     match tokio::select! {
@@ -1087,15 +1146,37 @@ async fn run_with_stop(
         // child is still ours in every case, so settle it on the same
         // path a stop takes before surfacing what went wrong.
         Ok(Err(error)) => {
-            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            drain_until(
+                stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    working_dir,
+                ),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await?;
             Err(error)
         }
         Err(reason) => {
-            // Take down the whole group, honoring the optional SIGTERM grace,
+            // Take down the whole group, honoring the configured signal and grace,
             // then kill+reap the direct child. The group kill takes down
             // subprocesses that could otherwise hold our pipe fds open
             // forever; the capped drain below stays as a backstop.
-            stop_and_reap(&mut child, &mut group, kill_grace, working_dir).await?;
+            drain_until(
+                stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    working_dir,
+                ),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await?;
             let stdout_str = tokio::time::timeout(
                 PARTIAL_CAPTURE_BUDGET,
                 capture_partial(&mut stdout, output_limit),
@@ -1397,6 +1478,7 @@ fn run_with_deadline_stdin_sync(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        termination_signal,
         output_limit,
         die_with_parent,
         on_spawn,
@@ -1409,7 +1491,7 @@ fn run_with_deadline_stdin_sync(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // Own process group (Unix) so a kill can signal the whole tree,
+    // Own process group (Unix) so a kill can signal the owned group,
     // not just the direct child (see GroupKillGuard). Opt out via
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
@@ -1442,7 +1524,8 @@ fn run_with_deadline_stdin_sync(
             .write_all(stdin_content.as_bytes())
             .and_then(|()| stdin.flush());
         if let Err(source) = written {
-            stop_and_reap_sync(&mut child, &mut group, kill_grace);
+            capture.discard();
+            stop_and_reap_sync(&mut child, &mut group, kill_grace, termination_signal);
             log_partial(capture, "partial output from process with failed stdin");
             return Err(Error::Io {
                 message: format!("failed to write to claude stdin: {source}"),
@@ -1463,6 +1546,7 @@ fn run_with_deadline_stdin_sync(
             working_dir,
             deadline,
             kill_grace,
+            termination_signal,
             output_limit,
         },
     )
@@ -1550,7 +1634,7 @@ fn run_internal_sync(
 /// fill up while we wait, then waits with an optional deadline.
 ///
 /// On a timeout or a capture ceiling breach, the child's whole process
-/// group (Unix) is killed after the optional SIGTERM grace and the child
+/// group (Unix) is killed after the configured signal and grace and the child
 /// is reaped. Partial output is logged at warn; neither
 /// [`Error::Timeout`] nor [`Error::OutputLimitExceeded`] carries it.
 #[cfg(feature = "sync")]
@@ -1566,6 +1650,7 @@ fn run_with_deadline_sync(
     let SpawnPolicy {
         process_group,
         kill_grace,
+        termination_signal,
         output_limit,
         die_with_parent,
         on_spawn,
@@ -1577,7 +1662,7 @@ fn run_with_deadline_sync(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // Own process group (Unix) so a kill can signal the whole tree,
+    // Own process group (Unix) so a kill can signal the owned group,
     // not just the direct child (see GroupKillGuard). Opt out via
     // ClaudeBuilder::process_group.
     apply_process_group_sync(&mut cmd, process_group);
@@ -1611,50 +1696,78 @@ fn run_with_deadline_sync(
             working_dir,
             deadline,
             kill_grace,
+            termination_signal,
             output_limit,
         },
     )
 }
 
+/// Read in fixed-size chunks. Once shutdown starts, keep the pipe open and
+/// drain without retaining more output or invoking the consumer.
 #[cfg(feature = "sync")]
-fn capture_sync<R: std::io::Read>(
+pub(crate) fn read_discardable<R, F>(
     mut reader: R,
-    limit: Option<usize>,
-) -> std::io::Result<Captured> {
-    let Some(limit) = limit else {
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        return Ok(Captured::Complete(
-            String::from_utf8_lossy(&buf).into_owned(),
-        ));
-    };
-
-    let mut buf = Vec::new();
+    discard: &std::sync::atomic::AtomicBool,
+    mut consume: F,
+) -> std::io::Result<()>
+where
+    R: std::io::Read,
+    F: FnMut(&[u8]),
+{
     let mut chunk = [0u8; CAPTURE_CHUNK];
     loop {
         let read = reader.read(&mut chunk)?;
         if read == 0 {
-            return Ok(Captured::Complete(
-                String::from_utf8_lossy(&buf).into_owned(),
-            ));
+            return Ok(());
         }
-        if buf.len() + read > limit {
-            buf.truncate(BREACH_LOG_BYTES.min(buf.len()));
-            return Ok(Captured::Exceeded {
-                head: String::from_utf8_lossy(&buf).into_owned(),
-            });
+        if !discard.load(std::sync::atomic::Ordering::Acquire) {
+            consume(&chunk[..read]);
         }
-        buf.extend_from_slice(&chunk[..read]);
     }
+}
+
+#[cfg(feature = "sync")]
+fn capture_sync<R: std::io::Read>(
+    reader: R,
+    limit: Option<usize>,
+    discard: &std::sync::atomic::AtomicBool,
+    breached: &std::sync::atomic::AtomicU8,
+    code: u8,
+) -> std::io::Result<Captured> {
+    let mut buf = Vec::new();
+    let mut exceeded = false;
+    read_discardable(reader, discard, |chunk| {
+        if exceeded {
+            return;
+        }
+        if limit.is_some_and(|limit| buf.len().saturating_add(chunk.len()) > limit) {
+            exceeded = true;
+            buf.truncate(BREACH_LOG_BYTES.min(buf.len()));
+            // Publish immediately, but retain the reader for graceful cleanup.
+            let _ = breached.compare_exchange(
+                breach::NONE,
+                code,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        } else {
+            buf.extend_from_slice(chunk);
+        }
+    })?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Ok(if exceeded {
+        Captured::Exceeded { head: text }
+    } else {
+        Captured::Complete(text)
+    })
 }
 
 /// Which stream first passed its ceiling, shared between the capture
 /// threads and the thread waiting on the child.
 ///
 /// A blocking wait cannot be woken, so the waiter polls this instead:
-/// once a capture thread stops reading, the child blocks on a full pipe
-/// and would otherwise sit there until the timeout (or forever, on a
-/// path with no timeout).
+/// the first breach stops retention immediately while the reader keeps
+/// draining output so graceful shutdown can complete.
 #[cfg(feature = "sync")]
 mod breach {
     pub(super) const NONE: u8 = 0;
@@ -1670,12 +1783,9 @@ mod breach {
     }
 }
 
-/// How often the waiter checks for a ceiling breach. Only paid when a
-/// ceiling is set; without one the waiter blocks outright. The child is
-/// stalled on a full pipe for at most this long before being killed,
-/// which costs latency but no memory.
+/// Poll pipe completion without reaping the group leader early.
 #[cfg(feature = "sync")]
-const BREACH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The two capture threads and the breach code they publish.
 #[cfg(feature = "sync")]
@@ -1684,6 +1794,7 @@ struct SyncCapture {
     stderr: std::thread::JoinHandle<std::io::Result<Captured>>,
     limit: Option<usize>,
     breached: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    discard: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "sync")]
@@ -1698,18 +1809,19 @@ impl SyncCapture {
         limit: Option<usize>,
     ) -> Self {
         let breached = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(breach::NONE));
+        let discard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
-            stdout: spawn_capture_thread(stdout, limit, breach::STDOUT, &breached),
-            stderr: spawn_capture_thread(stderr, limit, breach::STDERR, &breached),
+            stdout: spawn_capture_thread(stdout, limit, breach::STDOUT, &breached, &discard),
+            stderr: spawn_capture_thread(stderr, limit, breach::STDERR, &breached, &discard),
             limit,
             breached,
+            discard,
         }
     }
 
-    /// The flag to poll while waiting, or `None` when no ceiling is set
-    /// and the waiter should block instead.
-    fn watch(&self) -> Option<&std::sync::atomic::AtomicU8> {
-        self.limit.is_some().then(|| self.breached.as_ref())
+    fn discard(&self) {
+        self.discard
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Join both threads and resolve them into the captured pair, a
@@ -1737,22 +1849,11 @@ fn spawn_capture_thread<R: std::io::Read + Send + 'static>(
     limit: Option<usize>,
     code: u8,
     breached: &std::sync::Arc<std::sync::atomic::AtomicU8>,
+    discard: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<std::io::Result<Captured>> {
     let breached = std::sync::Arc::clone(breached);
-    std::thread::spawn(move || {
-        let outcome = capture_sync(reader, limit);
-        if matches!(outcome, Ok(Captured::Exceeded { .. })) {
-            // First breach wins, so the reported stream is the one that
-            // actually stopped the run.
-            let _ = breached.compare_exchange(
-                breach::NONE,
-                code,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            );
-        }
-        outcome
-    })
+    let discard = std::sync::Arc::clone(discard);
+    std::thread::spawn(move || capture_sync(reader, limit, &discard, &breached, code))
 }
 
 #[cfg(feature = "sync")]
@@ -1803,49 +1904,48 @@ fn partial_text(outcome: Option<std::io::Result<Captured>>) -> String {
 enum SyncWait {
     Exited(std::process::ExitStatus),
     TimedOut,
-    /// A capture thread passed its ceiling, so the child is stalled on a
-    /// full pipe and has to be taken down.
+    /// A capture thread passed its ceiling and the run must stop.
     Breached(crate::OutputStream),
 }
 
-/// Wait for `child`, up to `deadline` if there is one, giving up early
-/// if `watch` reports a ceiling breach.
+/// Wait for pipe capture before reaping, retaining a reserved PGID until the
+/// complete operation finishes or a stop wins. Closed pipes do not imply exit,
+/// so the remaining deadline also applies to the final child wait.
 #[cfg(feature = "sync")]
 fn wait_for_child_sync(
     child: &mut std::process::Child,
     deadline: Option<Duration>,
-    watch: Option<&std::sync::atomic::AtomicU8>,
+    capture: &SyncCapture,
 ) -> std::io::Result<SyncWait> {
     use std::sync::atomic::Ordering;
     use wait_timeout::ChildExt;
 
-    // No ceiling: nothing can interrupt this, so block rather than
-    // waking up to poll a flag that will never be set.
-    let Some(watch) = watch else {
-        return Ok(match deadline {
-            Some(deadline) => child
-                .wait_timeout(deadline)?
-                .map_or(SyncWait::TimedOut, SyncWait::Exited),
-            None => SyncWait::Exited(child.wait()?),
-        });
-    };
-
     let expiry = deadline.map(|d| std::time::Instant::now() + d);
     loop {
-        if let Some(stream) = breach::stream(watch.load(Ordering::Acquire)) {
+        if let Some(stream) = breach::stream(capture.breached.load(Ordering::Acquire)) {
             return Ok(SyncWait::Breached(stream));
         }
-        let mut tick = BREACH_POLL_INTERVAL;
-        if let Some(expiry) = expiry {
-            let remaining = expiry.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Ok(SyncWait::TimedOut);
+        let remaining =
+            expiry.map(|expiry| expiry.saturating_duration_since(std::time::Instant::now()));
+        if remaining.is_some_and(|remaining| remaining.is_zero()) {
+            return Ok(SyncWait::TimedOut);
+        }
+        if capture.stdout.is_finished() && capture.stderr.is_finished() {
+            // Both capture results are now stable. A breach may have been
+            // published between the first check and the completion checks.
+            if let Some(stream) = breach::stream(capture.breached.load(Ordering::Acquire)) {
+                return Ok(SyncWait::Breached(stream));
             }
-            tick = tick.min(remaining);
+            return Ok(match remaining {
+                Some(remaining) => child
+                    .wait_timeout(remaining)?
+                    .map_or(SyncWait::TimedOut, SyncWait::Exited),
+                None => SyncWait::Exited(child.wait()?),
+            });
         }
-        if let Some(status) = child.wait_timeout(tick)? {
-            return Ok(SyncWait::Exited(status));
-        }
+        std::thread::sleep(
+            remaining.map_or(CAPTURE_POLL_INTERVAL, |r| r.min(CAPTURE_POLL_INTERVAL)),
+        );
     }
 }
 
@@ -1859,6 +1959,7 @@ struct SyncRun<'a> {
     working_dir: Option<&'a std::path::Path>,
     deadline: Option<Duration>,
     kill_grace: Option<Duration>,
+    termination_signal: crate::TerminationSignal,
     output_limit: Option<usize>,
 }
 
@@ -1874,10 +1975,11 @@ fn finish_sync_run(
     capture: SyncCapture,
     run: SyncRun<'_>,
 ) -> Result<CommandOutput> {
-    let waited = match wait_for_child_sync(child, run.deadline, capture.watch()) {
+    let waited = match wait_for_child_sync(child, run.deadline, &capture) {
         Ok(waited) => waited,
         Err(source) => {
-            stop_and_reap_sync(child, group, run.kill_grace);
+            capture.discard();
+            stop_and_reap_sync(child, group, run.kill_grace, run.termination_signal);
             return Err(Error::Io {
                 message: "failed to wait for claude process".to_string(),
                 source,
@@ -1913,17 +2015,19 @@ fn finish_sync_run(
             })
         }
         // Take down the whole group first (subprocesses may hold our
-        // pipe fds), honoring the optional SIGTERM grace, then kill and
+        // pipe fds), honoring the configured signal and grace, then kill and
         // reap the direct child.
         SyncWait::TimedOut => {
-            stop_and_reap_sync(child, group, run.kill_grace);
+            capture.discard();
+            stop_and_reap_sync(child, group, run.kill_grace, run.termination_signal);
             log_partial(capture, "partial output from timed-out process");
             Err(Error::Timeout {
                 timeout_seconds: run.deadline.unwrap_or_default().as_secs(),
             })
         }
         SyncWait::Breached(stream) => {
-            stop_and_reap_sync(child, group, run.kill_grace);
+            capture.discard();
+            stop_and_reap_sync(child, group, run.kill_grace, run.termination_signal);
             log_partial(capture, "partial output from over-limit process");
             Err(Error::OutputLimitExceeded {
                 stream,
@@ -1948,8 +2052,9 @@ fn stop_and_reap_sync(
     child: &mut std::process::Child,
     group: &mut GroupKillGuard,
     grace: Option<Duration>,
+    signal: crate::TerminationSignal,
 ) {
-    kill_group_with_grace_sync(group, grace);
+    kill_group_with_grace_sync(group, grace, signal);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -2805,6 +2910,325 @@ mod tests {
         let _ = std::process::Command::new("kill")
             .args(["-9", &gpid.to_string()])
             .status();
+    }
+
+    struct InterruptFixture {
+        _script_dir: tempfile::TempDir,
+        workdir: tempfile::TempDir,
+        binary: std::path::PathBuf,
+    }
+
+    impl InterruptFixture {
+        fn new() -> Self {
+            let workdir = tempfile::tempdir().unwrap();
+            let (script_dir, binary) = fake_script(&format!(
+                r#"set -m
+sleep 30 &
+detached=$!
+set +m
+trap 'head -c 1048576 /dev/zero || exit 97; head -c 1048576 /dev/zero >&2 || exit 98; kill "$detached"; wait "$detached"; echo cleaned > "{dir}/cleaned"; exit 0' INT
+echo $$ > "{dir}/provider"
+echo "$detached" > "{dir}/detached"
+ps -o pgid= -p $$ > "{dir}/provider-group"
+ps -o pgid= -p "$detached" > "{dir}/detached-group"
+echo ready > "{dir}/ready"
+wait "$detached"
+"#,
+                dir = workdir.path().display(),
+            ));
+            Self {
+                _script_dir: script_dir,
+                workdir,
+                binary,
+            }
+        }
+
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.workdir.path().join(name)
+        }
+
+        fn client(&self) -> Claude {
+            Claude::builder()
+                .binary(&self.binary)
+                .termination_signal(crate::TerminationSignal::Interrupt)
+                .kill_grace(Duration::from_millis(400))
+                .output_limit(4096)
+                .build()
+                .unwrap()
+        }
+
+        #[cfg(feature = "async")]
+        async fn ready(&self) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !self.path("ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("fake provider ready");
+            self.assert_detached();
+        }
+
+        fn assert_detached(&self) {
+            let provider = try_read_pid(&self.path("provider-group")).unwrap();
+            let detached = try_read_pid(&self.path("detached-group")).unwrap();
+            assert_ne!(
+                provider, detached,
+                "fixture child must escape the owned group"
+            );
+        }
+
+        fn assert_cleaned(&self) {
+            self.assert_detached();
+            // Observe before fixture teardown so emergency cleanup cannot hide
+            // a failure of the provider's own SIGINT handler.
+            assert!(
+                self.path("cleaned").exists(),
+                "SIGINT handler must drain both large writes and clean its child"
+            );
+            assert_pid_killed(try_read_pid(&self.path("provider")).unwrap());
+            assert_pid_killed(try_read_pid(&self.path("detached")).unwrap());
+        }
+    }
+
+    impl Drop for InterruptFixture {
+        fn drop(&mut self) {
+            // A failed assertion must not leave the deliberately detached
+            // test child running. Successful assertions above precede this.
+            if let Some(pid) = try_read_pid(&self.path("detached")) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .output();
+            }
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn interrupt_cancellation_drains_large_output_and_detached_cleanup() {
+        for stdin in [false, true] {
+            let fixture = InterruptFixture::new();
+            let claude = fixture.client();
+            let result = if stdin {
+                run_claude_with_stdin_prompt_cancellable(
+                    &claude,
+                    vec![],
+                    "prompt".into(),
+                    fixture.ready(),
+                )
+                .await
+            } else {
+                run_claude_cancellable(&claude, vec![], fixture.ready()).await
+            };
+            assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+            fixture.assert_cleaned();
+        }
+    }
+
+    #[cfg(all(feature = "async", feature = "json"))]
+    #[tokio::test]
+    async fn interrupt_stream_cancellation_drains_without_delivering_shutdown_output() {
+        for stdin in [false, true] {
+            let fixture = InterruptFixture::new();
+            let claude = fixture.client();
+            let mut cmd = crate::QueryCommand::new("prompt");
+            if stdin {
+                cmd = cmd.prompt_via_stdin(true);
+            }
+            let mut events = 0;
+            let result =
+                crate::streaming::stream_query_cancellable(&claude, &cmd, fixture.ready(), |_| {
+                    events += 1
+                })
+                .await;
+            assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+            assert_eq!(events, 0);
+            fixture.assert_cleaned();
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn interrupt_process_group_opt_out_skips_signal_and_grace() {
+        let fixture = InterruptFixture::new();
+        let mut claude = fixture.client();
+        claude.process_group = false;
+        claude.kill_grace = Some(Duration::from_secs(30));
+        claude.timeout = Some(Duration::from_millis(500));
+        let started = std::time::Instant::now();
+        let result = run_claude(&claude, vec![]).await;
+        assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        fixture.assert_detached();
+        assert!(
+            !fixture.path("cleaned").exists(),
+            "soft signal must be skipped"
+        );
+        assert_pid_killed(try_read_pid(&fixture.path("provider")).unwrap());
+        let detached = try_read_pid(&fixture.path("detached")).unwrap();
+        // SAFETY: signal 0 only checks the deliberately surviving fixture pid.
+        assert_eq!(unsafe { libc::kill(detached as i32, 0) }, 0);
+        // Fixture teardown cleans the deliberate opt-out survivor.
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn interrupt_timeout_stays_timeout_after_clean_exit() {
+        let fixture = InterruptFixture::new();
+        let mut claude = fixture.client();
+        claude.timeout = Some(Duration::from_millis(600));
+        let result = run_claude(&claude, vec![]).await;
+        assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+        fixture.assert_cleaned();
+    }
+
+    #[cfg(all(feature = "async", feature = "json"))]
+    #[tokio::test]
+    async fn interrupt_duplex_close_overrun_drains_and_cleans_detached_child() {
+        let fixture = InterruptFixture::new();
+        let session =
+            crate::DuplexSession::spawn(&fixture.client(), crate::DuplexOptions::default())
+                .await
+                .unwrap();
+        fixture.ready().await;
+        session.close().await.unwrap();
+        fixture.assert_cleaned();
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn interrupt_sync_timeout_drains_large_output_and_detached_cleanup() {
+        for stdin in [false, true] {
+            let fixture = InterruptFixture::new();
+            let mut claude = fixture.client();
+            claude.timeout = Some(Duration::from_millis(600));
+            let result = if stdin {
+                run_claude_with_stdin_prompt_sync(&claude, vec![], "prompt".into())
+            } else {
+                run_claude_sync(&claude, vec![])
+            };
+            assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+            fixture.assert_cleaned();
+        }
+    }
+
+    #[cfg(all(feature = "sync", feature = "json"))]
+    #[test]
+    fn interrupt_sync_stream_timeout_drains_large_output_and_detached_cleanup() {
+        let fixture = InterruptFixture::new();
+        let mut claude = fixture.client();
+        claude.timeout = Some(Duration::from_millis(600));
+        let mut events = 0;
+        let result = crate::streaming::stream_query_sync(
+            &claude,
+            &crate::QueryCommand::new("prompt"),
+            |_| events += 1,
+        );
+        assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+        assert_eq!(events, 0);
+        fixture.assert_cleaned();
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn interrupt_stubborn_group_escalates_and_drop_during_grace_is_immediate() {
+        for drop_during_grace in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let signalled = dir.path().join("signalled");
+            let child_pid = dir.path().join("child");
+            let provider_pid = dir.path().join("provider");
+            let (_script_dir, binary) = fake_script(&format!(
+                "trap 'echo int > \"{}\"' INT\nsleep 30 &\necho $! > \"{}\"\necho $$ > \"{}\"\necho ready > \"{}\"\nwhile :; do wait; done",
+                signalled.display(),
+                child_pid.display(),
+                provider_pid.display(),
+                ready.display(),
+            ));
+            let claude = Claude::builder()
+                .binary(binary)
+                .termination_signal(crate::TerminationSignal::Interrupt)
+                .kill_grace(if drop_during_grace {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_millis(200)
+                })
+                .build()
+                .unwrap();
+            let cancel = async {
+                while !ready.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let started = std::time::Instant::now();
+            {
+                let run = run_claude_cancellable(&claude, vec![], cancel);
+                tokio::pin!(run);
+                if drop_during_grace {
+                    tokio::select! {
+                        result = &mut run => panic!("unexpected completion: {result:?}"),
+                        () = async {
+                            while !signalled.exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+                        } => {}
+                    }
+                    // Drop both the cleanup future and its armed group guard.
+                } else {
+                    assert!(matches!(run.await, Err(Error::Cancelled)));
+                    assert!(signalled.exists());
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert_pid_killed(read_pid(&provider_pid));
+            assert_pid_killed(read_pid(&child_pid));
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn interrupt_leader_exit_with_open_pipe_still_times_out_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let child_pid = dir.path().join("child");
+        let (_script_dir, binary) = fake_script(&format!(
+            "sleep 30 &\necho $! > '{}'\nexit 0",
+            child_pid.display()
+        ));
+        let claude = Claude::builder()
+            .binary(binary)
+            .termination_signal(crate::TerminationSignal::Interrupt)
+            .kill_grace(Duration::from_millis(100))
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let result = run_claude(&claude, vec![]).await;
+        assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+        assert_pid_killed(read_pid(&child_pid));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn interrupt_sync_output_breach_with_exited_leader_is_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let child_pid = dir.path().join("child");
+        let (_script_dir, binary) = fake_script(&format!(
+            "sleep 30 2>/dev/null &\necho $! > '{}'\nhead -c 65536 /dev/zero\nexit 0",
+            child_pid.display()
+        ));
+        let claude = Claude::builder()
+            .binary(binary)
+            .termination_signal(crate::TerminationSignal::Interrupt)
+            .kill_grace(Duration::from_millis(100))
+            .output_limit(4096)
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = run_claude_sync(&claude, vec![]);
+        assert!(
+            matches!(result, Err(Error::OutputLimitExceeded { .. })),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_pid_killed(try_read_pid(&child_pid).unwrap());
     }
 
     /// Fake script that traps SIGTERM, records a marker, and exits
