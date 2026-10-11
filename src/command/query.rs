@@ -55,6 +55,7 @@ pub struct QueryCommand {
     verbose: bool,
     prompt_suggestions: bool,
     replay_user_messages: bool,
+    extra_args: Vec<String>,
 }
 
 impl QueryCommand {
@@ -74,6 +75,7 @@ impl QueryCommand {
             verbose: false,
             prompt_suggestions: false,
             replay_user_messages: false,
+            extra_args: Vec::new(),
         }
     }
 
@@ -632,6 +634,45 @@ impl QueryCommand {
         self
     }
 
+    /// Append one unvalidated Claude CLI argument to this query.
+    ///
+    /// Extra arguments are emitted in insertion order after all generated
+    /// options and before the `--` prompt separator. In stdin mode they are
+    /// the final arguments. Pass a flag and its value as separate arguments;
+    /// no shell splitting or escaping is performed.
+    ///
+    /// This escape hatch does not validate conflicts with typed options.
+    /// Claude determines how duplicate or unsupported options behave. Callers
+    /// that require a particular input or output format must prevent extra
+    /// arguments from changing it.
+    #[must_use]
+    pub fn extra_arg(mut self, arg: impl Into<String>) -> Self {
+        self.extra_args.push(arg.into());
+        self
+    }
+
+    /// Append unvalidated Claude CLI arguments to this query.
+    ///
+    /// Preserves order across calls to this method and [`Self::extra_arg`].
+    /// See [`Self::extra_arg`] for placement and conflict semantics.
+    ///
+    /// ```
+    /// use claude_wrapper::{ClaudeCommand, QueryCommand};
+    ///
+    /// let cmd = QueryCommand::new("summarize the project")
+    ///     .extra_args(["--plugin-dir", "/path with spaces/plugins"])
+    ///     .extra_arg("--brief");
+    /// assert_eq!(cmd.args(), [
+    ///     "--print", "--plugin-dir", "/path with spaces/plugins", "--brief",
+    ///     "--", "summarize the project",
+    /// ]);
+    /// ```
+    #[must_use]
+    pub fn extra_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.extra_args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
     /// Return the full command as a string that could be run in a shell.
     ///
     /// Constructs a command string using the binary path from the Claude instance,
@@ -870,6 +911,8 @@ impl QueryCommand {
             args.push(pr.clone());
         }
 
+        args.extend(self.extra_args.iter().cloned());
+
         // Separator to prevent flags like --allowed-tools from consuming the prompt.
         // When prompt_via_stdin is set, the prompt is sent via stdin after spawn
         // rather than appearing in argv (avoids ps/APM/crash-dump leakage).
@@ -911,6 +954,53 @@ mod tests {
         let cmd = QueryCommand::new("hello world");
         let args = cmd.args();
         assert_eq!(args, vec!["--print", "--", "hello world"]);
+    }
+
+    #[test]
+    fn extra_args_preserve_order_and_values_before_prompt() {
+        let args = QueryCommand::new("--prompt with spaces")
+            .extra_arg("--future-option")
+            .extra_args(["two words\nnext line", "", "--model", "future-model"])
+            .model("sonnet")
+            .extra_arg("--another-option=value")
+            .args();
+
+        assert_eq!(
+            args,
+            [
+                "--print",
+                "--model",
+                "sonnet",
+                "--future-option",
+                "two words\nnext line",
+                "",
+                "--model",
+                "future-model",
+                "--another-option=value",
+                "--",
+                "--prompt with spaces",
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_follow_forced_json_options_in_both_prompt_transports() {
+        for stdin in [false, true] {
+            let cmd = QueryCommand::new("private prompt")
+                .extra_args(["--future-option", "value"])
+                .prompt_via_stdin(stdin);
+            let mut expected = vec![
+                "--print",
+                "--output-format",
+                "json",
+                "--future-option",
+                "value",
+            ];
+            if !stdin {
+                expected.extend(["--", "private prompt"]);
+            }
+            assert_eq!(cmd.build_args_with_forced_json(), expected);
+        }
     }
 
     #[test]
