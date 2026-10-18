@@ -328,9 +328,8 @@ fn parse_block_delta(delta: &serde_json::Value) -> BlockDelta {
 /// and real-time output processing.
 ///
 /// Dropping the returned future mid-flight kills the spawned `claude`
-/// process and, on Unix, its whole process group (SIGKILL): an
-/// abandoned run does not keep executing in the background, and the
-/// subprocesses it spawned for tool use die with it. Events already
+/// process and its owned Unix process group (SIGKILL). Descendants that
+/// leave the group are outside drop cleanup's scope. Events already
 /// dispatched to the handler are not rolled back.
 ///
 /// # Example
@@ -452,7 +451,7 @@ where
     }
     crate::exec::apply_child_environment(cmd.as_std_mut(), claude.clear_env, &claude.env);
     // Own process group (Unix) so cancellation can signal the whole
-    // tree, not just the direct child (see exec::GroupKillGuard). Opt
+    // group, not just the direct child (see exec::GroupKillGuard). Opt
     // out via ClaudeBuilder::process_group.
     crate::exec::apply_process_group(&mut cmd, claude.process_group);
 
@@ -515,16 +514,15 @@ where
         claude.working_dir.clone(),
         claude.output_limit,
     );
-    let wait = async {
-        child.wait().await.map_err(|source| Error::Io {
+    let run = async {
+        let ((), diagnostics, stderr_str) = tokio::try_join!(write, read_future, drain)?;
+        // Reap only after pipe readers finish, so a stopped run still owns
+        // an unreaped leader and can safely signal its process group.
+        let status = child.wait().await.map_err(|source| Error::Io {
             message: "failed to wait for claude process".to_string(),
             source,
             working_dir: claude.working_dir.clone(),
-        })
-    };
-    let run = async {
-        let ((), diagnostics, stderr_str, status) =
-            tokio::try_join!(write, read_future, drain, wait)?;
+        })?;
         Ok::<_, Error>((diagnostics, stderr_str, status))
     };
     let stop = async {
@@ -547,11 +545,16 @@ where
     let (stdout_diagnostics, stderr_str, status) = match finished {
         Ok(Ok((diagnostics, stderr, status))) => (diagnostics.into_string(), stderr, status),
         Ok(Err(error)) => {
-            crate::exec::stop_and_reap(
-                &mut child,
-                &mut group,
-                claude.kill_grace,
-                claude.working_dir.as_deref(),
+            crate::exec::drain_until(
+                crate::exec::stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    claude.kill_grace,
+                    claude.termination_signal,
+                    claude.working_dir.as_deref(),
+                ),
+                &mut reader,
+                &mut stderr,
             )
             .await?;
             span.record("outcome", "failed");
@@ -560,11 +563,16 @@ where
             return Err(error);
         }
         Err(reason) => {
-            crate::exec::stop_and_reap(
-                &mut child,
-                &mut group,
-                claude.kill_grace,
-                claude.working_dir.as_deref(),
+            crate::exec::drain_until(
+                crate::exec::stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    claude.kill_grace,
+                    claude.termination_signal,
+                    claude.working_dir.as_deref(),
+                ),
+                &mut reader,
+                &mut stderr,
             )
             .await?;
             let (outcome, error) = match reason {
@@ -699,6 +707,53 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 
 // ---------- sync streaming ----------
 
+#[cfg(all(feature = "sync", feature = "json"))]
+fn read_line_or_discard<R: std::io::BufRead>(
+    reader: &mut R,
+    discard: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        if discard.load(std::sync::atomic::Ordering::Acquire) {
+            std::io::copy(reader, &mut std::io::sink())?;
+            return Ok(None);
+        }
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        // Recheck after a blocking read: shutdown may have started while
+        // this reader was waiting for output, even in the middle of a line.
+        if discard.load(std::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        let newline = available.iter().position(|b| *b == b'\n');
+        let used = newline.map_or(available.len(), |i| i + 1);
+        line.extend_from_slice(&available[..used]);
+        reader.consume(used);
+        if newline.is_some() {
+            break;
+        }
+    }
+    // Match BufRead::lines: diagnostics must not gain an extra separator.
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 /// Blocking mirror of [`stream_query`]. Reads NDJSON lines from the
 /// child's stdout on a worker thread, dispatches each parsed event
 /// to `handler` on the caller's thread, and drains stderr on a
@@ -743,8 +798,9 @@ pub fn stream_query_sync<F>(
 where
     F: FnMut(StreamEvent),
 {
-    use std::io::{BufRead as _, Read as _};
     use std::process::{Command as StdCommand, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
@@ -770,7 +826,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::exec::apply_child_environment(&mut cmd_builder, claude.clear_env, &claude.env);
-    // Own process group (Unix) so a kill can signal the whole tree,
+    // Own process group (Unix) so a kill can signal the owned group,
     // not just the direct child (see exec::GroupKillGuard). Opt out
     // via ClaudeBuilder::process_group.
     crate::exec::apply_process_group_sync(&mut cmd_builder, claude.process_group);
@@ -798,15 +854,19 @@ where
     // need Send. Bubbles IO errors out via the thread's return value.
     let (tx, rx) = mpsc::channel::<StreamEvent>();
     let reader_wd = claude.working_dir.clone();
+    let discard = Arc::new(AtomicBool::new(false));
+    let reader_discard = Arc::clone(&discard);
+    let stderr_discard = Arc::clone(&discard);
     let reader_thread = thread::spawn(move || -> Result<ParseFailureDiagnostics> {
-        let reader = std::io::BufReader::new(stdout);
+        let mut reader = std::io::BufReader::new(stdout);
         let mut diagnostics = ParseFailureDiagnostics::default();
-        for line_res in reader.lines() {
-            let line = line_res.map_err(|e| Error::Io {
+        while let Some(line) =
+            read_line_or_discard(&mut reader, &reader_discard).map_err(|e| Error::Io {
                 message: "failed to read stdout line".to_string(),
                 source: e,
                 working_dir: reader_wd.clone(),
-            })?;
+            })?
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -828,8 +888,9 @@ where
 
     let stderr_thread = thread::spawn(move || -> String {
         let mut buf = Vec::new();
-        let mut stderr = stderr;
-        let _ = stderr.read_to_end(&mut buf);
+        let _ = crate::exec::read_discardable(stderr, &stderr_discard, |chunk| {
+            buf.extend_from_slice(chunk);
+        });
         String::from_utf8_lossy(&buf).into_owned()
     });
 
@@ -862,10 +923,15 @@ where
     }
 
     if timed_out {
+        discard.store(true, Ordering::Release);
         // Take down the whole group first, honoring the optional
-        // SIGTERM grace, so grandchildren holding our pipe fds die
+        // configured signal and grace, so group members holding pipe fds die
         // too, then kill+reap the direct child.
-        crate::exec::kill_group_with_grace_sync(&mut group, claude.kill_grace);
+        crate::exec::kill_group_with_grace_sync(
+            &mut group,
+            claude.kill_grace,
+            claude.termination_signal,
+        );
         let _ = child.kill();
         let _ = child.wait();
         // Both worker threads can block indefinitely if an orphaned
@@ -892,7 +958,12 @@ where
     let stdout_diagnostics = match reader_result {
         Ok(diagnostics) => diagnostics.into_string(),
         Err(e) => {
-            group.kill_now();
+            discard.store(true, Ordering::Release);
+            crate::exec::kill_group_with_grace_sync(
+                &mut group,
+                claude.kill_grace,
+                claude.termination_signal,
+            );
             let _ = child.kill();
             let _ = child.wait();
             let _ = stderr_thread.join();
@@ -952,6 +1023,48 @@ fn join_with_budget<T: Send + 'static>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn shutdown_line_reader_retries_interrupted_reads() {
+        struct InterruptedReader {
+            data: std::io::Cursor<&'static [u8]>,
+            interrupt: bool,
+        }
+        impl std::io::Read for InterruptedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let len = buf.len().min(2);
+                std::io::Read::read(&mut self.data, &mut buf[..len])
+            }
+        }
+
+        let mut reader = std::io::BufReader::new(InterruptedReader {
+            data: std::io::Cursor::new(b"first\r\nsecond"),
+            interrupt: false,
+        });
+        let discard = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .as_deref(),
+            Some("second")
+        );
+        assert!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn parse(v: serde_json::Value) -> StreamEvent {
         serde_json::from_value(v).expect("valid StreamEvent")

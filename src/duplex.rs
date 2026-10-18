@@ -1163,7 +1163,7 @@ impl DuplexSession {
             .kill_on_drop(true);
         crate::exec::apply_child_environment(cmd.as_std_mut(), claude.clear_env, &claude.env);
         // Own process group (Unix) so shutdown can signal the whole
-        // tree, not just the direct child (see exec::GroupKillGuard).
+        // group, not just the direct child (see exec::GroupKillGuard).
         // Opt out via ClaudeBuilder::process_group.
         crate::exec::apply_process_group(&mut cmd, claude.process_group);
 
@@ -1213,6 +1213,7 @@ impl DuplexSession {
                 child,
                 group,
                 claude.kill_grace,
+                claude.termination_signal,
                 stdin,
                 stdout,
                 outbound_rx,
@@ -1485,6 +1486,7 @@ async fn run_session(
     mut child: Child,
     mut group: crate::exec::GroupKillGuard,
     kill_grace: Option<Duration>,
+    termination_signal: crate::TerminationSignal,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
@@ -1657,7 +1659,15 @@ async fn run_session(
     }
 
     drop(stdin);
-    match tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()).await {
+    let mut stdout = lines.into_inner();
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    match crate::exec::drain_until(
+        tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()),
+        &mut stdout,
+        &mut stderr,
+    )
+    .await
+    {
         Ok(Ok(_status)) => {
             group.disarm();
         }
@@ -1667,10 +1677,20 @@ async fn run_session(
         Err(_) => {
             warn!("duplex child did not exit within shutdown budget; killing");
             // Take down the whole group (Unix), honoring the optional
-            // SIGTERM grace, so subprocesses spawned for tool use die
-            // too, then kill+reap the direct child.
-            crate::exec::kill_group_with_grace(&mut group, kill_grace).await;
-            let _ = child.kill().await;
+            // configured signal and grace, then kill+reap the direct child.
+            // Detached tools require cooperation from the CLI.
+            let _ = crate::exec::drain_until(
+                crate::exec::stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    None,
+                ),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
         }
     }
 

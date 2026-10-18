@@ -1218,14 +1218,17 @@ async fn assert_pid_killed(pid: u32) {
     }
 }
 
+/// The shell creates a pid file before writing its contents. Cancellation
+/// must wait for the record, or it can kill the writer in that window.
+#[cfg(unix)]
+fn try_read_pid(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 /// Read a pid recorded by fake-claude.sh.
 #[cfg(unix)]
 fn read_pid(path: &std::path::Path) -> u32 {
-    std::fs::read_to_string(path)
-        .expect("read pid file")
-        .trim()
-        .parse()
-        .expect("parse pid")
+    try_read_pid(path).expect("read complete pid record")
 }
 
 /// The public query API does not report cancellation until the direct child
@@ -1248,7 +1251,7 @@ async fn cancellable_json_query_settles_process_group() {
         .build()
         .expect("failed to build Claude client");
     let cancel = async {
-        while !pid_path.exists() || !gpid_path.exists() {
+        while try_read_pid(&pid_path).is_none() || try_read_pid(&gpid_path).is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     };
@@ -1290,7 +1293,7 @@ async fn cancellable_stream_query_settles_process_group() {
         .output_format(OutputFormat::StreamJson)
         .no_session_persistence();
     let cancel = async {
-        while !pid_path.exists() || !gpid_path.exists() {
+        while try_read_pid(&pid_path).is_none() || try_read_pid(&gpid_path).is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     };
