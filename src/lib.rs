@@ -114,7 +114,7 @@
 //! | Mid-turn interrupt | yes ([`DuplexSession::interrupt`](duplex::DuplexSession::interrupt)) | no (only `child.kill()` via SIGKILL) |
 //! | Mid-turn permission prompts | yes ([`PermissionHandler`]) | no |
 //! | Broadcast event subscribers | yes ([`DuplexSession::subscribe`](duplex::DuplexSession::subscribe)) | no (per-turn `stream_query`) |
-//! | Built-in cost / history tracking | no ([`TurnResult`] is per-turn) | yes ([`Session::total_cost_usd`], [`Session::history`], [`BudgetTracker`]) |
+//! | Built-in cost / history tracking | via [`Conversation`] ([`TurnResult`] reports the session's running total) | yes ([`Session::total_cost_usd`], [`Session::history`], [`BudgetTracker`]) |
 //! | Right for | long-running hosts (IDE backends, daemons, agent servers, chat UIs) | short-lived processes (CLIs, build scripts, batch jobs, lambdas) |
 //!
 //! ## `DuplexSession` (recommended for long-running hosts)

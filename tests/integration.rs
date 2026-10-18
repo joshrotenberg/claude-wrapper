@@ -503,6 +503,20 @@ async fn test_conversation_three_turns_track_history_and_cost() {
         conv.total_cost_usd()
     );
 
+    // The CLI reports a running total on each result, so the
+    // cumulative cost must match the last turn's reported total
+    // rather than the sum of all three.
+    let last_total = conv
+        .last()
+        .and_then(|t| t.total_cost_usd())
+        .expect("last turn reports a total");
+    assert!(
+        (conv.total_cost_usd() - last_total).abs() < 1e-9,
+        "cumulative {} should equal the CLI's last running total {}",
+        conv.total_cost_usd(),
+        last_total
+    );
+
     // All three turns share the same session id (single duplex
     // child), and Conversation::session_id reports the most recent.
     assert_eq!(session_ids[0], session_ids[1]);
