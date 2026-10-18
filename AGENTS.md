@@ -209,7 +209,7 @@ Releases are driven by [`release-plz`](https://github.com/release-plz/release-pl
 
 The wrapper aims to cover the full `claude` CLI subcommand and global-flag
 surface that is meaningful for non-interactive (`-p` / programmatic) use. Last
-audited against `claude` 2.1.186.
+audited against `claude` 2.1.302 using the bidirectional CLI contract suite.
 
 Open coverage gaps -- commands or flags we intend to wrap but have not yet --
 are tracked as GitHub issues, not here. To re-audit, compare `claude --help`
