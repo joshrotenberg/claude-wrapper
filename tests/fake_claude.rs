@@ -802,7 +802,8 @@ async fn session_send_accumulates_across_turns() {
         .await
         .expect("second send should succeed");
     assert_eq!(second.session_id, "sess-001");
-    assert!((session.total_cost_usd() - 0.10).abs() < f64::EPSILON);
+    // The fixture repeats the same running total, so it adds no spend.
+    assert!((session.total_cost_usd() - 0.05).abs() < f64::EPSILON);
     assert_eq!(session.total_turns(), 4);
     assert_eq!(session.history().len(), 2);
     assert_eq!(
@@ -921,11 +922,15 @@ async fn session_stream_then_send_resumes() {
             .binary(fake_binary())
             .env("FAKE_CLAUDE_OUTPUT", "x")
             .env("FAKE_CLAUDE_SESSION_ID", "sess-stream-2")
+            .env("FAKE_CLAUDE_COST_USD", "0.03")
             .build()
             .expect("failed to build client"),
     );
 
-    let mut session = Session::new(Arc::clone(&claude));
+    let budget = claude_wrapper::BudgetTracker::builder()
+        .max_usd(0.04)
+        .build();
+    let mut session = Session::new(Arc::clone(&claude)).with_budget(budget.clone());
     session
         .stream("first", |_| {})
         .await
@@ -937,6 +942,15 @@ async fn session_stream_then_send_resumes() {
         .await
         .expect("follow-up send should succeed");
     assert_eq!(second.session_id, "sess-stream-2");
+    // Repeated native totals must not exhaust the budget or make the
+    // streaming and buffered paths maintain independent baselines.
+    session
+        .stream("third", |_| {})
+        .await
+        .expect("unchanged totals must leave budget for another turn");
+    assert!((session.total_cost_usd() - 0.03).abs() < 1e-9);
+    assert!((budget.total_usd() - 0.03).abs() < 1e-9);
+    assert_eq!(session.history().len(), 3);
 }
 
 /// Session is Send + Sync (compile check): Arc<Claude> unlocks this.

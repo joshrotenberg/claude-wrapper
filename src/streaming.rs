@@ -120,6 +120,8 @@ impl StreamEvent {
     ///
     /// Prefers `total_cost_usd` (the CLI's primary key) and falls back
     /// to the legacy `cost_usd` alias.
+    /// This is the running native-session total, including resumed
+    /// history, rather than an individual turn's cost.
     pub fn cost_usd(&self) -> Option<f64> {
         self.data
             .get("total_cost_usd")

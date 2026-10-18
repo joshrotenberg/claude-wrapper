@@ -716,11 +716,25 @@ async fn test_session_two_turns_resume_and_track() {
     // mode: it injects an ExitPlanMode tool turn that a tight max_turns
     // can't absorb (the Duplex recall test likewise runs without it).
     fn haiku(prompt: &str) -> QueryCommand {
-        QueryCommand::new(prompt).model("haiku").max_turns(2)
+        QueryCommand::new(prompt)
+            .model("haiku")
+            .max_turns(2)
+            .tools([""])
+            .strict_mcp_config()
+            .mcp_config(r#"{"mcpServers":{}}"#)
+            .permission_mode(claude_wrapper::PermissionMode::DontAsk)
     }
 
-    let claude = Arc::new(claude_client());
-    let mut session = Session::new(claude);
+    let dir = tempfile::tempdir().expect("isolated live-test workspace");
+    let claude = Arc::new(
+        Claude::builder()
+            .working_dir(dir.path())
+            .timeout_secs(60)
+            .build()
+            .expect("live client"),
+    );
+    let budget = claude_wrapper::BudgetTracker::builder().build();
+    let mut session = Session::new(claude).with_budget(budget.clone());
 
     // Two independent single-turn prompts. We assert the transient
     // Session's *mechanics* -- two turns dispatched (the second via
@@ -754,6 +768,17 @@ async fn test_session_two_turns_resume_and_track() {
         session.total_cost_usd()
     );
     assert!(session.id().is_some());
+    assert_eq!(first.session_id, second.session_id);
+    let first_total = first.cost_usd.expect("first reported total");
+    let last_total = second.cost_usd.expect("resumed reported total");
+    assert!(last_total >= first_total);
+    assert!((session.total_cost_usd() - last_total).abs() < 1e-9);
+    assert!((budget.total_usd() - last_total).abs() < 1e-9);
+    eprintln!(
+        "cost totals: first={first_total:.8}, resumed={last_total:.8}, recorded={:.8}, budget={:.8}",
+        session.total_cost_usd(),
+        budget.total_usd()
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────
