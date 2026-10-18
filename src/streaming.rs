@@ -718,7 +718,11 @@ fn read_line_or_discard<R: std::io::BufRead>(
             std::io::copy(reader, &mut std::io::sink())?;
             return Ok(None);
         }
-        let available = reader.fill_buf()?;
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if available.is_empty() {
             if line.is_empty() {
                 return Ok(None);
@@ -1019,6 +1023,48 @@ fn join_with_budget<T: Send + 'static>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn shutdown_line_reader_retries_interrupted_reads() {
+        struct InterruptedReader {
+            data: std::io::Cursor<&'static [u8]>,
+            interrupt: bool,
+        }
+        impl std::io::Read for InterruptedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let len = buf.len().min(2);
+                std::io::Read::read(&mut self.data, &mut buf[..len])
+            }
+        }
+
+        let mut reader = std::io::BufReader::new(InterruptedReader {
+            data: std::io::Cursor::new(b"first\r\nsecond"),
+            interrupt: false,
+        });
+        let discard = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .as_deref(),
+            Some("second")
+        );
+        assert!(
+            read_line_or_discard(&mut reader, &discard)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn parse(v: serde_json::Value) -> StreamEvent {
         serde_json::from_value(v).expect("valid StreamEvent")

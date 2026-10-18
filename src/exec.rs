@@ -1716,7 +1716,11 @@ where
 {
     let mut chunk = [0u8; CAPTURE_CHUNK];
     loop {
-        let read = reader.read(&mut chunk)?;
+        let read = match reader.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if read == 0 {
             return Ok(());
         }
@@ -2152,6 +2156,42 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn shutdown_capture_retries_interrupted_reads() {
+        struct InterruptedReader {
+            data: std::io::Cursor<&'static [u8]>,
+            interrupt: bool,
+        }
+        impl std::io::Read for InterruptedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let len = buf.len().min(2);
+                std::io::Read::read(&mut self.data, &mut buf[..len])
+            }
+        }
+
+        for discard in [false, true] {
+            let reader = InterruptedReader {
+                data: std::io::Cursor::new(b"payload"),
+                interrupt: false,
+            };
+            let mut received = Vec::new();
+            read_discardable(
+                reader,
+                &std::sync::atomic::AtomicBool::new(discard),
+                |chunk| {
+                    received.extend_from_slice(chunk);
+                },
+            )
+            .expect("an interrupted read is retried during capture and shutdown");
+            assert_eq!(received, if discard { &b""[..] } else { &b"payload"[..] });
+        }
+    }
 
     use crate::Claude;
 
