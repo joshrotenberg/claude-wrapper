@@ -23,6 +23,8 @@
 #       emitting output.
 #   FAKE_CLAUDE_ENV_CAPTURE_FILE - if set, write the complete exported child
 #       environment there before any delay or output.
+#   FAKE_CLAUDE_ARGV_CAPTURE_FILE - if set, write NUL-separated arguments
+#       there before any delay or output, preserving empty arguments.
 #   FAKE_CLAUDE_FAIL_ONCE_FILE - if set, create this marker and exit 75 on
 #       the first invocation, then succeed on later invocations.
 #   FAKE_CLAUDE_GRANDCHILD_PID_FILE - if set, spawn a long-sleeping
@@ -75,6 +77,10 @@ fi
 # can exit. This lets tests verify both successful and retried spawn attempts.
 if [[ -n "${FAKE_CLAUDE_ENV_CAPTURE_FILE:-}" ]]; then
     env > "$FAKE_CLAUDE_ENV_CAPTURE_FILE"
+fi
+
+if [[ -n "${FAKE_CLAUDE_ARGV_CAPTURE_FILE:-}" ]]; then
+    printf '%s\0' "$@" > "$FAKE_CLAUDE_ARGV_CAPTURE_FILE"
 fi
 
 if [[ -n "${FAKE_CLAUDE_STDIN_CAPTURE_FILE:-}" ]]; then

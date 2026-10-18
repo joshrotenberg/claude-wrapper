@@ -223,6 +223,27 @@ Full coverage of `claude -p`. The common options:
 | `input_format()` / `include_partial_messages()` | `--input-format` / `--include-partial-messages` | Input/streaming shape |
 | `settings()` / `fallback_model()` / `add_dir()` / `file()` | various | Misc per-turn knobs |
 | `retry()` | (client-side) | Per-command retry override |
+| `extra_arg()` / `extra_args()` | raw CLI arguments | Unvalidated options for this query |
+
+Use `extra_arg` / `extra_args` for provider options that need to pass through
+unchanged. Each value is one argument, including values containing spaces;
+the wrapper does not invoke a shell. Repeated calls append in order, after
+generated options and before `--` and the prompt. With `prompt_via_stdin(true)`,
+they are the final arguments and the prompt is still sent through stdin.
+
+```rust
+let cmd = QueryCommand::new("summarize the project")
+    .model("sonnet")
+    .extra_args(["--plugin-dir", "/path with spaces/plugins"])
+    .extra_arg("--brief")
+    .prompt_via_stdin(true);
+```
+
+Passthrough arguments are not validated, including conflicts with typed
+options. The Claude CLI determines how duplicate or unsupported flags behave.
+Frontends that depend on a specific input or output format should reject
+conflicting passthrough options themselves. Use `ClaudeBuilder::arg` when an
+argument should apply to every command instead.
 
 Raw session flags (prefer `Session` for multi-turn):
 

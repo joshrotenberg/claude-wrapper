@@ -301,6 +301,113 @@ async fn fake_claude_stream_json_output() {
     assert_eq!(result.session_id, "fake-session-id");
 }
 
+/// Exercise the public execution paths against the argv the child receives.
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn query_extra_args_reach_child_across_async_transports() {
+    use claude_wrapper::streaming::{stream_query, stream_query_cancellable};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let argv_path = dir.path().join("argv");
+    let stdin_path = dir.path().join("stdin");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .arg("--debug")
+        .env("FAKE_CLAUDE_ARGV_CAPTURE_FILE", argv_path.to_string_lossy())
+        .env(
+            "FAKE_CLAUDE_STDIN_CAPTURE_FILE",
+            stdin_path.to_string_lossy(),
+        )
+        .build()
+        .expect("client");
+    let prompt = "--private prompt\nsecond line";
+    let extra = [
+        "--future-option",
+        "two words\nnext line",
+        "",
+        "'$HOME'`literal`",
+    ];
+
+    for stdin in [false, true] {
+        for mode in [
+            "text",
+            "cancel",
+            "json",
+            "json-cancel",
+            "stream",
+            "stream-cancel",
+        ] {
+            let mut cmd = QueryCommand::new(prompt)
+                .extra_arg(extra[0])
+                .extra_args(extra[1..].iter().copied())
+                .model("sonnet")
+                .prompt_via_stdin(stdin);
+            let mut expected = vec!["--debug", "--print"];
+            if mode.starts_with("json") {
+                expected.extend(["--output-format", "json"]);
+            } else if mode.starts_with("stream") {
+                cmd = cmd.output_format(OutputFormat::StreamJson);
+                expected.extend(["--output-format", "stream-json", "--verbose"]);
+            }
+            expected.extend(["--model", "sonnet"]);
+            expected.extend(extra);
+            if !stdin {
+                expected.extend(["--", prompt]);
+            }
+
+            match mode {
+                "text" => assert!(cmd.execute(&claude).await.expect(mode).success),
+                "cancel" => assert!(
+                    cmd.execute_cancellable(&claude, std::future::pending())
+                        .await
+                        .expect(mode)
+                        .success
+                ),
+                "json" => assert_eq!(
+                    cmd.execute_json(&claude).await.expect(mode).result,
+                    "fake response"
+                ),
+                "json-cancel" => assert_eq!(
+                    cmd.execute_json_cancellable(&claude, std::future::pending())
+                        .await
+                        .expect(mode)
+                        .result,
+                    "fake response"
+                ),
+                "stream" | "stream-cancel" => {
+                    let mut result = None;
+                    let handler = |event: claude_wrapper::streaming::StreamEvent| {
+                        if event.is_result() {
+                            result = event.result_text().map(str::to_owned);
+                        }
+                    };
+                    if mode == "stream" {
+                        stream_query(&claude, &cmd, handler).await.expect(mode);
+                    } else {
+                        stream_query_cancellable(&claude, &cmd, std::future::pending(), handler)
+                            .await
+                            .expect(mode);
+                    }
+                    assert_eq!(result.as_deref(), Some("fake response"));
+                }
+                _ => unreachable!(),
+            }
+
+            let actual = std::fs::read_to_string(&argv_path).expect("captured argv");
+            assert_eq!(
+                actual.split_terminator('\0').collect::<Vec<_>>(),
+                expected,
+                "mode={mode}, stdin={stdin}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&stdin_path).expect("captured stdin"),
+                if stdin { prompt } else { "" },
+                "mode={mode}, stdin={stdin}"
+            );
+        }
+    }
+}
+
 /// Verify that a non-zero exit code is surfaced as an error.
 #[tokio::test]
 async fn fake_claude_non_zero_exit_is_error() {

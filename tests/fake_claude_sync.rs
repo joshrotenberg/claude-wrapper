@@ -80,6 +80,52 @@ fn sync_basic_execution_returns_stdout() {
     assert_eq!(output.exit_code, 0);
 }
 
+#[cfg(feature = "json")]
+#[test]
+fn query_extra_args_reach_child_with_sync_json_and_stdin() {
+    use claude_wrapper::QueryCommand;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let argv_path = dir.path().join("argv");
+    let stdin_path = dir.path().join("stdin");
+    let claude = Claude::builder()
+        .binary(fake_binary())
+        .env("FAKE_CLAUDE_ARGV_CAPTURE_FILE", argv_path.to_string_lossy())
+        .env(
+            "FAKE_CLAUDE_STDIN_CAPTURE_FILE",
+            stdin_path.to_string_lossy(),
+        )
+        .build()
+        .expect("client");
+
+    for stdin in [false, true] {
+        let result = QueryCommand::new("private prompt")
+            .extra_arg("--future-option")
+            .extra_args(["two words", ""])
+            .prompt_via_stdin(stdin)
+            .execute_json_sync(&claude)
+            .expect("sync JSON query");
+        assert_eq!(result.result, "fake response");
+        let mut expected = vec![
+            "--print",
+            "--output-format",
+            "json",
+            "--future-option",
+            "two words",
+            "",
+        ];
+        if !stdin {
+            expected.extend(["--", "private prompt"]);
+        }
+        let actual = std::fs::read_to_string(&argv_path).expect("captured argv");
+        assert_eq!(actual.split_terminator('\0').collect::<Vec<_>>(), expected);
+        assert_eq!(
+            std::fs::read_to_string(&stdin_path).expect("captured stdin"),
+            if stdin { "private prompt" } else { "" }
+        );
+    }
+}
+
 #[test]
 fn clear_env_applies_to_all_sync_exec_paths() {
     use claude_wrapper::exec::run_claude_with_stdin_prompt_sync;
