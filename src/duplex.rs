@@ -1029,6 +1029,24 @@ impl TurnResult {
     pub fn duration_ms(&self) -> Option<u64> {
         self.result.get("duration_ms").and_then(Value::as_u64)
     }
+
+    /// Extract `result.subtype`, if present: `"success"` for a turn
+    /// that completed, or an error subtype such as
+    /// `"error_during_execution"` for an interrupted turn.
+    #[must_use]
+    pub fn subtype(&self) -> Option<&str> {
+        self.result.get("subtype").and_then(Value::as_str)
+    }
+
+    /// Extract `result.is_error`. Returns `false` when the field is
+    /// absent.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.result
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 /// Turn a reported running total into the cost of the turn that
@@ -2596,6 +2614,24 @@ mod tests {
         assert_eq!(r.session_id(), None);
         assert_eq!(r.total_cost_usd(), None);
         assert_eq!(r.duration_ms(), None);
+        assert_eq!(r.subtype(), None);
+        assert!(!r.is_error());
+    }
+
+    #[test]
+    fn turn_result_subtype_and_is_error_for_interrupted_turn() {
+        let r = TurnResult {
+            result: json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "total_cost_usd": 0.0004,
+            }),
+            events: vec![],
+        };
+        assert_eq!(r.subtype(), Some("error_during_execution"));
+        assert!(r.is_error());
+        assert_eq!(r.result_text(), None);
     }
 
     #[test]
