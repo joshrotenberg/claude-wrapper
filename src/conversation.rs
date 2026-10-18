@@ -68,6 +68,9 @@
 //! the CLI restores the resumed session's total, so the first
 //! recorded turn also counts what that session spent before this
 //! process started.
+//! A falling total contributes zero and becomes the new baseline;
+//! spend during an unobserved reset cannot be recovered from that
+//! total alone.
 //!
 //! # Budget tracking
 //!
@@ -169,6 +172,9 @@ impl Conversation {
     /// before dispatching a turn if the ceiling has been hit. Clone a
     /// tracker across several conversations to enforce a shared
     /// ceiling.
+    /// A resumed session's first recorded total includes historical
+    /// spend, which is also charged to this tracker. See the
+    /// [cost-accounting scope](crate::conversation#cost-accounting).
     #[must_use]
     pub fn with_budget(mut self, budget: BudgetTracker) -> Self {
         self.state.budget = Some(budget);
