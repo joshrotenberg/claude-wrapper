@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.6] - 2026-10-19
+
+### Bug Fixes
+
+- Support graceful native interruption before forced shutdown 
+- Record duplex turn cost as the change in the running total 
+- Record Session costs as changes in native totals 
+- Extend tested Claude CLI range to 2.1.302 
+- Drain resident stderr and preserve child exit failures 
+- Protect diagnostics and expose compatible headless flags 
+
+### Features
+
+- Add query argument passthrough 
+
+### Testing
+
+- Verify native permission denial across supported CLI endpoints 
+
+
+
 ## [0.14.5] - 2026-10-08
 
 ### Bug Fixes
