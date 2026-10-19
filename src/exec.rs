@@ -1347,7 +1347,9 @@ const TXTBSY_MAX_BACKOFF: Duration = Duration::from_millis(25);
 /// clears on its own, so retry within a bounded wall-clock budget rather than
 /// surfacing a spurious spawn failure.
 #[cfg(feature = "async")]
-async fn spawn_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
+pub(crate) async fn spawn_retrying_txtbsy(
+    cmd: &mut Command,
+) -> std::io::Result<tokio::process::Child> {
     let start = std::time::Instant::now();
     let mut backoff = Duration::from_millis(1);
     loop {
@@ -2869,7 +2871,9 @@ mod tests {
             .build()
             .expect("build");
         let cancel = async {
-            while !pid_path.exists() || !gpid_path.exists() {
+            // Redirection creates a file before echo writes its contents.
+            // Wait for complete PIDs before cancellation can kill the writer.
+            while try_read_pid(&pid_path).is_none() || try_read_pid(&gpid_path).is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };

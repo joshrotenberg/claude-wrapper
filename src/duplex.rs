@@ -35,6 +35,20 @@
 //! it is a thin bookkeeping layer over this module, not a different
 //! transport.
 //!
+//! # Resident I/O and process exit
+//!
+//! Stderr is drained continuously, including while a permission handler is
+//! awaiting its decision. Only the latest 64 KiB of diagnostic bytes are kept;
+//! they are included in a nonzero process-exit error. Shutdown drains remaining
+//! stdout and gives stderr a bounded final read, so an escaped descendant
+//! holding a pipe open cannot make diagnostic collection wait forever.
+//!
+//! A turn's [`TurnResult`] and the process exit are separate evidence. A result
+//! can arrive before a later process failure. Use [`DuplexSession::wait_for_exit`]
+//! or [`DuplexSession::close`] for process settlement. An observed zero exit
+//! completes the session; a nonzero exit or I/O/settlement failure is reported
+//! through [`SessionExitStatus::Failed`] and the error returned by `close`.
+//!
 //! [`QueryCommand`]: crate::QueryCommand
 //! [`Session`]: crate::session::Session
 //! [`Conversation`]: crate::conversation::Conversation
@@ -189,15 +203,15 @@
 //! `spawn`/`send`/`close` (PR 1), `subscribe` (PR 2), mid-turn
 //! permission handling (PR 3), and `interrupt` (PR 4, this one).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -1135,8 +1149,7 @@ fn classify(msg: &Value) -> InboundEvent {
 pub enum SessionExitStatus {
     /// The session task is still running.
     Running,
-    /// The session task completed normally (close, stdout EOF without
-    /// error).
+    /// The child was reaped with a zero exit status and no I/O error.
     Completed,
     /// The session task ended with an error. Carries the error's
     /// `Display` rendering.
@@ -1212,11 +1225,13 @@ impl DuplexSession {
             cmd.current_dir(dir);
         }
 
-        let mut child = cmd.spawn().map_err(|e| Error::Io {
-            message: format!("failed to spawn claude: {e}"),
-            source: e,
-            working_dir: claude.working_dir.clone(),
-        })?;
+        let mut child = crate::exec::spawn_retrying_txtbsy(&mut cmd)
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to spawn claude: {e}"),
+                source: e,
+                working_dir: claude.working_dir.clone(),
+            })?;
         let group =
             crate::exec::arm_and_notify(claude.process_group, child.id(), claude.on_spawn.as_ref());
 
@@ -1278,6 +1293,9 @@ impl DuplexSession {
     /// Returns [`Error::DuplexTurnInFlight`] if another turn is
     /// already pending, and [`Error::DuplexClosed`] if the session
     /// task has already exited.
+    /// `DuplexClosed` may arrive before final diagnostic collection and
+    /// exit-state publication. Await [`Self::wait_for_exit`] for settled
+    /// process evidence instead of relying on an immediate snapshot.
     ///
     /// The returned [`TurnResult`] holds this turn's events only, but
     /// its [`TurnResult::total_cost_usd`] is the session's running
@@ -1503,6 +1521,12 @@ impl DuplexSession {
     /// Drops the outbound channel sender, which the session task
     /// observes as `recv() -> None`, then closes stdin and reaps the
     /// child.
+    ///
+    /// Returns an error for a nonzero child exit, even if an earlier
+    /// turn already delivered a successful result. Failed native exits
+    /// return [`Error::DuplexProcessFailed`] with the native status, a
+    /// bounded tail of stderr, and whether the shutdown budget expired.
+    /// Semantic turn failures remain in [`TurnResult::result`].
     pub async fn close(self) -> Result<()> {
         drop(self.outbound_tx);
         drop(self.events_tx);
@@ -1519,12 +1543,129 @@ impl DuplexSession {
 }
 
 /// Time budget for the graceful child shutdown after the run loop
-/// exits. If the child is still alive after this deadline we SIGKILL
-/// it so close() does not hang on a misbehaving subprocess.
+/// exits. If the child is still alive after this deadline, apply the
+/// configured stop policy so close() does not hang on the subprocess.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+
+// Keep only the most recent diagnostic bytes; a resident process may run
+// indefinitely and stderr is not a protocol line stream.
+const STDERR_TAIL_BYTES: usize = 64 * 1024;
+const STDERR_SETTLE_BUDGET: Duration = Duration::from_millis(200);
+
+async fn read_stderr_tail<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    tail: &mut VecDeque<u8>,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = match reader.read(&mut chunk).await {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let excess = (tail.len() + read).saturating_sub(STDERR_TAIL_BYTES);
+        tail.drain(..excess);
+        tail.extend(&chunk[..read]);
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
+    mut child: Child,
+    group: crate::exec::GroupKillGuard,
+    kill_grace: Option<Duration>,
+    termination_signal: crate::TerminationSignal,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
+    events_tx: broadcast::Sender<InboundEvent>,
+    permission_handler: Option<PermissionHandler>,
+    exit_tx: watch::Sender<SessionExitStatus>,
+) -> Result<()> {
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let mut tail = VecDeque::new();
+    let (stderr_failed_tx, stderr_failed_rx) = oneshot::channel();
+    // These futures share this scope. No detached reader task or unbounded
+    // channel can survive session settlement or a dropped session task.
+    let (status, stderr_result) = {
+        let drain_stderr = async {
+            let result = read_stderr_tail(&mut stderr, &mut tail).await;
+            if result.is_err() {
+                let _ = stderr_failed_tx.send(());
+            }
+            result
+        };
+        let session = run_session_child(
+            child,
+            group,
+            kill_grace,
+            termination_signal,
+            stdin,
+            stdout,
+            outbound_rx,
+            events_tx,
+            permission_handler,
+            stderr_failed_rx,
+        );
+        tokio::pin!(drain_stderr);
+        tokio::pin!(session);
+        tokio::select! {
+            status = &mut session => {
+                // A descendant can keep stderr open after the leader exits.
+                // Retain available diagnostics without waiting forever for EOF.
+                let read = tokio::time::timeout(
+                    STDERR_SETTLE_BUDGET, &mut drain_stderr,
+                ).await.ok();
+                (status, read)
+            }
+            read = &mut drain_stderr => (session.await, Some(read)),
+        }
+    };
+    let stderr = String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned();
+    let result = resident_outcome(status, stderr_result, stderr);
+    let final_state = match &result {
+        Ok(()) => SessionExitStatus::Completed,
+        Err(error) => SessionExitStatus::Failed(error.to_string()),
+    };
+    tracing::Span::current().record(
+        "exit",
+        if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        },
+    );
+    let _ = exit_tx.send(final_state);
+    result
+}
+
+fn resident_outcome(
+    status: Result<(ExitStatus, bool)>,
+    stderr_result: Option<std::io::Result<()>>,
+    stderr: String,
+) -> Result<()> {
+    match (status, stderr_result) {
+        (Err(error), _) => Err(error),
+        (Ok((status, shutdown_budget_exceeded)), read) if !status.success() => {
+            Err(Error::DuplexProcessFailed {
+                status,
+                shutdown_budget_exceeded,
+                stderr,
+                stderr_read_error: read.and_then(std::result::Result::err),
+            })
+        }
+        (Ok(_), Some(Err(source))) => Err(Error::Io {
+            message: format!("failed to read duplex stderr; retained diagnostics: {stderr}"),
+            source,
+            working_dir: None,
+        }),
+        (Ok(_), _) => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_child(
     mut child: Child,
     mut group: crate::exec::GroupKillGuard,
     kill_grace: Option<Duration>,
@@ -1534,13 +1675,14 @@ async fn run_session(
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
     permission_handler: Option<PermissionHandler>,
-    exit_tx: watch::Sender<SessionExitStatus>,
-) -> Result<()> {
+    mut stderr_failed: oneshot::Receiver<()>,
+) -> Result<(ExitStatus, bool)> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
     let mut pending_control: HashMap<String, oneshot::Sender<Result<()>>> = HashMap::new();
     let mut next_control_id: u64 = 0;
     let mut stream_err: Option<Error> = None;
+    let mut stderr_failure_open = true;
     // The session span is this task's own span (see DuplexSession::spawn).
     let session_span = tracing::Span::current();
     let mut turns: u64 = 0;
@@ -1657,6 +1799,13 @@ async fn run_session(
                 }
             },
 
+            failure = &mut stderr_failed, if stderr_failure_open => {
+                stderr_failure_open = false;
+                if failure.is_ok() {
+                    break;
+                }
+            },
+
             msg = outbound_rx.recv() => match msg {
                 Some(OutboundMsg::Send { prompt, reply }) => {
                     if pending.is_some() {
@@ -1710,26 +1859,27 @@ async fn run_session(
 
     drop(stdin);
     let mut stdout = lines.into_inner();
-    let mut stderr = child.stderr.take().expect("stderr was piped");
-    match crate::exec::drain_until(
+    // Stderr is drained by the enclosing future, including while this
+    // loop awaits a permission handler or settles the child.
+    let mut unused_stderr = tokio::io::empty();
+    let waited = crate::exec::drain_until(
         tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()),
         &mut stdout,
-        &mut stderr,
+        &mut unused_stderr,
     )
-    .await
-    {
-        Ok(Ok(_status)) => {
+    .await;
+    let status = match waited {
+        Ok(Ok(status)) => {
             group.disarm();
+            Ok((status, false))
         }
-        Ok(Err(e)) => {
-            warn!(error = %e, "failed to wait for duplex child");
-        }
-        Err(_) => {
-            warn!("duplex child did not exit within shutdown budget; killing");
-            // Take down the whole group (Unix), honoring the optional
-            // configured signal and grace, then kill+reap the direct child.
-            // Detached tools require cooperation from the CLI.
-            let _ = crate::exec::drain_until(
+        Ok(Err(source)) => {
+            let error = Error::Io {
+                message: "failed to wait for duplex child".into(),
+                source,
+                working_dir: None,
+            };
+            match crate::exec::drain_until(
                 crate::exec::stop_and_reap(
                     &mut child,
                     &mut group,
@@ -1738,11 +1888,42 @@ async fn run_session(
                     None,
                 ),
                 &mut stdout,
-                &mut stderr,
+                &mut unused_stderr,
             )
-            .await;
+            .await
+            {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup),
+            }
         }
-    }
+        Err(_) => {
+            warn!("duplex child did not exit within shutdown budget; stopping");
+            match crate::exec::drain_until(
+                crate::exec::stop_and_reap(
+                    &mut child,
+                    &mut group,
+                    kill_grace,
+                    termination_signal,
+                    None,
+                ),
+                &mut stdout,
+                &mut unused_stderr,
+            )
+            .await
+            {
+                Ok(()) => child
+                    .wait()
+                    .await
+                    .map(|status| (status, true))
+                    .map_err(|source| Error::Io {
+                        message: "failed to wait for stopped duplex child".into(),
+                        source,
+                        working_dir: None,
+                    }),
+                Err(error) => Err(error),
+            }
+        }
+    };
 
     if let Some((reply, _)) = pending.take() {
         let _ = reply.send(Err(Error::DuplexClosed));
@@ -1751,25 +1932,11 @@ async fn run_session(
         let _ = reply.send(Err(Error::DuplexClosed));
     }
 
-    let result = match stream_err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    };
-    let final_state = match &result {
-        Ok(()) => SessionExitStatus::Completed,
-        Err(e) => SessionExitStatus::Failed(e.to_string()),
-    };
     session_span.record("turns", turns);
-    session_span.record(
-        "exit",
-        match &final_state {
-            SessionExitStatus::Completed => "completed",
-            SessionExitStatus::Failed(_) => "failed",
-            SessionExitStatus::Running => "running",
-        },
-    );
-    let _ = exit_tx.send(final_state);
-    result
+    match stream_err {
+        Some(error) => Err(error),
+        None => status,
+    }
 }
 
 /// Action returned from [`handle_inbound`] for the run loop to act
@@ -3246,5 +3413,68 @@ mod tests {
         .await
         .expect("wait_for_exit must not hang when sender is dropped");
         assert!(matches!(status, SessionExitStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_retries_interruptions_and_retains_bytes_on_failure() {
+        struct Reader(u8);
+        impl tokio::io::AsyncRead for Reader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                self.0 += 1;
+                std::task::Poll::Ready(match self.0 {
+                    1 => Err(std::io::ErrorKind::Interrupted.into()),
+                    2 => {
+                        buf.put_slice(b"retained");
+                        Ok(())
+                    }
+                    _ => Err(std::io::Error::other("stderr read fault")),
+                })
+            }
+        }
+        let mut tail = VecDeque::new();
+        let error = read_stderr_tail(&mut Reader(0), &mut tail)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "stderr read fault");
+        assert_eq!(tail.into_iter().collect::<Vec<_>>(), b"retained");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stderr_read_failure_keeps_native_exit_evidence_and_diagnostics() {
+        for code in [0, 7] {
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .status()
+                .unwrap();
+            let result = resident_outcome(
+                Ok((status, false)),
+                Some(Err(std::io::Error::other("stderr read fault"))),
+                "retained diagnostics".into(),
+            );
+            match result {
+                Err(Error::DuplexProcessFailed {
+                    status,
+                    stderr,
+                    stderr_read_error,
+                    ..
+                }) => {
+                    assert_eq!(status.code(), Some(7));
+                    assert_eq!(stderr, "retained diagnostics");
+                    assert_eq!(stderr_read_error.unwrap().to_string(), "stderr read fault");
+                }
+                Err(Error::Io {
+                    message, source, ..
+                }) if code == 0 => {
+                    assert!(message.contains("retained diagnostics"));
+                    assert_eq!(source.to_string(), "stderr read fault");
+                }
+                other => panic!("expected retained exit/read evidence, got {other:?}"),
+            }
+        }
     }
 }

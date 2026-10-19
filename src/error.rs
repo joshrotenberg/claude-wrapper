@@ -58,6 +58,24 @@ pub enum Error {
         working_dir: Option<PathBuf>,
     },
 
+    /// A resident duplex child exited unsuccessfully. Its native status is
+    /// retained directly, including a Unix terminating signal when present.
+    /// The turn's semantic result remains separate from this process failure.
+    #[error("duplex child exited unsuccessfully ({status}; shutdown budget exceeded: {shutdown_budget_exceeded}){}{}", if stderr.is_empty() { String::new() } else { format!("\nstderr: {stderr}") }, stderr_read_error.as_ref().map(|error| format!("\nstderr read failed: {error}")).unwrap_or_default())]
+    DuplexProcessFailed {
+        /// Observed native status. `code()` is absent for a Unix signal;
+        /// use `std::os::unix::process::ExitStatusExt::signal` on Unix.
+        status: std::process::ExitStatus,
+        /// The wrapper's shutdown budget expired and it invoked its stop
+        /// policy. This records the attempt, not which signal caused exit.
+        shutdown_budget_exceeded: bool,
+        /// At most the latest 64 KiB of diagnostic bytes, decoded lossily.
+        stderr: String,
+        /// A diagnostic read failure, retained alongside the native status.
+        #[source]
+        stderr_read_error: Option<std::io::Error>,
+    },
+
     /// An I/O error occurred while spawning or communicating with the process.
     #[error("io error: {message}{}", working_dir.as_ref().map(|d| format!(" (in {})", d.display())).unwrap_or_default())]
     Io {
