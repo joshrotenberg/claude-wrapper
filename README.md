@@ -669,3 +669,12 @@ cargo test --test integration -- --ignored
 ## License
 
 MIT OR Apache-2.0
+
+### Execution diagnostics contract
+
+Normal wrapper tracing is intended to report operation, argument counts, byte
+counts, timing and outcome metadata. Prompts, argument values, native identifiers,
+paths, configuration values, process output and rendered errors belong in
+caller-controlled command previews, result/error values or explicit native logs.
+The wrapper does not install a subscriber. Hosts choose their subscriber and
+correlation spans; enabling wrapper tracing must not opt them into content logs.
