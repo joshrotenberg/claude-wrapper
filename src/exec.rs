@@ -2966,7 +2966,7 @@ mod tests {
 sleep 30 &
 detached=$!
 set +m
-trap 'head -c 1048576 /dev/zero || exit 97; head -c 1048576 /dev/zero >&2 || exit 98; kill "$detached"; wait "$detached"; echo cleaned > "{dir}/cleaned"; exit 0' INT
+trap 'echo received > "{dir}/cleanup-stage"; head -c 1048576 /dev/zero || exit 97; echo stdout > "{dir}/cleanup-stage"; head -c 1048576 /dev/zero >&2 || exit 98; echo stderr > "{dir}/cleanup-stage"; kill "$detached"; wait "$detached"; echo cleaned > "{dir}/cleaned"; exit 0' INT
 echo $$ > "{dir}/provider"
 echo "$detached" > "{dir}/detached"
 ps -o pgid= -p $$ > "{dir}/provider-group"
@@ -2991,7 +2991,9 @@ wait "$detached"
             Claude::builder()
                 .binary(&self.binary)
                 .termination_signal(crate::TerminationSignal::Interrupt)
-                .kill_grace(Duration::from_millis(400))
+                // The handler forks two writers and drains two MiB. This
+                // proves pipe progress, not a subsecond scheduling bound.
+                .kill_grace(Duration::from_secs(2))
                 .output_limit(4096)
                 .build()
                 .unwrap()
@@ -3024,7 +3026,8 @@ wait "$detached"
             // a failure of the provider's own SIGINT handler.
             assert!(
                 self.path("cleaned").exists(),
-                "SIGINT handler must drain both large writes and clean its child"
+                "SIGINT handler must drain both large writes and clean its child; stage={:?}",
+                std::fs::read_to_string(self.path("cleanup-stage")).ok()
             );
             assert_pid_killed(try_read_pid(&self.path("provider")).unwrap());
             assert_pid_killed(try_read_pid(&self.path("detached")).unwrap());
