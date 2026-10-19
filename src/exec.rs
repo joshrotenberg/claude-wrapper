@@ -71,33 +71,42 @@ pub(crate) fn apply_child_environment(
     cmd.envs(env);
 }
 
-/// The subcommand label for a span, derived from the argv.
-///
-/// The first token is the subcommand for subcommand-style invocations
-/// (`mcp`, `plugin`, `doctor`). For print-mode runs it is the leading
-/// flag (`--print`), which is equally informative. Never a value:
-/// values always follow a flag, and the first token cannot be one.
-///
-/// Deliberately not the whole argv. Prompts arrive as argv positionals
-/// and must never reach a span field.
+/// Fixed operation labels keep arbitrary RawCommand/global arguments private.
 #[cfg(any(feature = "async", feature = "sync"))]
-pub(crate) fn span_command(args: &[String]) -> &str {
-    args.first().map(String::as_str).unwrap_or("<none>")
+pub(crate) fn span_command(args: &[String]) -> &'static str {
+    match args.first().map(String::as_str) {
+        None => "<none>",
+        Some("--print" | "-p") => "print",
+        Some("mcp") => "mcp",
+        Some("plugin") => "plugin",
+        Some("auth") => "auth",
+        Some("agents") => "agents",
+        Some("auto-mode") => "auto-mode",
+        Some("doctor") => "doctor",
+        Some("install") => "install",
+        Some("marketplace") => "marketplace",
+        Some("update") => "update",
+        Some("setup-token") => "setup-token",
+        Some("project") => "project",
+        Some("ultrareview") => "ultrareview",
+        Some("--version" | "-v") => "version",
+        Some(_) => "other",
+    }
 }
 
 /// Open the span covering one CLI invocation.
 ///
 /// `exit_code` and `duration_ms` are declared empty and recorded when
 /// the call finishes, so a subscriber sees them on close. Carries the
-/// binary and working directory, never the prompt and never the env.
+/// argument counts and whether a working directory was set, never content or paths.
 #[cfg(any(feature = "async", feature = "sync"))]
 pub(crate) fn exec_span(claude: &Claude, args: &[String], mode: &'static str) -> tracing::Span {
     tracing::debug_span!(
         "claude.exec",
         command = span_command(args),
         mode,
-        binary = %claude.binary.display(),
-        cwd = claude.working_dir.as_deref().map(|d| d.display().to_string()),
+        arg_count = args.len(),
+        working_dir_set = claude.working_dir.is_some(),
         exit_code = tracing::field::Empty,
         duration_ms = tracing::field::Empty,
     )
@@ -584,8 +593,8 @@ pub async fn run_claude_cancellable<C>(
 where
     C: std::future::Future<Output = ()> + Send,
 {
+    let span = exec_span(claude, &args, "cancellable");
     let command_args = full_command_args(claude, args);
-    let span = exec_span(claude, &command_args, "cancellable");
     let _enter = span.enter();
     let started = std::time::Instant::now();
     let stop = cancellation_or_timeout(cancel, claude.timeout);
@@ -652,8 +661,8 @@ pub async fn run_claude_with_stdin_prompt_cancellable<C>(
 where
     C: std::future::Future<Output = ()> + Send,
 {
+    let span = exec_span(claude, &args, "stdin-cancellable");
     let command_args = full_command_args(claude, args);
-    let span = exec_span(claude, &command_args, "stdin-cancellable");
     let _enter = span.enter();
     let started = std::time::Instant::now();
     let stop = cancellation_or_timeout(cancel, claude.timeout);
@@ -683,7 +692,10 @@ async fn run_claude_with_stdin_prompt_internal(
     let span = exec_span(claude, &command_args, "stdin");
     let _enter = span.enter();
     let started = std::time::Instant::now();
-    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt)");
+    debug!(
+        arg_count = command_args.len(),
+        "executing claude command (stdin prompt)"
+    );
 
     let binary = &claude.binary;
     let env = &claude.env;
@@ -928,7 +940,7 @@ async fn run_claude_once(claude: &Claude, args: Vec<String>) -> Result<CommandOu
     let span = exec_span(claude, &command_args, "oneshot");
     let _enter = span.enter();
     let started = std::time::Instant::now();
-    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command");
+    debug!(arg_count = command_args.len(), "executing claude command");
 
     let output = if let Some(timeout) = claude.timeout {
         run_with_timeout(
@@ -1191,8 +1203,8 @@ async fn run_with_stop(
             .unwrap_or_default();
             if !stdout_str.is_empty() || !stderr_str.is_empty() {
                 warn!(
-                    stdout = %stdout_str,
-                    stderr = %stderr_str,
+                    stdout_bytes = stdout_str.len(),
+                    stderr_bytes = stderr_str.len(),
                     "partial output from stopped process",
                 );
             }
@@ -1206,9 +1218,8 @@ async fn run_with_stop(
 #[cfg(any(feature = "async", feature = "sync"))]
 const CAPTURE_CHUNK: usize = 8 * 1024;
 
-/// How much of an over-ceiling stream is kept to log. The captured
-/// prefix can be as large as the ceiling itself, which is not something
-/// to hand to a logger, but the first few KiB usually name the runaway.
+/// Bound the discarded diagnostic prefix while capture settlement finishes.
+/// Tracing reports only its decoded byte length, never its contents.
 #[cfg(any(feature = "async", feature = "sync"))]
 const BREACH_LOG_BYTES: usize = 2 * 1024;
 
@@ -1224,7 +1235,7 @@ enum Captured {
     /// EOF was reached within the ceiling.
     Complete(String),
     /// The child wrote past the ceiling. Carries at most
-    /// [`BREACH_LOG_BYTES`] of the prefix, for diagnostics only: the
+    /// [`BREACH_LOG_BYTES`] of the raw prefix, decoded lossily: the
     /// rest is dropped rather than returned, since returning it is the
     /// truncated success this exists to avoid.
     Exceeded { head: String },
@@ -1287,7 +1298,7 @@ pub(crate) async fn capture_stream<R: AsyncReadExt + Unpin>(
             warn!(
                 %stream,
                 limit_bytes,
-                head = %head,
+                retained_prefix_bytes = head.len(),
                 "captured output exceeded its ceiling; terminating the child",
             );
             Err(Error::OutputLimitExceeded {
@@ -1406,7 +1417,10 @@ pub fn run_claude_with_stdin_prompt_sync(
     let span = exec_span(claude, &command_args, "stdin-sync");
     let _enter = span.enter();
     let started = std::time::Instant::now();
-    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (stdin prompt, sync)");
+    debug!(
+        arg_count = command_args.len(),
+        "executing claude command (stdin prompt, sync)"
+    );
 
     let result = if let Some(timeout) = claude.timeout {
         run_with_deadline_stdin_sync(
@@ -1561,7 +1575,10 @@ fn run_claude_once_sync(claude: &Claude, args: Vec<String>) -> Result<CommandOut
     let span = exec_span(claude, &command_args, "oneshot-sync");
     let _enter = span.enter();
     let started = std::time::Instant::now();
-    debug!(binary = %claude.binary.display(), args = ?command_args, "executing claude command (sync)");
+    debug!(
+        arg_count = command_args.len(),
+        "executing claude command (sync)"
+    );
 
     let result = if let Some(timeout) = claude.timeout {
         run_with_deadline_sync(
@@ -1876,7 +1893,7 @@ fn join_capture(
             warn!(
                 %stream,
                 limit_bytes,
-                head = %head,
+                retained_prefix_bytes = head.len(),
                 "captured output exceeded its ceiling; terminating the child",
             );
             Err(Error::OutputLimitExceeded {
@@ -2047,7 +2064,11 @@ fn finish_sync_run(
 fn log_partial(capture: SyncCapture, message: &'static str) {
     let (stdout, stderr) = capture.partial(PARTIAL_CAPTURE_BUDGET);
     if !stdout.is_empty() || !stderr.is_empty() {
-        warn!(stdout = %stdout, stderr = %stderr, "{message}");
+        warn!(
+            stdout_bytes = stdout.len(),
+            stderr_bytes = stderr.len(),
+            "{message}"
+        );
     }
 }
 

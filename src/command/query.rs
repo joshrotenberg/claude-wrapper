@@ -261,6 +261,24 @@ impl QueryCommand {
         self
     }
 
+    /// Forward nested subagent text and thinking as stream-json messages
+    /// (`--forward-subagent-text`). Parent tool-use IDs remain in the raw events.
+    /// Only meaningful with stream-json output; duplex sessions already use it.
+    #[must_use]
+    pub fn forward_subagent_text(mut self) -> Self {
+        self.shared.forward_subagent_text = true;
+        self
+    }
+
+    /// Make bypass mode available without activating it
+    /// (`--allow-dangerously-skip-permissions`). This does not select a bypass
+    /// permission mode or disable permission checks by itself.
+    #[must_use]
+    pub fn allow_dangerously_skip_permissions(mut self) -> Self {
+        self.shared.allow_dangerously_skip_permissions = true;
+        self
+    }
+
     /// Bypass all permission checks. Only use in sandboxed environments.
     #[must_use]
     pub fn dangerously_skip_permissions(mut self) -> Self {
@@ -1571,5 +1589,27 @@ mod tests {
         let cmd = QueryCommand::new("test").tmux();
         let args = cmd.args();
         assert!(args.contains(&"--tmux".to_string()));
+    }
+    #[test]
+    fn compatible_headless_flags_are_explicit_and_do_not_activate_bypass() {
+        let defaults = QueryCommand::new("p").args();
+        assert!(
+            !defaults.iter().any(|arg| arg == "--forward-subagent-text"
+                || arg == "--allow-dangerously-skip-permissions")
+        );
+        let args = QueryCommand::new("p")
+            .forward_subagent_text()
+            .allow_dangerously_skip_permissions()
+            .args();
+        assert!(args.iter().any(|arg| arg == "--forward-subagent-text"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--allow-dangerously-skip-permissions")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions" || arg == "bypassPermissions")
+        );
     }
 }

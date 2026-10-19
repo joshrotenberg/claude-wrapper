@@ -503,6 +503,24 @@ impl DuplexOptions {
         self
     }
 
+    /// Forward nested subagent text and thinking as stream-json messages
+    /// (`--forward-subagent-text`). Parent tool-use IDs remain in the raw events.
+    /// Only meaningful with stream-json output; duplex sessions already use it.
+    #[must_use]
+    pub fn forward_subagent_text(mut self) -> Self {
+        self.shared.forward_subagent_text = true;
+        self
+    }
+
+    /// Make bypass mode available without activating it
+    /// (`--allow-dangerously-skip-permissions`). This does not select a bypass
+    /// permission mode or disable permission checks by itself.
+    #[must_use]
+    pub fn allow_dangerously_skip_permissions(mut self) -> Self {
+        self.shared.allow_dangerously_skip_permissions = true;
+        self
+    }
+
     /// Pass `--dangerously-skip-permissions` to the spawned session.
     ///
     /// Bypasses ALL permission checks -- file edits, bash, network,
@@ -1204,8 +1222,7 @@ impl DuplexSession {
         let command_args = opts.spawn_command_args(claude);
 
         debug!(
-            binary = %claude.binary.display(),
-            args = ?command_args,
+            arg_count = command_args.len(),
             "spawning duplex claude session"
         );
 
@@ -1248,12 +1265,11 @@ impl DuplexSession {
         // event", parse failures, shutdown-budget kills) cannot be
         // attributed to a session at all when several are open.
         //
-        // `session_id` starts empty and is recorded when the CLI's init
-        // event arrives, since it is not known at spawn unless resuming.
+        // Hosts correlate spans using subscriber-owned context; native IDs
+        // and configured model strings stay in explicit events/results.
         let session_span = tracing::debug_span!(
             "claude.session",
-            session_id = tracing::field::Empty,
-            model = opts.shared.model.as_deref().unwrap_or("default"),
+            model_configured = opts.shared.model.is_some(),
             permission_mode = opts
                 .shared
                 .permission_mode
@@ -1704,48 +1720,43 @@ async fn run_session_child(
                     let parsed = match serde_json::from_str::<Value>(&l) {
                         Ok(v) => v,
                         Err(e) => {
-                            debug!(line = %l, error = %e, "failed to parse duplex event, skipping");
+                            debug!(line_bytes = l.len(), json_error = ?e.classify(), "failed to parse duplex event, skipping");
                             continue;
                         }
                     };
-                    // Peek before handle_inbound consumes it: the init
-                    // event is where the session id first appears, and the
-                    // result event carries the turn's outcome.
-                    match parsed.get("type").and_then(Value::as_str) {
-                        Some("system")
-                            if parsed.get("subtype").and_then(Value::as_str) == Some("init") =>
-                        {
-                            if let Some(id) = parsed.get("session_id").and_then(Value::as_str) {
-                                session_span.record("session_id", id);
+                    // Peek at the semantic outcome before handle_inbound consumes it.
+                    if let Some("result") = parsed.get("type").and_then(Value::as_str) {
+                        let total = parsed
+                            .get("total_cost_usd")
+                            .or_else(|| parsed.get("cost_usd"))
+                            .and_then(Value::as_f64);
+                        let cost = turn_cost_delta(&mut last_total_cost, total);
+                        if let Some(span) = turn_span.take() {
+                            span.record(
+                                "is_error",
+                                parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                            );
+                            if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
+                                let label = match sub {
+                                    "success" => "success",
+                                    "error_during_execution" => "error_during_execution",
+                                    "error_max_turns" => "error_max_turns",
+                                    "error_max_budget_usd" => "error_max_budget_usd",
+                                    _ => "other",
+                                };
+                                span.record("subtype", label);
                             }
-                        }
-                        Some("result") => {
-                            let total = parsed
-                                .get("total_cost_usd")
-                                .or_else(|| parsed.get("cost_usd"))
-                                .and_then(Value::as_f64);
-                            let cost = turn_cost_delta(&mut last_total_cost, total);
-                            if let Some(span) = turn_span.take() {
+                            if let (Some(c), Some(t)) = (cost, total) {
+                                span.record("cost_usd", c);
+                                span.record("total_cost_usd", t);
+                            }
+                            if let Some(started) = turn_started.take() {
                                 span.record(
-                                    "is_error",
-                                    parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                                    "duration_ms",
+                                    started.elapsed().as_millis() as u64,
                                 );
-                                if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
-                                    span.record("subtype", sub);
-                                }
-                                if let (Some(c), Some(t)) = (cost, total) {
-                                    span.record("cost_usd", c);
-                                    span.record("total_cost_usd", t);
-                                }
-                                if let Some(started) = turn_started.take() {
-                                    span.record(
-                                        "duration_ms",
-                                        started.elapsed().as_millis() as u64,
-                                    );
-                                }
                             }
                         }
-                        _ => {}
                     }
                     match handle_inbound(parsed, &mut pending, &events_tx) {
                         InboundAction::None => {}
@@ -1754,10 +1765,7 @@ async fn run_session_child(
                             let decision = match permission_handler.as_ref() {
                                 Some(h) => h.invoke(req).await,
                                 None => {
-                                    warn!(
-                                        request_id = %request_id,
-                                        "received can_use_tool with no permission handler; auto-denying"
-                                    );
+                                    warn!("received can_use_tool with no permission handler; auto-denying");
                                     PermissionDecision::Deny {
                                         message:
                                             "no permission handler configured on duplex session"
@@ -1767,13 +1775,10 @@ async fn run_session_child(
                             };
                             if matches!(decision, PermissionDecision::Defer) {
                                 debug!(
-                                    request_id = %request_id,
                                     "permission handler deferred; waiting for respond_to_permission"
                                 );
-                            } else if let Err(e) =
-                                write_permission_response(&mut stdin, &request_id, &decision).await
-                            {
-                                warn!(error = %e, "failed to write permission response");
+                            } else if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
+                                warn!("failed to write permission response");
                             }
                         }
                         InboundAction::ControlResponse { request_id, outcome } => {
@@ -1781,7 +1786,6 @@ async fn run_session_child(
                                 let _ = reply.send(outcome);
                             } else {
                                 debug!(
-                                    request_id = %request_id,
                                     "received control_response with no pending request"
                                 );
                             }
@@ -1835,10 +1839,8 @@ async fn run_session_child(
                     pending = Some((reply, Vec::new()));
                 }
                 Some(OutboundMsg::PermissionResponse { request_id, decision }) => {
-                    if let Err(e) =
-                        write_permission_response(&mut stdin, &request_id, &decision).await
-                    {
-                        warn!(error = %e, "failed to write deferred permission response");
+                    if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
+                        warn!("failed to write deferred permission response");
                     }
                 }
                 Some(OutboundMsg::Interrupt { reply }) => {
@@ -1991,10 +1993,7 @@ fn handle_inbound(
                 }
                 return InboundAction::Permission(req);
             }
-            debug!(
-                ?msg,
-                "received unhandled control_request; treating as Other"
-            );
+            debug!("received unhandled control_request; treating as Other");
             let _ = events_tx.send(InboundEvent::Other(msg.clone()));
             if let Some((_, events)) = pending.as_mut() {
                 events.push(msg);
@@ -2008,10 +2007,7 @@ fn handle_inbound(
                     outcome,
                 };
             }
-            debug!(
-                ?msg,
-                "received malformed control_response; treating as Other"
-            );
+            debug!("received malformed control_response; treating as Other");
             let _ = events_tx.send(InboundEvent::Other(msg.clone()));
             if let Some((_, events)) = pending.as_mut() {
                 events.push(msg);
@@ -3476,5 +3472,27 @@ mod tests {
                 other => panic!("expected retained exit/read evidence, got {other:?}"),
             }
         }
+    }
+    #[test]
+    fn compatible_headless_flags_are_explicit_and_do_not_activate_bypass() {
+        let defaults = DuplexOptions::default().build_args();
+        assert!(
+            !defaults.iter().any(|arg| arg == "--forward-subagent-text"
+                || arg == "--allow-dangerously-skip-permissions")
+        );
+        let args = DuplexOptions::default()
+            .forward_subagent_text()
+            .allow_dangerously_skip_permissions()
+            .build_args();
+        assert!(args.iter().any(|arg| arg == "--forward-subagent-text"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--allow-dangerously-skip-permissions")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions" || arg == "bypassPermissions")
+        );
     }
 }

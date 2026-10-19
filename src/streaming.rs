@@ -406,6 +406,7 @@ where
     use crate::command::ClaudeCommand;
 
     let args = cmd.args();
+    let operation = crate::exec::span_command(&args);
     let stdin_prompt = cmd.stdin_prompt();
 
     let mut command_args = Vec::new();
@@ -419,9 +420,8 @@ where
     // "never started".
     let span = tracing::debug_span!(
         "claude.stream",
-        command = crate::exec::span_command(&command_args),
-        binary = %claude.binary.display(),
-        cwd = claude.working_dir.as_deref().map(|d| d.display().to_string()),
+        command = operation,
+        working_dir_set = claude.working_dir.is_some(),
         timeout_secs = claude.timeout.map(|t| t.as_secs()),
         outcome = tracing::field::Empty,
         events = tracing::field::Empty,
@@ -433,8 +433,7 @@ where
     let mut event_count: u64 = 0;
 
     debug!(
-        binary = %claude.binary.display(),
-        args = ?command_args,
+        arg_count = command_args.len(),
         timeout = ?claude.timeout,
         "streaming claude command"
     );
@@ -647,7 +646,7 @@ where
         match serde_json::from_str::<StreamEvent>(&line) {
             Ok(event) => handler(event),
             Err(e) => {
-                debug!(line = %line, error = %e, "failed to parse stream event, skipping");
+                debug!(line_bytes = line.len(), json_error = ?e.classify(), "failed to parse stream event, skipping");
                 diagnostics.push(&line);
             }
         }
@@ -815,8 +814,7 @@ where
     command_args.extend(args);
 
     debug!(
-        binary = %claude.binary.display(),
-        args = ?command_args,
+        arg_count = command_args.len(),
         timeout = ?claude.timeout,
         "streaming claude command (sync)"
     );
@@ -880,7 +878,7 @@ where
                     }
                 }
                 Err(e) => {
-                    debug!(line = %line, error = %e, "failed to parse stream event, skipping");
+                    debug!(line_bytes = line.len(), json_error = ?e.classify(), "failed to parse stream event, skipping");
                     diagnostics.push(&line);
                 }
             }
@@ -946,7 +944,10 @@ where
         let stderr_str = join_with_budget(stderr_thread, budget).unwrap_or_default();
         let _ = join_with_budget(reader_thread, budget);
         if !stderr_str.is_empty() {
-            warn!(stderr = %stderr_str, "stderr from timed-out streaming process");
+            warn!(
+                stderr_bytes = stderr_str.len(),
+                "stderr from timed-out streaming process"
+            );
         }
         return Err(Error::Timeout {
             timeout_seconds: claude.timeout.map(|d| d.as_secs()).unwrap_or_default(),
