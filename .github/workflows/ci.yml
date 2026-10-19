@@ -92,7 +92,7 @@ jobs:
         # this slot until #800, when the coverage check showed three emitted
         # flags that version does not have.
         # Keep PR checks reproducible; contract-latest.yml audits new releases.
-        claude_version: ["2.1.220", "2.1.293"]
+        claude_version: ["2.1.220", "2.1.302"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
