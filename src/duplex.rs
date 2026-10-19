@@ -1291,6 +1291,9 @@ impl DuplexSession {
     /// Returns [`Error::DuplexTurnInFlight`] if another turn is
     /// already pending, and [`Error::DuplexClosed`] if the session
     /// task has already exited.
+    /// `DuplexClosed` may arrive before final diagnostic collection and
+    /// exit-state publication. Await [`Self::wait_for_exit`] for settled
+    /// process evidence instead of relying on an immediate snapshot.
     ///
     /// The returned [`TurnResult`] holds this turn's events only, but
     /// its [`TurnResult::total_cost_usd`] is the session's running
@@ -1516,9 +1519,12 @@ impl DuplexSession {
     /// Drops the outbound channel sender, which the session task
     /// observes as `recv() -> None`, then closes stdin and reaps the
     /// child.
+    ///
     /// Returns an error for a nonzero child exit, even if an earlier
     /// turn already delivered a successful result. Failed native exits
-    /// include a bounded tail of stderr diagnostics.
+    /// return [`Error::DuplexProcessFailed`] with the native status, a
+    /// bounded tail of stderr, and whether the shutdown budget expired.
+    /// Semantic turn failures remain in [`TurnResult::result`].
     pub async fn close(self) -> Result<()> {
         drop(self.outbound_tx);
         drop(self.events_tx);
@@ -1535,8 +1541,8 @@ impl DuplexSession {
 }
 
 /// Time budget for the graceful child shutdown after the run loop
-/// exits. If the child is still alive after this deadline we SIGKILL
-/// it so close() does not hang on a misbehaving subprocess.
+/// exits. If the child is still alive after this deadline, apply the
+/// configured stop policy so close() does not hang on the subprocess.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 // Keep only the most recent diagnostic bytes; a resident process may run
@@ -1614,22 +1620,8 @@ async fn run_session(
             read = &mut drain_stderr => (session.await, Some(read)),
         }
     };
-    let result = match (status, stderr_result) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Some(Err(source))) => Err(Error::Io {
-            message: "failed to read duplex stderr".into(),
-            source,
-            working_dir: None,
-        }),
-        (Ok(status), _) if !status.success() => Err(Error::from_command_failure(
-            "claude duplex session".into(),
-            status.code().unwrap_or(-1),
-            String::new(),
-            String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned(),
-            None,
-        )),
-        (Ok(_), _) => Ok(()),
-    };
+    let stderr = String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned();
+    let result = resident_outcome(status, stderr_result, stderr);
     let final_state = match &result {
         Ok(()) => SessionExitStatus::Completed,
         Err(error) => SessionExitStatus::Failed(error.to_string()),
@@ -1646,6 +1638,30 @@ async fn run_session(
     result
 }
 
+fn resident_outcome(
+    status: Result<(ExitStatus, bool)>,
+    stderr_result: Option<std::io::Result<()>>,
+    stderr: String,
+) -> Result<()> {
+    match (status, stderr_result) {
+        (Err(error), _) => Err(error),
+        (Ok((status, shutdown_budget_exceeded)), read) if !status.success() => {
+            Err(Error::DuplexProcessFailed {
+                status,
+                shutdown_budget_exceeded,
+                stderr,
+                stderr_read_error: read.and_then(std::result::Result::err),
+            })
+        }
+        (Ok(_), Some(Err(source))) => Err(Error::Io {
+            message: format!("failed to read duplex stderr; retained diagnostics: {stderr}"),
+            source,
+            working_dir: None,
+        }),
+        (Ok(_), _) => Ok(()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session_child(
     mut child: Child,
@@ -1658,7 +1674,7 @@ async fn run_session_child(
     events_tx: broadcast::Sender<InboundEvent>,
     permission_handler: Option<PermissionHandler>,
     mut stderr_failed: oneshot::Receiver<()>,
-) -> Result<ExitStatus> {
+) -> Result<(ExitStatus, bool)> {
     let mut lines = BufReader::new(stdout).lines();
     let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
     let mut pending_control: HashMap<String, oneshot::Sender<Result<()>>> = HashMap::new();
@@ -1853,7 +1869,7 @@ async fn run_session_child(
     let status = match waited {
         Ok(Ok(status)) => {
             group.disarm();
-            Ok(status)
+            Ok((status, false))
         }
         Ok(Err(source)) => {
             let error = Error::Io {
@@ -1893,11 +1909,15 @@ async fn run_session_child(
             )
             .await
             {
-                Ok(()) => child.wait().await.map_err(|source| Error::Io {
-                    message: "failed to wait for stopped duplex child".into(),
-                    source,
-                    working_dir: None,
-                }),
+                Ok(()) => child
+                    .wait()
+                    .await
+                    .map(|status| (status, true))
+                    .map_err(|source| Error::Io {
+                        message: "failed to wait for stopped duplex child".into(),
+                        source,
+                        working_dir: None,
+                    }),
                 Err(error) => Err(error),
             }
         }
@@ -3391,5 +3411,68 @@ mod tests {
         .await
         .expect("wait_for_exit must not hang when sender is dropped");
         assert!(matches!(status, SessionExitStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_retries_interruptions_and_retains_bytes_on_failure() {
+        struct Reader(u8);
+        impl tokio::io::AsyncRead for Reader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                self.0 += 1;
+                std::task::Poll::Ready(match self.0 {
+                    1 => Err(std::io::ErrorKind::Interrupted.into()),
+                    2 => {
+                        buf.put_slice(b"retained");
+                        Ok(())
+                    }
+                    _ => Err(std::io::Error::other("stderr read fault")),
+                })
+            }
+        }
+        let mut tail = VecDeque::new();
+        let error = read_stderr_tail(&mut Reader(0), &mut tail)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "stderr read fault");
+        assert_eq!(tail.into_iter().collect::<Vec<_>>(), b"retained");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stderr_read_failure_keeps_native_exit_evidence_and_diagnostics() {
+        for code in [0, 7] {
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .status()
+                .unwrap();
+            let result = resident_outcome(
+                Ok((status, false)),
+                Some(Err(std::io::Error::other("stderr read fault"))),
+                "retained diagnostics".into(),
+            );
+            match result {
+                Err(Error::DuplexProcessFailed {
+                    status,
+                    stderr,
+                    stderr_read_error,
+                    ..
+                }) => {
+                    assert_eq!(status.code(), Some(7));
+                    assert_eq!(stderr, "retained diagnostics");
+                    assert_eq!(stderr_read_error.unwrap().to_string(), "stderr read fault");
+                }
+                Err(Error::Io {
+                    message, source, ..
+                }) if code == 0 => {
+                    assert!(message.contains("retained diagnostics"));
+                    assert_eq!(source.to_string(), "stderr read fault");
+                }
+                other => panic!("expected retained exit/read evidence, got {other:?}"),
+            }
+        }
     }
 }

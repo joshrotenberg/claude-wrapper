@@ -68,10 +68,8 @@ async fn nonzero_exit_without_result_reaches_all_exit_observers() {
         assert!(matches!(state, SessionExitStatus::Failed(_)), "{state:?}");
     }
     match closed {
-        Err(Error::CommandFailed {
-            exit_code, stderr, ..
-        }) => {
-            assert_eq!(exit_code, 7);
+        Err(Error::DuplexProcessFailed { status, stderr, .. }) => {
+            assert_eq!(status.code(), Some(7));
             assert!(stderr.contains("native-failure"));
         }
         other => panic!("expected native process failure, got {other:?}"),
@@ -91,7 +89,7 @@ async fn result_success_does_not_hide_later_process_failure() {
     assert!(!turn.is_error());
     assert!(matches!(exit, SessionExitStatus::Failed(_)), "{exit:?}");
     assert!(
-        matches!(closed, Err(Error::CommandFailed { exit_code: 9, .. })),
+        matches!(closed, Err(Error::DuplexProcessFailed { status, .. }) if status.code() == Some(9)),
         "{closed:?}"
     );
 }
@@ -106,10 +104,8 @@ async fn stderr_failure_retains_a_bounded_diagnostic_tail() {
     let closed = session.close().await;
     assert!(turn.is_ok(), "stderr backpressure blocked process exit");
     match closed {
-        Err(Error::CommandFailed {
-            exit_code, stderr, ..
-        }) => {
-            assert_eq!(exit_code, 11);
+        Err(Error::DuplexProcessFailed { status, stderr, .. }) => {
+            assert_eq!(status.code(), Some(11));
             assert!(stderr.ends_with("important-tail\n"));
             assert!(!stderr.contains("discarded-prefix"));
             assert!(stderr.len() <= 64 * 1024, "{} bytes retained", stderr.len());
@@ -178,4 +174,80 @@ async fn permission_handler_wait_does_not_stop_stderr_drain() {
     );
     assert_eq!(turn.unwrap().unwrap().result_text(), Some("ok"));
     closed.unwrap();
+}
+
+#[tokio::test]
+async fn native_signal_is_preserved_without_an_invented_exit_code() {
+    use std::os::unix::process::ExitStatusExt;
+    let fixture = Fixture::new("read -r request\nkill -TERM $$");
+    let session = fixture.spawn().await;
+    let _turn = session.send("probe").await;
+    let exit = session.wait_for_exit().await;
+    let closed = session.close().await;
+    assert!(matches!(exit, SessionExitStatus::Failed(_)));
+    match closed {
+        Err(Error::DuplexProcessFailed {
+            status,
+            shutdown_budget_exceeded,
+            ..
+        }) => {
+            assert_eq!(status.code(), None);
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
+            assert!(!shutdown_budget_exceeded);
+        }
+        other => panic!("expected native signal evidence, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn forced_shutdown_retains_native_status_and_deadline_context() {
+    use std::os::unix::process::ExitStatusExt;
+    let fixture = Fixture::new("while :; do sleep 1; done");
+    let session = fixture.spawn().await;
+    let closed = tokio::time::timeout(Duration::from_secs(9), session.close())
+        .await
+        .expect("shutdown must settle after its five-second budget");
+    match closed {
+        Err(Error::DuplexProcessFailed {
+            status,
+            shutdown_budget_exceeded,
+            ..
+        }) => {
+            assert_eq!(status.code(), None);
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert!(shutdown_budget_exceeded);
+        }
+        other => panic!("expected forced-shutdown evidence, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn inherited_stderr_does_not_hold_exit_state_open() {
+    let fixture = Fixture::new(
+        "read -r request\n(while [[ ! -e release ]]; do sleep 0.01; done; echo done > done) >/dev/null &\necho native-failure >&2\nexit 7",
+    );
+    let client = fixture.client().with_working_dir(fixture.dir.path());
+    let session = DuplexSession::spawn(&client, DuplexOptions::default())
+        .await
+        .unwrap();
+    let _turn = session.send("probe").await;
+    let settled = tokio::time::timeout(Duration::from_secs(3), session.wait_for_exit()).await;
+    // Release the deliberately surviving pipe holder before any assertion,
+    // including when settlement failed, so the fixture cannot leave a child.
+    std::fs::write(fixture.dir.path().join("release"), b"release").unwrap();
+    let closed = session.close().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !fixture.dir.path().join("done").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture descendant must finish");
+    assert!(
+        matches!(settled, Ok(SessionExitStatus::Failed(_))),
+        "{settled:?}"
+    );
+    assert!(
+        matches!(closed, Err(Error::DuplexProcessFailed { status, .. }) if status.code()==Some(7))
+    );
 }
