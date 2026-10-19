@@ -687,6 +687,23 @@ cargo test --test fake_claude_sync \
 cargo test --test integration -- --ignored
 ```
 
+## Native permission checks
+
+Resident permission handlers run when the CLI asks for approval. Auto-approved
+actions can skip the callback; configure an explicit ask rule in `settings()`
+for actions that must reach it. Denial and deferred denial are tested with
+real Claude 2.1.220 and 2.1.302. These cases keep the resident transport open
+and require no injected SDK hook configuration.
+
+Run the focused authenticated checks with:
+
+```sh
+cargo test --test integration duplex_native_permission -- --ignored
+```
+
+Set `CLAUDE_INTEGRATION_BIN` to test a specific installed CLI. The tests request
+a benign Bash file write, always deny it and verify that no file was created.
+
 ## License
 
 MIT OR Apache-2.0

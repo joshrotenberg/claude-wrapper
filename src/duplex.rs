@@ -155,14 +155,14 @@
 //! from the handler, capture the [`PermissionRequest::request_id`],
 //! and answer later via [`DuplexSession::respond_to_permission`].
 //!
-//! **Known limitation:** as of claude CLI 2.1.x,
-//! `--permission-prompt-tool stdio` does not cause the CLI to emit
-//! `control_request {subtype: "can_use_tool"}` in
-//! `--print --output-format stream-json` mode. The permission handler
-//! registered here is wire-correct and unit-tested, but will not be
-//! invoked end-to-end until the upstream CLI bug is resolved. Tracked
-//! upstream at
-//! <https://github.com/anthropics/claude-agent-sdk-python/issues/469>.
+//! The callback is the CLI's approval fallback, so an already-approved tool
+//! does not necessarily reach it. For tools that must ask, configure an explicit
+//! ask rule in [`DuplexOptions::settings`], for example
+//! `{"permissions":{"ask":["Bash"]}}`. Do not also auto-approve that action.
+//! Native denial and deferred-denial regressions exercise the resident transport
+//! at the supported 2.1.220 and 2.1.302 endpoints. They do not add SDK hook setup
+//! or change the CLI's permission evaluation rules. See the
+//! [official permission guide](https://code.claude.com/docs/en/agent-sdk/user-input).
 //!
 //! # Mid-turn interrupt
 //!
@@ -927,11 +927,11 @@ impl DuplexOptions {
     /// `--permission-prompt-tool` and the CLI applies its default
     /// permission policy (driven by `--permission-mode`).
     ///
-    /// **Known limitation:** as of claude CLI 2.1.x the CLI does not
-    /// emit `control_request {subtype: "can_use_tool"}` in stream-json
-    /// print mode, so this handler will not be invoked end-to-end until
-    /// an upstream fix lands. The wire handling is correct; see
-    /// <https://github.com/anthropics/claude-agent-sdk-python/issues/469>.
+    /// Runs only when the CLI's permission rules request a decision. Allowed
+    /// tools or permissive modes may resolve an action without calling it.
+    /// Configure an explicit ask rule through [`Self::settings`] for actions
+    /// that should reach the callback. The resident transport keeps stdin open;
+    /// native denial and deferred-denial are tested at both supported endpoints.
     #[must_use]
     pub fn on_permission(mut self, handler: PermissionHandler) -> Self {
         self.on_permission = Some(handler);

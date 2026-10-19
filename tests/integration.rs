@@ -10,9 +10,11 @@
 use claude_wrapper::{Claude, ClaudeCommand, QueryCommand, VersionCommand};
 
 fn claude_client() -> Claude {
-    Claude::builder()
-        .build()
-        .expect("claude binary not found in PATH")
+    let mut builder = Claude::builder();
+    if let Some(binary) = std::env::var_os("CLAUDE_INTEGRATION_BIN") {
+        builder = builder.binary(binary);
+    }
+    builder.build().expect("claude binary not found")
 }
 
 #[tokio::test]
@@ -181,15 +183,8 @@ async fn test_duplex_subscribe_sees_assistant_before_result() {
     session.close().await.expect("close session");
 }
 
-// Note on permission tests: in current claude (v2.1.x), the stream-json
-// duplex mode does not reliably route tool-use prompts through
-// --permission-prompt-tool stdio without an additional PreToolUse hook
-// that keeps the stream open (per the official agent SDK docs). Our
-// wire-level handling (parse control_request, write control_response)
-// is exercised by unit tests in src/duplex.rs::tests. The live test
-// here only verifies that a session configured with on_permission
-// runs to completion without protocol corruption -- it does not
-// assert the handler is invoked.
+// Smoke check for protocol stability. Actual callback delivery is asserted by
+// native_permission_denial and the focused tests at the end of this file.
 #[tokio::test]
 #[ignore = "requires claude binary and auth"]
 async fn test_duplex_permission_handler_does_not_break_session() {
@@ -908,4 +903,119 @@ async fn test_query_verbose_accepted() {
 
     assert!(output.success, "stderr: {}", output.stderr);
     assert!(output.stdout.contains('4'), "got: {}", output.stdout);
+}
+
+#[cfg(feature = "json")]
+async fn native_permission_denial(deferred: bool) {
+    use claude_wrapper::duplex::{
+        DuplexOptions, DuplexSession, PermissionDecision, PermissionHandler,
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    let work = tempfile::tempdir().unwrap();
+    let marker = work.path().join("must-not-exist");
+    let mcp = work.path().join("empty-mcp.json");
+    std::fs::write(&mcp, r#"{"mcpServers":{}}"#).unwrap();
+    let requested_path = marker.to_string_lossy().into_owned();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let deferred_tx = Arc::new(Mutex::new(Some(tx)));
+    let handler = PermissionHandler::new(move |request| {
+        let targeted = request.tool_name == "Bash"
+            && request
+                .input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|command| {
+                    command.contains(&requested_path)
+                        && command.contains("printf")
+                        && command.contains('>')
+                });
+        if targeted {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+        let handed_off = deferred
+            && targeted
+            && deferred_tx
+                .lock()
+                .unwrap()
+                .take()
+                .is_some_and(|tx| tx.send(request.request_id).is_ok());
+        async move {
+            if handed_off {
+                PermissionDecision::Defer
+            } else {
+                // Unexpected or repeated requests must also receive a decision.
+                PermissionDecision::Deny {
+                    message: "Controlled denial: do not retry or execute.".into(),
+                }
+            }
+        }
+    });
+    let client = claude_client().with_working_dir(work.path());
+    let options = DuplexOptions::default()
+        .model("haiku")
+        .hermetic()
+        .tools(["Bash"])
+        .mcp_config(mcp.to_string_lossy())
+        .settings(r#"{"permissions":{"ask":["Bash"]}}"#)
+        .max_turns(3)
+        .no_session_persistence()
+        .on_permission(handler);
+    let session = DuplexSession::spawn(&client, options).await.unwrap();
+    let prompt = format!(
+        "Use Bash exactly once to run: printf denied > {}. If permission is denied, do not retry or use other tools; just reply blocked.",
+        marker.display()
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        if deferred {
+            let answer = async {
+                let id = rx.await.map_err(|_| claude_wrapper::Error::DuplexClosed)?;
+                session.respond_to_permission(
+                    &id,
+                    PermissionDecision::Deny {
+                        message: "Controlled deferred denial: do not retry or execute.".into(),
+                    },
+                )
+            };
+            let (turn, answer) = tokio::join!(session.send(prompt), answer);
+            answer?;
+            turn
+        } else {
+            session.send(prompt).await
+        }
+    })
+    .await;
+    let closed = session.close().await;
+    assert!(
+        calls.load(Ordering::SeqCst) > 0,
+        "native callback for the requested Bash write must be delivered"
+    );
+    assert!(!marker.exists(), "denied Bash action must never execute");
+    let turn = outcome
+        .expect("native permission test must settle")
+        .expect("native turn");
+    assert_eq!(
+        turn.result.get("is_error").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    closed.expect("native session closes cleanly after denial");
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn duplex_native_permission_denial() {
+    native_permission_denial(false).await;
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+#[ignore = "requires claude binary and auth"]
+async fn duplex_native_permission_deferred_denial() {
+    native_permission_denial(true).await;
 }
