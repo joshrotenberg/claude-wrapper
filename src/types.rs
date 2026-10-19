@@ -413,7 +413,8 @@ pub struct QueryResult {
     /// The session ID for continuing conversations.
     #[serde(default)]
     pub session_id: String,
-    /// Total cost of the query in USD.
+    /// Running native-session cost in USD, including historical spend
+    /// restored by resume. This is not an individual turn's cost.
     #[serde(default, rename = "total_cost_usd", alias = "cost_usd")]
     pub cost_usd: Option<f64>,
     /// Duration of the query in milliseconds.

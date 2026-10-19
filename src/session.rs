@@ -39,6 +39,26 @@
 //! Streaming follows the same split: [`Session::stream`] and
 //! [`Session::stream_execute`].
 //!
+//! # Cost accounting
+//!
+//! The CLI's `total_cost_usd` is a running native-session total.
+//! [`Session`] records its nonnegative change in both the cumulative
+//! cost and any attached [`BudgetTracker`]. Missing totals leave the
+//! baseline unchanged; raw totals, including missing values, remain
+//! in [`Session::history`]. A falling total starts a new baseline and
+//! contributes zero because spend during a reset is unknown. A
+//! changed native session id starts an independent baseline.
+//! A missing id keeps the last known identity and cost baseline.
+//!
+//! The first observed total is counted in full, including historical
+//! spend restored by [`Session::resume`]. This tracks observed native
+//! lifetime spend, not spend since attaching this handle. That initial
+//! historical amount also reaches the attached budget tracker.
+//! Buffered failures that return an [`Error`](crate::Error) before a
+//! [`QueryResult`] are not recorded. A later reported total may catch
+//! up that spend; inspect the error's native cost metadata when no
+//! later turn is available.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -85,6 +105,7 @@ use std::sync::Arc;
 use crate::Claude;
 use crate::budget::BudgetTracker;
 use crate::command::query::QueryCommand;
+use crate::duplex::turn_cost_delta;
 use crate::error::Result;
 use crate::types::QueryResult;
 
@@ -103,6 +124,8 @@ pub struct Session {
     history: Vec<QueryResult>,
     cumulative_cost_usd: f64,
     cumulative_turns: u32,
+    last_cost_session_id: Option<String>,
+    last_reported_total_usd: Option<f64>,
     budget: Option<BudgetTracker>,
 }
 
@@ -116,32 +139,41 @@ impl Session {
             history: Vec::new(),
             cumulative_cost_usd: 0.0,
             cumulative_turns: 0,
+            last_cost_session_id: None,
+            last_reported_total_usd: None,
             budget: None,
         }
     }
 
     /// Reattach to an existing session by id. The next turn immediately
     /// passes `--resume <id>`. Cost and turn counters start at zero
-    /// since no history is available.
+    /// since no history is available. The first result's reported
+    /// total includes the native session's historical spend, which
+    /// is counted in full. See the [cost-accounting scope](crate::session#cost-accounting).
     pub fn resume(claude: Arc<Claude>, session_id: impl Into<String>) -> Self {
+        let session_id = session_id.into();
         Self {
             claude,
-            session_id: Some(session_id.into()),
+            session_id: Some(session_id.clone()),
             history: Vec::new(),
             cumulative_cost_usd: 0.0,
             cumulative_turns: 0,
+            last_cost_session_id: Some(session_id),
+            last_reported_total_usd: None,
             budget: None,
         }
     }
 
-    /// Attach a [`BudgetTracker`] to this session. Every turn's cost
-    /// (from [`QueryResult::cost_usd`]) is recorded on the tracker, and
+    /// Attach a [`BudgetTracker`] to this session. Each nonnegative
+    /// change in [`QueryResult::cost_usd`] is recorded on the tracker, and
     /// [`Session::execute`]/[`Session::stream_execute`] return
     /// [`crate::error::Error::BudgetExceeded`]
     /// before dispatching a turn if the tracker's ceiling has been hit.
     ///
     /// Clone a tracker across several sessions to enforce a shared
     /// ceiling; each `Session` then sees the same running total.
+    /// The first observed total includes historical spend on resumed
+    /// native sessions; see the [cost-accounting scope](crate::session#cost-accounting).
     pub fn with_budget(mut self, budget: BudgetTracker) -> Self {
         self.budget = Some(budget);
         self
@@ -241,7 +273,7 @@ impl Session {
         };
 
         if let Some(sid) = captured_session_id {
-            self.session_id = Some(sid);
+            self.observe_session_id(&sid);
         }
         if let Some(qr) = captured_result {
             self.record(&qr);
@@ -255,7 +287,11 @@ impl Session {
         self.session_id.as_deref()
     }
 
-    /// Cumulative cost in USD across all turns in this session.
+    /// Sum of observed nonnegative changes in native cost totals.
+    ///
+    /// Includes the first reported total in full, including historical
+    /// spend on a resumed session. Missing totals remain unknown in
+    /// [`Session::history`]; see the [cost-accounting scope](crate::session#cost-accounting).
     pub fn total_cost_usd(&self) -> f64 {
         self.cumulative_cost_usd
     }
@@ -300,9 +336,25 @@ impl Session {
         self.history.last()
     }
 
+    fn observe_session_id(&mut self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        if self
+            .last_cost_session_id
+            .as_deref()
+            .is_some_and(|previous| previous != session_id)
+        {
+            self.last_reported_total_usd = None;
+        }
+        self.last_cost_session_id = Some(session_id.to_owned());
+        self.session_id = Some(session_id.to_owned());
+    }
+
     fn record(&mut self, result: &QueryResult) {
-        self.session_id = Some(result.session_id.clone());
-        let cost = result.cost_usd.unwrap_or(0.0);
+        self.observe_session_id(&result.session_id);
+        let cost =
+            turn_cost_delta(&mut self.last_reported_total_usd, result.cost_usd).unwrap_or(0.0);
         self.cumulative_cost_usd += cost;
         self.cumulative_turns += result.num_turns.unwrap_or(0);
         if let Some(b) = &self.budget {
@@ -393,7 +445,7 @@ mod tests {
         session.record(&r1);
         session.record(&r2);
         assert_eq!(session.total_turns(), 3);
-        assert!((session.total_cost_usd() - 0.03).abs() < f64::EPSILON);
+        assert!((session.total_cost_usd() - 0.02).abs() < f64::EPSILON);
         assert_eq!(session.history().len(), 2);
     }
 
@@ -462,6 +514,110 @@ mod tests {
 
         assert!((budget.total_usd() - 0.07).abs() < 1e-9);
         assert!((session.total_cost_usd() - 0.07).abs() < 1e-9);
+    }
+
+    fn cost_result(session_id: &str, total: Option<f64>) -> QueryResult {
+        QueryResult {
+            result: "ok".into(),
+            session_id: session_id.into(),
+            cost_usd: total,
+            duration_ms: None,
+            num_turns: Some(1),
+            is_error: false,
+            usage: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn record_cost_totals_count_once() {
+        let budget = BudgetTracker::builder().max_usd(0.007).build();
+        let mut session = Session::new(test_claude()).with_budget(budget.clone());
+        for total in [0.001, 0.003, 0.006] {
+            session.record(&cost_result("sess-1", Some(total)));
+        }
+        assert!((session.total_cost_usd() - 0.006).abs() < 1e-9);
+        assert!((budget.total_usd() - 0.006).abs() < 1e-9);
+        assert!(budget.check().is_ok());
+        assert_eq!(session.history()[1].cost_usd, Some(0.003));
+    }
+
+    #[test]
+    fn record_cost_missing_total_preserves_baseline() {
+        let mut session = Session::new(test_claude());
+        for total in [Some(0.002), None, Some(0.006)] {
+            session.record(&cost_result("sess-1", total));
+        }
+        assert!((session.total_cost_usd() - 0.006).abs() < 1e-9);
+        assert_eq!(session.history()[1].cost_usd, None);
+    }
+
+    #[test]
+    fn record_cost_falling_total_starts_new_baseline() {
+        let mut session = Session::new(test_claude());
+        for total in [0.004, 0.001, 0.003] {
+            session.record(&cost_result("sess-1", Some(total)));
+        }
+        assert!((session.total_cost_usd() - 0.006).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_cost_changed_session_resets_baseline_even_without_total() {
+        let budget = BudgetTracker::builder().build();
+        let mut session = Session::new(test_claude()).with_budget(budget.clone());
+        for (id, total) in [
+            ("sess-1", Some(0.004)),
+            ("sess-2", Some(0.001)),
+            ("sess-2", None),
+            ("sess-2", Some(0.003)),
+            ("sess-3", None),
+            ("sess-1", Some(0.001)),
+        ] {
+            session.record(&cost_result(id, total));
+        }
+        assert!((session.total_cost_usd() - 0.008).abs() < 1e-9);
+        assert!((budget.total_usd() - 0.008).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_cost_resumed_session_includes_initial_historical_total() {
+        let budget = BudgetTracker::builder().build();
+        let mut session =
+            Session::resume(test_claude(), "sess-existing").with_budget(budget.clone());
+        session.record(&cost_result("sess-existing", Some(0.4)));
+        session.record(&cost_result("sess-existing", Some(0.6)));
+        assert!((session.total_cost_usd() - 0.6).abs() < 1e-9);
+        assert!((budget.total_usd() - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_cost_unchanged_error_total_counts_zero() {
+        let mut session = Session::new(test_claude());
+        session.record(&cost_result("sess-1", Some(0.002)));
+        let interrupted = QueryResult {
+            result: String::new(),
+            is_error: true,
+            ..cost_result("sess-1", Some(0.002))
+        };
+        session.record(&interrupted);
+        session.record(&cost_result("sess-1", Some(0.005)));
+        assert!((session.total_cost_usd() - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_cost_missing_session_id_keeps_known_identity_and_baseline() {
+        let mut session = Session::new(test_claude());
+        session.record(&cost_result("sess-1", Some(0.001)));
+        session.record(&cost_result("", Some(0.003)));
+        assert_eq!(session.id(), Some("sess-1"));
+        session.record(&cost_result("sess-1", Some(0.006)));
+        assert!((session.total_cost_usd() - 0.006).abs() < 1e-9);
+
+        let mut unknown = Session::new(test_claude());
+        unknown.record(&cost_result("", Some(0.001)));
+        assert_eq!(unknown.id(), None);
+        unknown.record(&cost_result("discovered", Some(0.003)));
+        assert!((unknown.total_cost_usd() - 0.003).abs() < 1e-9);
     }
 
     #[test]
