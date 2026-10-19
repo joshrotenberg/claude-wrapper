@@ -165,9 +165,11 @@ the lifetime of the conversation. Async-only, gated on `feature =
   `&self` methods (`send`, `subscribe`, `interrupt`,
   `respond_to_permission`) from multiple tasks. `close(self)`
   requires exclusive ownership.
-- TurnResult does not track cumulative cost or history across
-  turns -- the events vec is per-turn. Hosts that want that can
-  accumulate themselves; we may add a typed wrapper later.
+- `TurnResult`'s events vec is per-turn, but `total_cost_usd()` is
+  the CLI's running total for the session, not that turn's cost (the
+  CLI restores the total on `--resume` / `--continue`). A turn's cost
+  is the change from the previous total; `Conversation` records those
+  changes along with cumulative cost and history.
 
 ### `Session` (for short-lived processes)
 

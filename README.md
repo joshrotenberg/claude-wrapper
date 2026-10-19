@@ -336,7 +336,7 @@ short-lived and conversation continuity is the main thing you need
 | Mid-turn interrupt | yes (`interrupt()`) | no (only `child.kill()` via SIGKILL) |
 | Mid-turn permission prompts | yes (`PermissionHandler`) | no |
 | Broadcast event subscribers | yes (`subscribe()`) | no (per-turn streaming via `stream_query`) |
-| Built-in cost / history tracking | no (TurnResult is per-turn) | yes (`total_cost_usd`, `history`, `BudgetTracker`) |
+| Built-in cost / history tracking | via `Conversation` (`TurnResult` reports the session's running total) | yes (`total_cost_usd`, `history`, `BudgetTracker`) |
 | Right for | long-running hosts | short-lived processes |
 
 ### `DuplexSession` (recommended for long-running hosts)

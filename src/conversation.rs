@@ -50,6 +50,28 @@
 //! # }
 //! ```
 //!
+//! # Cost accounting
+//!
+//! The CLI reports `total_cost_usd` on each turn's `result` message
+//! as the running total for the session, not the cost of that turn
+//! (see [`TurnResult::total_cost_usd`]). [`Conversation`] records the
+//! change from the previous turn's total as that turn's cost, clamped
+//! at zero, and adds it to [`Conversation::total_cost_usd`] and any
+//! attached [`BudgetTracker`]. A turn that reports no total, or the
+//! same total as the turn before, costs zero. Spend from a turn sent
+//! straight through [`Conversation::session`] lands in the next
+//! recorded turn's cost.
+//!
+//! If the [`DuplexSession`] was spawned with
+//! [`DuplexOptions::resume`](crate::duplex::DuplexOptions::resume) or
+//! [`DuplexOptions::continue_session`](crate::duplex::DuplexOptions::continue_session),
+//! the CLI restores the resumed session's total, so the first
+//! recorded turn also counts what that session spent before this
+//! process started.
+//! A falling total contributes zero and becomes the new baseline;
+//! spend during an unobserved reset cannot be recovered from that
+//! total alone.
+//!
 //! # Budget tracking
 //!
 //! Attach a [`BudgetTracker`] (the same type [`Session`](crate::session::Session)
@@ -88,7 +110,7 @@
 //! truncated turn lands.
 
 use crate::budget::BudgetTracker;
-use crate::duplex::{DuplexSession, TurnResult};
+use crate::duplex::{DuplexSession, TurnResult, turn_cost_delta};
 use crate::error::Result;
 
 /// Host-side bookkeeping over a [`DuplexSession`].
@@ -107,12 +129,16 @@ struct ConversationState {
     history: Vec<TurnResult>,
     cumulative_cost_usd: f64,
     cumulative_turns: u32,
+    /// The last running total the CLI reported: the baseline for the
+    /// next turn's cost.
+    last_reported_total_usd: Option<f64>,
     budget: Option<BudgetTracker>,
 }
 
 impl ConversationState {
     fn record(&mut self, turn: TurnResult) {
-        let cost = turn.total_cost_usd().unwrap_or(0.0);
+        let cost = turn_cost_delta(&mut self.last_reported_total_usd, turn.total_cost_usd())
+            .unwrap_or(0.0);
         self.cumulative_cost_usd += cost;
         self.cumulative_turns = self.cumulative_turns.saturating_add(1);
         if let Some(b) = &self.budget {
@@ -138,12 +164,17 @@ impl Conversation {
 
     /// Attach a [`BudgetTracker`] for cumulative-cost ceilings.
     ///
-    /// Every turn's cost (from [`TurnResult::total_cost_usd`]) is
+    /// Every turn's cost (the change in [`TurnResult::total_cost_usd`]
+    /// from the previous turn, see the
+    /// [module docs](crate::conversation#cost-accounting)) is
     /// recorded on the tracker, and [`Conversation::send`] returns
     /// [`Error::BudgetExceeded`](crate::error::Error::BudgetExceeded)
     /// before dispatching a turn if the ceiling has been hit. Clone a
     /// tracker across several conversations to enforce a shared
     /// ceiling.
+    /// A resumed session's first recorded total includes historical
+    /// spend, which is also charged to this tracker. See the
+    /// [cost-accounting scope](crate::conversation#cost-accounting).
     #[must_use]
     pub fn with_budget(mut self, budget: BudgetTracker) -> Self {
         self.state.budget = Some(budget);
@@ -196,7 +227,9 @@ impl Conversation {
         self.state.history.last()
     }
 
-    /// Cumulative cost in USD across every recorded turn.
+    /// Cumulative cost in USD across every recorded turn: the sum of
+    /// each turn's change in the CLI's running total. See the
+    /// [module docs](crate::conversation#cost-accounting).
     #[must_use]
     pub fn total_cost_usd(&self) -> f64 {
         self.state.cumulative_cost_usd
@@ -242,13 +275,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn turn(session_id: &str, cost: f64) -> TurnResult {
+    /// A completed turn whose `result` reports `total` as the
+    /// session's running total.
+    fn turn(session_id: &str, total: f64) -> TurnResult {
         TurnResult {
             result: json!({
                 "type": "result",
+                "subtype": "success",
+                "is_error": false,
                 "result": "ok",
                 "session_id": session_id,
-                "total_cost_usd": cost,
+                "total_cost_usd": total,
+            }),
+            events: vec![],
+        }
+    }
+
+    /// An interrupted turn, shaped like the CLI's: an error subtype,
+    /// `is_error: true`, no `result` text.
+    fn interrupted(session_id: &str, total: f64) -> TurnResult {
+        TurnResult {
+            result: json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "session_id": session_id,
+                "total_cost_usd": total,
             }),
             events: vec![],
         }
@@ -266,15 +318,61 @@ mod tests {
     }
 
     #[test]
-    fn record_accumulates_across_turns() {
-        let mut state = ConversationState::default();
-        state.record(turn("sess-1", 0.01));
-        state.record(turn("sess-1", 0.02));
-        state.record(turn("sess-1", 0.03));
+    fn record_takes_deltas_of_running_total() {
+        // The CLI reports a running total per result, so three turns
+        // costing 0.001, 0.002 and 0.003 report 0.001, 0.003, 0.006.
+        let budget = BudgetTracker::builder().build();
+        let mut state = ConversationState {
+            budget: Some(budget.clone()),
+            ..Default::default()
+        };
+        state.record(turn("sess-1", 0.001));
+        state.record(turn("sess-1", 0.003));
+        state.record(turn("sess-1", 0.006));
 
         assert_eq!(state.history.len(), 3);
         assert_eq!(state.cumulative_turns, 3);
-        assert!((state.cumulative_cost_usd - 0.06).abs() < 1e-9);
+        assert!((state.cumulative_cost_usd - 0.006).abs() < 1e-9);
+        assert!((budget.total_usd() - 0.006).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_interrupted_turn_with_unchanged_total_costs_zero() {
+        let mut state = ConversationState::default();
+        state.record(turn("sess-1", 0.002));
+        state.record(interrupted("sess-1", 0.002));
+        assert_eq!(state.cumulative_turns, 2);
+        assert!((state.cumulative_cost_usd - 0.002).abs() < 1e-9);
+
+        state.record(turn("sess-1", 0.005));
+        assert!((state.cumulative_cost_usd - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_turn_without_total_keeps_baseline() {
+        let mut state = ConversationState::default();
+        state.record(turn("sess-1", 0.002));
+        state.record(TurnResult {
+            result: json!({ "type": "result", "session_id": "sess-1" }),
+            events: vec![],
+        });
+        state.record(turn("sess-1", 0.004));
+
+        assert_eq!(state.cumulative_turns, 3);
+        assert!((state.cumulative_cost_usd - 0.004).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_clamps_falling_total_at_zero() {
+        // A total below the previous one costs zero and becomes the
+        // new baseline.
+        let mut state = ConversationState::default();
+        state.record(turn("sess-1", 0.004));
+        state.record(turn("sess-1", 0.001));
+        assert!((state.cumulative_cost_usd - 0.004).abs() < 1e-9);
+
+        state.record(turn("sess-1", 0.003));
+        assert!((state.cumulative_cost_usd - 0.006).abs() < 1e-9);
     }
 
     #[test]

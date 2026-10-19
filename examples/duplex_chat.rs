@@ -62,7 +62,7 @@ async fn main() -> claude_wrapper::Result<()> {
             println!("\n{text}\n");
         }
         if let Some(cost) = turn.total_cost_usd() {
-            eprintln!("(turn cost: ${cost:.4})");
+            eprintln!("(session total cost: ${cost:.4})");
         }
 
         print!("> ");

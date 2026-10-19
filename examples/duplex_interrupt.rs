@@ -51,7 +51,7 @@ async fn main() -> claude_wrapper::Result<()> {
         println!("  is_error: {is_err}");
     }
     if let Some(cost) = turn.total_cost_usd() {
-        println!("  cost: ${cost:.4}");
+        println!("  session total cost: ${cost:.4}");
     }
 
     session.close().await?;

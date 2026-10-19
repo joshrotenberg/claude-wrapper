@@ -25,9 +25,10 @@
 //!
 //! # Cost and budget bookkeeping
 //!
-//! [`DuplexSession`] itself keeps no cross-turn accounting: each
-//! [`TurnResult`] carries that turn's cost and nothing accumulates.
-//! For cumulative cost, turn history, and a
+//! [`DuplexSession`] itself keeps no cross-turn accounting. The cost
+//! on each [`TurnResult`] is the CLI's running total for the session,
+//! not that turn's cost (see [`TurnResult::total_cost_usd`]). For
+//! per-turn cost, cumulative cost, turn history, and a
 //! [`BudgetTracker`]-enforced spend ceiling (send fails fast with
 //! [`Error::BudgetExceeded`] once the ceiling is hit), wrap the
 //! session in a [`Conversation`] --
@@ -1003,9 +1004,18 @@ impl TurnResult {
     /// Extract `total_cost_usd` (preferred) or the legacy `cost_usd`
     /// field, if either is present.
     ///
-    /// This is the cost of one turn. For the conversation-wide
-    /// running total, record turns through a
-    /// [`Conversation`](crate::conversation::Conversation).
+    /// This is the CLI's running total for the session, not the cost
+    /// of this turn: each `result` message reports everything spent
+    /// so far, earlier turns included. When the session was spawned
+    /// with [`DuplexOptions::resume`] or
+    /// [`DuplexOptions::continue_session`], the CLI restores the
+    /// resumed session's total, so the figure also covers spend from
+    /// before this process started.
+    ///
+    /// A turn's own cost is the change from the previous turn's
+    /// total. [`Conversation`](crate::conversation::Conversation)
+    /// records that change for each turn and keeps the cumulative
+    /// figure.
     #[must_use]
     pub fn total_cost_usd(&self) -> Option<f64> {
         self.result
@@ -1019,6 +1029,37 @@ impl TurnResult {
     pub fn duration_ms(&self) -> Option<u64> {
         self.result.get("duration_ms").and_then(Value::as_u64)
     }
+
+    /// Extract `result.subtype`, if present: `"success"` for a turn
+    /// that completed, or an error subtype such as
+    /// `"error_during_execution"` for an interrupted turn.
+    #[must_use]
+    pub fn subtype(&self) -> Option<&str> {
+        self.result.get("subtype").and_then(Value::as_str)
+    }
+
+    /// Extract `result.is_error`. Returns `false` when the field is
+    /// absent.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.result
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+}
+
+/// Turn a reported running total into the cost of the turn that
+/// reported it.
+///
+/// The CLI reports `total_cost_usd` as the running total for the
+/// session, so a turn costs the difference from the previous total,
+/// clamped at zero. `prev_total` is updated to `total`. A turn that
+/// reports no total returns `None` and leaves `prev_total` alone.
+pub(crate) fn turn_cost_delta(prev_total: &mut Option<f64>, total: Option<f64>) -> Option<f64> {
+    let total = total?;
+    let prev = prev_total.replace(total).unwrap_or(0.0);
+    Some((total - prev).max(0.0))
 }
 
 /// A classified inbound event broadcast to [`DuplexSession::subscribe`]
@@ -1238,8 +1279,9 @@ impl DuplexSession {
     /// already pending, and [`Error::DuplexClosed`] if the session
     /// task has already exited.
     ///
-    /// The returned [`TurnResult`] is per-turn; nothing accumulates
-    /// across calls. For cumulative cost/history and a budget
+    /// The returned [`TurnResult`] holds this turn's events only, but
+    /// its [`TurnResult::total_cost_usd`] is the session's running
+    /// total. For per-turn and cumulative cost, history, and a budget
     /// ceiling, send through a
     /// [`Conversation`](crate::conversation::Conversation) instead.
     pub async fn send(&self, prompt: impl Into<String>) -> Result<TurnResult> {
@@ -1504,6 +1546,9 @@ async fn run_session(
     let mut turns: u64 = 0;
     let mut turn_span: Option<tracing::Span> = None;
     let mut turn_started: Option<std::time::Instant> = None;
+    // The CLI reports a running total on each result; the turn span
+    // records the change from the previous one.
+    let mut last_total_cost: Option<f64> = None;
 
     loop {
         tokio::select! {
@@ -1533,6 +1578,11 @@ async fn run_session(
                             }
                         }
                         Some("result") => {
+                            let total = parsed
+                                .get("total_cost_usd")
+                                .or_else(|| parsed.get("cost_usd"))
+                                .and_then(Value::as_f64);
+                            let cost = turn_cost_delta(&mut last_total_cost, total);
                             if let Some(span) = turn_span.take() {
                                 span.record(
                                     "is_error",
@@ -1541,10 +1591,9 @@ async fn run_session(
                                 if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
                                     span.record("subtype", sub);
                                 }
-                                if let Some(c) =
-                                    parsed.get("total_cost_usd").and_then(Value::as_f64)
-                                {
+                                if let (Some(c), Some(t)) = (cost, total) {
                                     span.record("cost_usd", c);
+                                    span.record("total_cost_usd", t);
                                 }
                                 if let Some(started) = turn_started.take() {
                                     span.record(
@@ -1630,6 +1679,7 @@ async fn run_session(
                         is_error = tracing::field::Empty,
                         subtype = tracing::field::Empty,
                         cost_usd = tracing::field::Empty,
+                        total_cost_usd = tracing::field::Empty,
                         duration_ms = tracing::field::Empty,
                     ));
                     turn_started = Some(std::time::Instant::now());
@@ -2564,6 +2614,37 @@ mod tests {
         assert_eq!(r.session_id(), None);
         assert_eq!(r.total_cost_usd(), None);
         assert_eq!(r.duration_ms(), None);
+        assert_eq!(r.subtype(), None);
+        assert!(!r.is_error());
+    }
+
+    #[test]
+    fn turn_result_subtype_and_is_error_for_interrupted_turn() {
+        let r = TurnResult {
+            result: json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "total_cost_usd": 0.0004,
+            }),
+            events: vec![],
+        };
+        assert_eq!(r.subtype(), Some("error_during_execution"));
+        assert!(r.is_error());
+        assert_eq!(r.result_text(), None);
+    }
+
+    #[test]
+    fn turn_cost_delta_tracks_previous_total() {
+        let mut prev = None;
+        assert_eq!(turn_cost_delta(&mut prev, Some(0.25)), Some(0.25));
+        assert_eq!(turn_cost_delta(&mut prev, Some(0.75)), Some(0.5));
+        // No total: no cost, baseline unchanged.
+        assert_eq!(turn_cost_delta(&mut prev, None), None);
+        assert_eq!(prev, Some(0.75));
+        // Falling total: clamped at zero, becomes the new baseline.
+        assert_eq!(turn_cost_delta(&mut prev, Some(0.5)), Some(0.0));
+        assert_eq!(turn_cost_delta(&mut prev, Some(1.0)), Some(0.5));
     }
 
     #[test]

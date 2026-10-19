@@ -36,10 +36,10 @@
 //! double as a before/after demo for the wrapper types that tighten this
 //! shape:
 //!
-//! - The `cumulative_cost_usd` / `turns` mutexes collapse into
+//! - The cost-baseline / cumulative-cost / turn-count mutexes collapse into
 //!   [`Conversation`](claude_wrapper::conversation::Conversation), which
 //!   already tracks both. Replacing `Arc<Mutex<DuplexSession>>` with
-//!   `Arc<Mutex<Conversation>>` removes ~10 lines of state plumbing.
+//!   `Arc<Mutex<Conversation>>` removes the manual accounting state.
 //! - The hardcoded `alive: true` is a placeholder for a future
 //!   `session.is_alive()` health primitive (tracked in
 //!   <https://github.com/joshrotenberg/claude-wrapper/issues/572>).
@@ -62,6 +62,7 @@ use claude_wrapper::duplex::{DuplexOptions, DuplexSession};
 #[derive(Clone)]
 struct AppState {
     session: Arc<Mutex<DuplexSession>>,
+    last_reported_total_usd: Arc<Mutex<Option<f64>>>,
     cumulative_cost_usd: Arc<Mutex<f64>>,
     turns: Arc<Mutex<u32>>,
 }
@@ -97,7 +98,15 @@ async fn chat(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
-    let turn_cost = turn.total_cost_usd().unwrap_or(0.0);
+    // The CLI reports a running session total. Missing totals keep the
+    // baseline; a falling total starts a new baseline without a refund.
+    let turn_cost = match turn.total_cost_usd() {
+        Some(total) => {
+            let previous = state.last_reported_total_usd.lock().await.replace(total);
+            (total - previous.unwrap_or(0.0)).max(0.0)
+        }
+        None => 0.0,
+    };
     *state.cumulative_cost_usd.lock().await += turn_cost;
     *state.turns.lock().await += 1;
 
@@ -123,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         session: Arc::new(Mutex::new(session)),
+        last_reported_total_usd: Arc::new(Mutex::new(None)),
         cumulative_cost_usd: Arc::new(Mutex::new(0.0)),
         turns: Arc::new(Mutex::new(0)),
     };
