@@ -340,23 +340,10 @@ const DECLINED: &[(&str, &str, &str)] = &[
     // in https://github.com/joshrotenberg/claude-wrapper/issues/799, and each
     // entry goes away with the change that wraps it.
     (
-        "--forward-subagent-text",
-        "",
-        "unwrapped gap, see issue #799: works only with --print and \
-         --output-format=stream-json, which is what the wrapper runs",
-    ),
-    (
         "--autocompact",
         "",
         "unwrapped gap, see issue #799: spawn-time context window setting, \
          where slash.rs already builds the /compact operation",
-    ),
-    (
-        "--allow-dangerously-skip-permissions",
-        "",
-        "unwrapped gap, see issue #799: the weaker form of the flag \
-         DangerousClient already emits, making bypass available rather than \
-         active",
     ),
     (
         "--cloud",
@@ -539,6 +526,8 @@ fn maximal_query() -> QueryCommand {
         .tmux()
         .disable_slash_commands()
         .include_hook_events()
+        .forward_subagent_text()
+        .allow_dangerously_skip_permissions()
         .name("contract")
         .replay_user_messages(true)
         .exclude_dynamic_system_prompt_sections()
@@ -571,6 +560,8 @@ fn exclusive_query_commands() -> Vec<(&'static str, QueryCommand)> {
 /// flags, and exposes its argv only through `to_command_string`.
 fn maximal_duplex_command() -> String {
     let opts = DuplexOptions::default()
+        .forward_subagent_text()
+        .allow_dangerously_skip_permissions()
         .model("haiku")
         .effort(Effort::Low)
         .permission_mode(PermissionMode::Plan)

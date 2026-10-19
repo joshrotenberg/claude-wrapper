@@ -34,6 +34,8 @@ pub(crate) struct SharedSpawnArgs {
     pub(crate) fallback_model: Option<String>,
     pub(crate) no_session_persistence: bool,
     pub(crate) dangerously_skip_permissions: bool,
+    pub(crate) allow_dangerously_skip_permissions: bool,
+    pub(crate) forward_subagent_text: bool,
     pub(crate) agent: Option<String>,
     pub(crate) agents_json: Option<String>,
     pub(crate) strict_mcp_config: bool,
@@ -161,6 +163,13 @@ impl SharedSpawnArgs {
 
         if self.no_session_persistence {
             args.push("--no-session-persistence".to_string());
+        }
+
+        if self.allow_dangerously_skip_permissions {
+            args.push("--allow-dangerously-skip-permissions".to_string());
+        }
+        if self.forward_subagent_text {
+            args.push("--forward-subagent-text".to_string());
         }
 
         if self.dangerously_skip_permissions {

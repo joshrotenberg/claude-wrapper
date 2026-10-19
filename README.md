@@ -672,9 +672,18 @@ MIT OR Apache-2.0
 
 ### Execution diagnostics contract
 
-Normal wrapper tracing is intended to report operation, argument counts, byte
+Normal execution tracing is intended to report operation, argument counts, byte
 counts, timing and outcome metadata. Prompts, argument values, native identifiers,
 paths, configuration values, process output and rendered errors belong in
 caller-controlled command previews, result/error values or explicit native logs.
 The wrapper does not install a subscriber. Hosts choose their subscriber and
 correlation spans; enabling wrapper tracing must not opt them into content logs.
+
+This contract covers execution, streaming, retries and resident sessions. Read-side
+filesystem-inspection modules have separate diagnostics that can include paths and
+parse errors; filter those targets when inspecting private local state.
+
+`QueryCommand` and `DuplexOptions` expose `forward_subagent_text()` for nested
+stream-json messages, and `allow_dangerously_skip_permissions()` to make bypass
+mode available without enabling it. Both flags are checked at the existing CLI
+floor and maximum. Neither is enabled by default; the floor remains 2.1.220.

@@ -175,7 +175,7 @@ where
                         attempt = attempt + 1,
                         max_attempts = policy.max_attempts,
                         delay_ms = delay.as_millis() as u64,
-                        error = %e,
+                        timeout = matches!(e, crate::Error::Timeout { .. }),
                         "retrying after transient error"
                     );
                     tokio::time::sleep(delay).await;
@@ -219,7 +219,7 @@ where
                         attempt = attempt + 1,
                         max_attempts = policy.max_attempts,
                         delay_ms = delay.as_millis() as u64,
-                        error = %e,
+                        timeout = matches!(e, crate::Error::Timeout { .. }),
                         "retrying after transient error"
                     );
                     std::thread::sleep(delay);
