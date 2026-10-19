@@ -1,7 +1,7 @@
 //! What the crate's spans publish, asserted against a real subscriber.
 //!
 //! The span field set is a contract: hosts filter and correlate on it, so a
-//! renamed field or a dropped `record` is a breaking change that no compiler
+//! renamed field or a dropped `record` is an observable change that no compiler
 //! catches. These tests install a collecting subscriber and assert on what it
 //! actually receives.
 //!
@@ -110,7 +110,7 @@ fn fake_claude() -> Claude {
 }
 
 #[test]
-fn exec_span_carries_command_binary_cwd_and_outcome() {
+fn exec_span_carries_metadata_and_outcome_without_paths() {
     let collector = Collector::default();
     let handle = collector.clone();
     let claude = fake_claude();
@@ -128,14 +128,21 @@ fn exec_span_carries_command_binary_cwd_and_outcome() {
     );
     let fields = handle.fields_of("claude.exec");
     let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-    for expected in ["command", "mode", "binary", "exit_code", "duration_ms"] {
+    for expected in [
+        "command",
+        "mode",
+        "arg_count",
+        "working_dir_set",
+        "exit_code",
+        "duration_ms",
+    ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
-    // `command` is the first argv token, which is the subcommand for
-    // subcommand invocations and the leading flag for print-mode runs.
+    assert!(!names.contains(&"binary") && !names.contains(&"cwd"));
+    // Labels are fixed vocabulary, not arbitrary argument values.
     let command = fields.iter().find(|(k, _)| k == "command").unwrap();
     assert!(
-        command.1.contains("--version"),
+        command.1 == "version",
         "command should name the invocation, got {:?}",
         command.1
     );

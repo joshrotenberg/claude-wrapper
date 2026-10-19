@@ -176,6 +176,10 @@ where
                         max_attempts = policy.max_attempts,
                         delay_ms = delay.as_millis() as u64,
                         timeout = matches!(e, crate::Error::Timeout { .. }),
+                        exit_code = match &e {
+                            crate::Error::CommandFailed { exit_code, .. } => Some(*exit_code),
+                            _ => None,
+                        },
                         "retrying after transient error"
                     );
                     tokio::time::sleep(delay).await;
@@ -220,6 +224,10 @@ where
                         max_attempts = policy.max_attempts,
                         delay_ms = delay.as_millis() as u64,
                         timeout = matches!(e, crate::Error::Timeout { .. }),
+                        exit_code = match &e {
+                            crate::Error::CommandFailed { exit_code, .. } => Some(*exit_code),
+                            _ => None,
+                        },
                         "retrying after transient error"
                     );
                     std::thread::sleep(delay);

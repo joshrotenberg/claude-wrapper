@@ -1726,37 +1726,37 @@ async fn run_session_child(
                     };
                     // Peek at the semantic outcome before handle_inbound consumes it.
                     if let Some("result") = parsed.get("type").and_then(Value::as_str) {
-                            let total = parsed
-                                .get("total_cost_usd")
-                                .or_else(|| parsed.get("cost_usd"))
-                                .and_then(Value::as_f64);
-                            let cost = turn_cost_delta(&mut last_total_cost, total);
-                            if let Some(span) = turn_span.take() {
-                                span.record(
-                                    "is_error",
-                                    parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                                );
-                                if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
-                                    let label = match sub {
-                                        "success" => "success",
-                                        "error_during_execution" => "error_during_execution",
-                                        "error_max_turns" => "error_max_turns",
-                                        "error_max_budget_usd" => "error_max_budget_usd",
-                                        _ => "other",
-                                    };
-                                    span.record("subtype", label);
-                                }
-                                if let (Some(c), Some(t)) = (cost, total) {
-                                    span.record("cost_usd", c);
-                                    span.record("total_cost_usd", t);
-                                }
-                                if let Some(started) = turn_started.take() {
-                                    span.record(
-                                        "duration_ms",
-                                        started.elapsed().as_millis() as u64,
-                                    );
-                                }
+                        let total = parsed
+                            .get("total_cost_usd")
+                            .or_else(|| parsed.get("cost_usd"))
+                            .and_then(Value::as_f64);
+                        let cost = turn_cost_delta(&mut last_total_cost, total);
+                        if let Some(span) = turn_span.take() {
+                            span.record(
+                                "is_error",
+                                parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                            );
+                            if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
+                                let label = match sub {
+                                    "success" => "success",
+                                    "error_during_execution" => "error_during_execution",
+                                    "error_max_turns" => "error_max_turns",
+                                    "error_max_budget_usd" => "error_max_budget_usd",
+                                    _ => "other",
+                                };
+                                span.record("subtype", label);
                             }
+                            if let (Some(c), Some(t)) = (cost, total) {
+                                span.record("cost_usd", c);
+                                span.record("total_cost_usd", t);
+                            }
+                            if let Some(started) = turn_started.take() {
+                                span.record(
+                                    "duration_ms",
+                                    started.elapsed().as_millis() as u64,
+                                );
+                            }
+                        }
                     }
                     match handle_inbound(parsed, &mut pending, &events_tx) {
                         InboundAction::None => {}
@@ -1765,9 +1765,7 @@ async fn run_session_child(
                             let decision = match permission_handler.as_ref() {
                                 Some(h) => h.invoke(req).await,
                                 None => {
-                                    warn!(
-                                            "received can_use_tool with no permission handler; auto-denying"
-                                    );
+                                    warn!("received can_use_tool with no permission handler; auto-denying");
                                     PermissionDecision::Deny {
                                         message:
                                             "no permission handler configured on duplex session"
@@ -1779,9 +1777,7 @@ async fn run_session_child(
                                 debug!(
                                     "permission handler deferred; waiting for respond_to_permission"
                                 );
-                            } else if let Err(_error) =
-                                write_permission_response(&mut stdin, &request_id, &decision).await
-                            {
+                            } else if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
                                 warn!("failed to write permission response");
                             }
                         }
@@ -1843,9 +1839,7 @@ async fn run_session_child(
                     pending = Some((reply, Vec::new()));
                 }
                 Some(OutboundMsg::PermissionResponse { request_id, decision }) => {
-                    if let Err(_error) =
-                        write_permission_response(&mut stdin, &request_id, &decision).await
-                    {
+                    if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
                         warn!("failed to write deferred permission response");
                     }
                 }

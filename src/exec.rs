@@ -86,6 +86,9 @@ pub(crate) fn span_command(args: &[String]) -> &'static str {
         Some("install") => "install",
         Some("marketplace") => "marketplace",
         Some("update") => "update",
+        Some("setup-token") => "setup-token",
+        Some("project") => "project",
+        Some("ultrareview") => "ultrareview",
         Some("--version" | "-v") => "version",
         Some(_) => "other",
     }
@@ -590,8 +593,8 @@ pub async fn run_claude_cancellable<C>(
 where
     C: std::future::Future<Output = ()> + Send,
 {
+    let span = exec_span(claude, &args, "cancellable");
     let command_args = full_command_args(claude, args);
-    let span = exec_span(claude, &command_args, "cancellable");
     let _enter = span.enter();
     let started = std::time::Instant::now();
     let stop = cancellation_or_timeout(cancel, claude.timeout);
@@ -658,8 +661,8 @@ pub async fn run_claude_with_stdin_prompt_cancellable<C>(
 where
     C: std::future::Future<Output = ()> + Send,
 {
+    let span = exec_span(claude, &args, "stdin-cancellable");
     let command_args = full_command_args(claude, args);
-    let span = exec_span(claude, &command_args, "stdin-cancellable");
     let _enter = span.enter();
     let started = std::time::Instant::now();
     let stop = cancellation_or_timeout(cancel, claude.timeout);
@@ -1215,9 +1218,8 @@ async fn run_with_stop(
 #[cfg(any(feature = "async", feature = "sync"))]
 const CAPTURE_CHUNK: usize = 8 * 1024;
 
-/// How much of an over-ceiling stream is kept to log. The captured
-/// prefix can be as large as the ceiling itself, which is not something
-/// to hand to a logger, but the first few KiB usually name the runaway.
+/// Bound the discarded diagnostic prefix while capture settlement finishes.
+/// Tracing reports only its decoded byte length, never its contents.
 #[cfg(any(feature = "async", feature = "sync"))]
 const BREACH_LOG_BYTES: usize = 2 * 1024;
 
@@ -1233,7 +1235,7 @@ enum Captured {
     /// EOF was reached within the ceiling.
     Complete(String),
     /// The child wrote past the ceiling. Carries at most
-    /// [`BREACH_LOG_BYTES`] of the prefix, for diagnostics only: the
+    /// [`BREACH_LOG_BYTES`] of the raw prefix, decoded lossily: the
     /// rest is dropped rather than returned, since returning it is the
     /// truncated success this exists to avoid.
     Exceeded { head: String },
@@ -1296,7 +1298,7 @@ pub(crate) async fn capture_stream<R: AsyncReadExt + Unpin>(
             warn!(
                 %stream,
                 limit_bytes,
-                captured_bytes = head.len(),
+                retained_prefix_bytes = head.len(),
                 "captured output exceeded its ceiling; terminating the child",
             );
             Err(Error::OutputLimitExceeded {
@@ -1891,7 +1893,7 @@ fn join_capture(
             warn!(
                 %stream,
                 limit_bytes,
-                captured_bytes = head.len(),
+                retained_prefix_bytes = head.len(),
                 "captured output exceeded its ceiling; terminating the child",
             );
             Err(Error::OutputLimitExceeded {

@@ -406,6 +406,7 @@ where
     use crate::command::ClaudeCommand;
 
     let args = cmd.args();
+    let operation = crate::exec::span_command(&args);
     let stdin_prompt = cmd.stdin_prompt();
 
     let mut command_args = Vec::new();
@@ -419,7 +420,7 @@ where
     // "never started".
     let span = tracing::debug_span!(
         "claude.stream",
-        command = crate::exec::span_command(&command_args),
+        command = operation,
         working_dir_set = claude.working_dir.is_some(),
         timeout_secs = claude.timeout.map(|t| t.as_secs()),
         outcome = tracing::field::Empty,

@@ -222,6 +222,14 @@ async fn retry_diagnostics_exclude_error_content() {
         error.to_string().contains("TRACE_PRIVATE"),
         "explicit error retains diagnostics"
     );
+    assert!(
+        record
+            .0
+            .lock()
+            .unwrap()
+            .contains("retrying after transient error")
+    );
+    assert!(record.0.lock().unwrap().contains("exit_code=7"));
     record.assert_private();
 }
 
@@ -289,7 +297,7 @@ async fn capture_limit_diagnostics_exclude_retained_output() {
     ));
     record.assert_private();
     assert!(
-        record.0.lock().unwrap().contains("captured_bytes="),
+        record.0.lock().unwrap().contains("retained_prefix_bytes="),
         "capture warning was observed"
     );
 }
