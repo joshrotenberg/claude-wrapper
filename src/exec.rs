@@ -1347,7 +1347,9 @@ const TXTBSY_MAX_BACKOFF: Duration = Duration::from_millis(25);
 /// clears on its own, so retry within a bounded wall-clock budget rather than
 /// surfacing a spurious spawn failure.
 #[cfg(feature = "async")]
-async fn spawn_retrying_txtbsy(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
+pub(crate) async fn spawn_retrying_txtbsy(
+    cmd: &mut Command,
+) -> std::io::Result<tokio::process::Child> {
     let start = std::time::Instant::now();
     let mut backoff = Duration::from_millis(1);
     loop {

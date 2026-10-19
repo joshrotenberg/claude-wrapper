@@ -38,6 +38,31 @@ impl Fixture {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn transient_executable_busy_is_retried_before_resident_spawn() {
+    let fixture = Fixture::new("cat >/dev/null");
+    // Linux rejects exec while any writable handle to this file is open.
+    // Keep that condition deterministic until the retrying spawn is pending.
+    let writable = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fixture.binary)
+        .unwrap();
+    let client = fixture.client();
+    let spawn = DuplexSession::spawn(&client, DuplexOptions::default());
+    tokio::pin!(spawn);
+    tokio::select! {
+        early = &mut spawn => panic!("spawn must retry while executable is busy: {early:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+    }
+    drop(writable);
+    let session = tokio::time::timeout(Duration::from_secs(3), spawn)
+        .await
+        .expect("spawn retry is bounded")
+        .expect("spawn succeeds once executable is no longer busy");
+    session.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn stderr_flood_does_not_block_resident_result() {
     let fixture = Fixture::new(&format!(

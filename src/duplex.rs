@@ -1225,11 +1225,13 @@ impl DuplexSession {
             cmd.current_dir(dir);
         }
 
-        let mut child = cmd.spawn().map_err(|e| Error::Io {
-            message: format!("failed to spawn claude: {e}"),
-            source: e,
-            working_dir: claude.working_dir.clone(),
-        })?;
+        let mut child = crate::exec::spawn_retrying_txtbsy(&mut cmd)
+            .await
+            .map_err(|e| Error::Io {
+                message: format!("failed to spawn claude: {e}"),
+                source: e,
+                working_dir: claude.working_dir.clone(),
+            })?;
         let group =
             crate::exec::arm_and_notify(claude.process_group, child.id(), claude.on_spawn.as_ref());
 
