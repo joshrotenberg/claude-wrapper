@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.8] - 2026-10-20
+
+### Features
+
+- Bound duplex output and operation waits 
+
+
+
 ## [0.14.7] - 2026-10-19
 
 ### Bug Fixes
