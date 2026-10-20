@@ -49,6 +49,51 @@
 //! completes the session; a nonzero exit or I/O/settlement failure is reported
 //! through [`SessionExitStatus::Failed`] and the error returned by `close`.
 //!
+//! # Resource limits and deadlines
+//!
+//! A duplex session is unbounded by default: no per-frame or per-turn
+//! memory ceiling, no turn or control deadline, and no idle lifetime. The
+//! client's [`ClaudeBuilder::output_limit`](crate::ClaudeBuilder::output_limit)
+//! and [`ClaudeBuilder::timeout`](crate::ClaudeBuilder::timeout) apply to
+//! one-shot runs only. Opt in per session:
+//!
+//! - [`DuplexOptions::max_frame_bytes`]: largest single stdout line.
+//! - [`DuplexOptions::max_turn_bytes`]: stdout bytes consumed per turn,
+//!   including newlines, blank lines, and unparseable lines.
+//! - [`DuplexOptions::max_turn_events`]: events retained per
+//!   [`TurnResult`].
+//! - [`DuplexOptions::turn_timeout`]: one turn, from acceptance through
+//!   its `result`.
+//! - [`DuplexOptions::control_timeout`]: one control request, from
+//!   acceptance through its `control_response`.
+//!
+//! Byte limits count wire data, not exact allocator or parsed-JSON heap
+//! usage. The reader also uses a fixed-size input buffer.
+//!
+//! Per-turn counters and deadlines reset for each turn. When any policy
+//! trips, the session closes: new requests are rejected with
+//! [`Error::DuplexClosed`], the owned process group is stopped with the
+//! client's configured [`kill_grace`](crate::ClaudeBuilder::kill_grace) and
+//! [`termination_signal`](crate::ClaudeBuilder::termination_signal) (the
+//! graceful shutdown budget is skipped; with
+//! [`process_group(false)`](crate::ClaudeBuilder::process_group) only the
+//! direct child is killed), the direct child is reaped, and
+//! then every accepted turn and control waiter receives
+//! [`Error::DuplexLimitExceeded`] or [`Error::DuplexDeadlineExceeded`].
+//! Requests still queued but not yet accepted receive
+//! [`Error::DuplexClosed`]. [`DuplexSession::close`] returns the same
+//! policy error. Its `process_settled` field reports whether the direct
+//! child was reaped; it says nothing about escaped descendants, and a
+//! deadline error never implies the CLI acknowledged an interrupt. A turn
+//! that trips a policy never resolves as a truncated successful
+//! [`TurnResult`].
+//!
+//! Dropping a [`DuplexSession::send`] or [`DuplexSession::interrupt`]
+//! future only abandons the wait. The request stays pending in the
+//! session until its `result` or `control_response` arrives, or until its
+//! configured deadline closes the session. An abandoned turn continues to
+//! block another `send` with [`Error::DuplexTurnInFlight`].
+//!
 //! [`QueryCommand`]: crate::QueryCommand
 //! [`Session`]: crate::session::Session
 //! [`Conversation`]: crate::conversation::Conversation
@@ -215,11 +260,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{Instrument, debug, warn};
 
 use crate::Claude;
 use crate::command::spawn_args::{SharedSpawnArgs, shell_quote};
-use crate::error::{Error, Result};
+use crate::error::{DuplexLimit, DuplexOperation, Error, Result};
 use crate::tool_pattern::ToolPattern;
 use crate::types::{Effort, HermeticScope, PermissionMode};
 
@@ -287,11 +333,17 @@ type PermissionFn = dyn Fn(PermissionRequest) -> PermissionFuture + Send + Sync 
 /// async-block closure. Cheap to clone (`Arc` under the hood).
 ///
 /// The handler runs inline on the duplex session's task. The CLI is
-/// blocked on the response while the handler runs, so awaiting an
-/// async policy check (DB lookup, remote call) is fine. If the
-/// decision needs human input on a different timescale, return
-/// [`PermissionDecision::Defer`] and answer via
-/// [`DuplexSession::respond_to_permission`] when ready.
+/// blocked on the response while the handler runs, and the session reads
+/// no stdout and accepts no other requests until it returns, so keep it
+/// short: an async policy check (DB lookup, remote call) is fine. If the
+/// decision needs human input, return [`PermissionDecision::Defer`]
+/// promptly and answer via [`DuplexSession::respond_to_permission`] when
+/// ready.
+///
+/// With [`DuplexOptions::turn_timeout`] set, the turn deadline includes
+/// time spent in the handler and any deferred wait. On expiry the
+/// handler's future is dropped and the session closes. A handler invoked
+/// while no deadline-bound operation is pending is not bounded.
 #[derive(Clone)]
 pub struct PermissionHandler {
     inner: Arc<PermissionFn>,
@@ -348,9 +400,10 @@ impl std::fmt::Debug for PermissionHandler {
 /// because they only make sense for a oneshot run or are owned by the
 /// duplex transport itself:
 ///
-/// - Transport is fixed: `output_format`, `input_format`,
-///   `include_partial_messages`, `verbose`, and `prompt_via_stdin` are
-///   pinned by the duplex spawn and not configurable.
+/// - Transport is fixed: `output_format`, `input_format`, `verbose`, and
+///   `prompt_via_stdin` are pinned by the duplex spawn and not
+///   configurable. Partial message chunks are off by default; opt in with
+///   [`Self::include_partial_messages`].
 /// - `retry_policy` reruns a whole oneshot invocation; a duplex session
 ///   holds one child open across turns, so there is nothing to retry at
 ///   this layer.
@@ -361,6 +414,12 @@ impl std::fmt::Debug for PermissionHandler {
 ///   echoing; the duplex layer owns its own stream plumbing.
 ///
 /// Use [`Self::arg`] if you need one of these on a duplex spawn anyway.
+///
+/// Resource and time policies ([`Self::max_frame_bytes`],
+/// [`Self::max_turn_bytes`], [`Self::max_turn_events`],
+/// [`Self::turn_timeout`], [`Self::control_timeout`]) are host-side and
+/// emit no CLI flags. All are unlimited by default. See the
+/// [module docs](crate::duplex#resource-limits-and-deadlines).
 #[derive(Debug, Default, Clone)]
 pub struct DuplexOptions {
     // Spawn-time knobs shared with QueryCommand; the flag emission
@@ -369,6 +428,19 @@ pub struct DuplexOptions {
     additional_args: Vec<String>,
     subscriber_capacity: Option<usize>,
     on_permission: Option<PermissionHandler>,
+    include_partial_messages: bool,
+    policy: DuplexPolicy,
+}
+
+/// Opt-in host-side resource and time policies. Every field is `None`
+/// (unlimited) by default.
+#[derive(Debug, Default, Clone, Copy)]
+struct DuplexPolicy {
+    max_frame_bytes: Option<usize>,
+    max_turn_bytes: Option<usize>,
+    max_turn_events: Option<usize>,
+    turn_timeout: Option<Duration>,
+    control_timeout: Option<Duration>,
 }
 
 impl DuplexOptions {
@@ -938,6 +1010,111 @@ impl DuplexOptions {
         self
     }
 
+    /// Emit partial message chunks as they arrive
+    /// (`--include-partial-messages`). Off by default.
+    ///
+    /// The CLI then writes `stream_event` messages while a turn is in
+    /// progress. They are broadcast to [`DuplexSession::subscribe`]
+    /// receivers as [`InboundEvent::StreamEvent`] and retained in
+    /// [`TurnResult::events`] like any other event, so a long reply can
+    /// produce many events. Pair this with [`Self::max_turn_events`] or
+    /// [`Self::max_turn_bytes`] when per-turn memory must be bounded.
+    #[must_use]
+    pub fn include_partial_messages(mut self) -> Self {
+        self.include_partial_messages = true;
+        self
+    }
+
+    /// Cap the size of one stdout frame (one NDJSON line), in bytes,
+    /// including its newline terminator. Default: unlimited.
+    ///
+    /// The check runs before an unterminated line is extended, so a child
+    /// that writes an endless line without a newline cannot grow the
+    /// retained raw frame past this size. Applies whether or not a turn is in
+    /// flight. Exceeding it closes the session with
+    /// [`Error::DuplexLimitExceeded`] (see the
+    /// [module docs](crate::duplex#resource-limits-and-deadlines)).
+    ///
+    /// [`ClaudeBuilder::output_limit`](crate::ClaudeBuilder::output_limit)
+    /// does not apply to duplex sessions.
+    #[must_use]
+    pub fn max_frame_bytes(mut self, bytes: usize) -> Self {
+        self.policy.max_frame_bytes = Some(bytes);
+        self
+    }
+
+    /// Cap the stdout bytes consumed during one turn. Default: unlimited.
+    ///
+    /// Counts every byte read while a turn is pending, from the moment the
+    /// session accepts the [`DuplexSession::send`] through the closing
+    /// `result` line: newline terminators, blank lines, and lines that fail
+    /// to parse all count. The counter resets for each turn; bytes read
+    /// while no turn is pending do not count, except for a partial frame
+    /// carried into the new turn: its buffered prefix counts too. Exceeding
+    /// the limit closes the session with [`Error::DuplexLimitExceeded`].
+    #[must_use]
+    pub fn max_turn_bytes(mut self, bytes: usize) -> Self {
+        self.policy.max_turn_bytes = Some(bytes);
+        self
+    }
+
+    /// Cap the number of events retained in one turn's
+    /// [`TurnResult::events`]. Default: unlimited.
+    ///
+    /// The count resets for each turn. Exceeding it closes the session with
+    /// [`Error::DuplexLimitExceeded`] instead of returning a truncated
+    /// turn. This is separate from [`Self::subscriber_capacity`]: a slow
+    /// subscriber sees
+    /// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
+    /// and the session continues, while a retained-event overflow ends the
+    /// session.
+    #[must_use]
+    pub fn max_turn_events(mut self, events: usize) -> Self {
+        self.policy.max_turn_events = Some(events);
+        self
+    }
+
+    /// Bound each turn with a deadline. Default: none.
+    ///
+    /// The clock starts when the session task accepts a
+    /// [`DuplexSession::send`], before the prompt is written to stdin, and
+    /// stops when the closing `result` line is read. The deadline covers
+    /// the stdin write, every [`PermissionHandler`] call made during the
+    /// turn, and any wait for [`DuplexSession::respond_to_permission`]
+    /// after a [`PermissionDecision::Defer`]. Expiry closes the session
+    /// with [`Error::DuplexDeadlineExceeded`].
+    ///
+    /// Independent of the client's
+    /// [`ClaudeBuilder::timeout`](crate::ClaudeBuilder::timeout), which does
+    /// not apply to duplex sessions. An idle session with no pending turn
+    /// has no lifetime limit. Cleanup can extend the wait beyond the deadline
+    /// by the configured kill grace and process settlement time. Zero expires
+    /// immediately; durations too large for the clock are treated as unlimited.
+    /// An expired deadline takes precedence over a result still awaiting
+    /// dispatch, even if that result is already buffered.
+    #[must_use]
+    pub fn turn_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.turn_timeout = Some(timeout);
+        self
+    }
+
+    /// Bound each outbound control request, such as
+    /// [`DuplexSession::interrupt`], with a deadline. Default: none.
+    ///
+    /// The clock starts when the session task accepts the request, before
+    /// it is written to stdin, and stops when the matching
+    /// `control_response` is read. The acknowledgment is independent of
+    /// any turn result: an interrupted turn's result does not satisfy this
+    /// deadline, and an acknowledgment does not end the turn. Expiry closes
+    /// the session with [`Error::DuplexDeadlineExceeded`]. Cleanup can extend
+    /// the wait beyond the deadline; zero and unrepresentable durations have
+    /// the same behavior as [`Self::turn_timeout`].
+    #[must_use]
+    pub fn control_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.control_timeout = Some(timeout);
+        self
+    }
+
     fn build_args(&self) -> Vec<String> {
         let mut args = vec![
             "--print".to_string(),
@@ -950,6 +1127,9 @@ impl DuplexOptions {
 
         self.shared.append_to(&mut args);
 
+        if self.include_partial_messages {
+            args.push("--include-partial-messages".to_string());
+        }
         if self.on_permission.is_some() {
             args.push("--permission-prompt-tool".to_string());
             args.push("stdio".to_string());
@@ -1291,6 +1471,7 @@ impl DuplexSession {
                 outbound_rx,
                 events_tx.clone(),
                 permission_handler,
+                opts.policy,
                 exit_tx,
             )
             .instrument(session_span),
@@ -1318,6 +1499,13 @@ impl DuplexSession {
     /// total. For per-turn and cumulative cost, history, and a budget
     /// ceiling, send through a
     /// [`Conversation`](crate::conversation::Conversation) instead.
+    ///
+    /// With opt-in policies configured, returns
+    /// [`Error::DuplexLimitExceeded`] or [`Error::DuplexDeadlineExceeded`]
+    /// after the session has closed and its child was stopped. Dropping
+    /// this future abandons the wait only; the turn stays in flight until
+    /// its result arrives or its deadline closes the session. See
+    /// [Resource limits and deadlines](crate::duplex#resource-limits-and-deadlines).
     pub async fn send(&self, prompt: impl Into<String>) -> Result<TurnResult> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.outbound_tx
@@ -1500,6 +1688,14 @@ impl DuplexSession {
     ///   error payload.
     /// - [`Error::DuplexClosed`] if the session task exited before
     ///   the response arrived.
+    /// - [`Error::DuplexDeadlineExceeded`] if
+    ///   [`DuplexOptions::control_timeout`] (or another pending deadline)
+    ///   expired first, or [`Error::DuplexLimitExceeded`] if a resource
+    ///   limit closed the session.
+    ///
+    /// The acknowledgment and the turn result are independent. Dropping
+    /// this future abandons the wait only; the request stays pending until
+    /// its `control_response` arrives or a deadline closes the session.
     ///
     /// # Example
     ///
@@ -1597,6 +1793,7 @@ async fn run_session(
     outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
     permission_handler: Option<PermissionHandler>,
+    policy: DuplexPolicy,
     exit_tx: watch::Sender<SessionExitStatus>,
 ) -> Result<()> {
     let mut stderr = child.stderr.take().expect("stderr was piped");
@@ -1622,6 +1819,7 @@ async fn run_session(
             outbound_rx,
             events_tx,
             permission_handler,
+            policy,
             stderr_failed_rx,
         );
         tokio::pin!(drain_stderr);
@@ -1680,197 +1878,726 @@ fn resident_outcome(
     }
 }
 
+/// An accepted operation's deadline, published to the supervisor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OpDeadline {
+    at: Instant,
+    operation: DuplexOperation,
+    timeout: Duration,
+}
+
+impl OpDeadline {
+    /// Start a deadline now. A timeout too large to represent is treated
+    /// as no deadline.
+    fn start(operation: DuplexOperation, timeout: Option<Duration>) -> Option<Self> {
+        let timeout = timeout?;
+        Some(Self {
+            at: Instant::now().checked_add(timeout)?,
+            operation,
+            timeout,
+        })
+    }
+
+    fn failure(self) -> PolicyFailure {
+        PolicyFailure::Deadline {
+            operation: self.operation,
+            timeout: self.timeout,
+        }
+    }
+}
+
+/// Why an opt-in policy closed the session. `Copy`, unlike [`Error`], so
+/// one failure can be rendered for every waiter and for `close`.
+#[derive(Debug, Clone, Copy)]
+enum PolicyFailure {
+    Limit {
+        limit: DuplexLimit,
+        max: usize,
+    },
+    Deadline {
+        operation: DuplexOperation,
+        timeout: Duration,
+    },
+}
+
+impl PolicyFailure {
+    fn error(self, process_settled: bool) -> Error {
+        match self {
+            Self::Limit { limit, max } => Error::DuplexLimitExceeded {
+                limit,
+                max,
+                process_settled,
+            },
+            Self::Deadline { operation, timeout } => Error::DuplexDeadlineExceeded {
+                operation,
+                timeout,
+                process_settled,
+            },
+        }
+    }
+}
+
+/// Stdout bytes consumed by the pending turn. `used` is `None` while no
+/// turn is pending, so bytes between turns are not counted.
+#[derive(Debug, Default)]
+struct TurnBytes {
+    limit: Option<usize>,
+    used: Option<usize>,
+}
+
+impl TurnBytes {
+    fn start(&mut self) {
+        self.used = Some(0);
+    }
+
+    fn stop(&mut self) {
+        self.used = None;
+    }
+
+    fn charge(&mut self, bytes: usize) -> std::result::Result<(), PolicyFailure> {
+        if let Some(used) = self.used.as_mut() {
+            let total = used.saturating_add(bytes);
+            if let Some(max) = self.limit
+                && total > max
+            {
+                return Err(PolicyFailure::Limit {
+                    limit: DuplexLimit::TurnBytes,
+                    max,
+                });
+            }
+            *used = total;
+        }
+        Ok(())
+    }
+}
+
+enum FrameRead {
+    /// One line, without its `\n` or `\r\n` terminator.
+    Frame(Vec<u8>),
+    Eof,
+}
+
+enum FrameError {
+    Io(std::io::Error),
+    Limit(PolicyFailure),
+}
+
+/// Newline framing over a persistent buffer.
+///
+/// Cancel safe: the only await is `fill_buf`, which consumes nothing, and
+/// bytes are copied into `partial` and consumed from the reader with no
+/// await in between, so dropping a pending read loses no bytes. (Rebuilding
+/// a `read_line` future around a local buffer would drop a partial line.)
+/// Both limits are checked before `partial` is extended.
+struct FrameReader<R> {
+    reader: BufReader<R>,
+    partial: Vec<u8>,
+    max_frame_bytes: Option<usize>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> FrameReader<R> {
+    fn new(reader: R, max_frame_bytes: Option<usize>) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            partial: Vec::new(),
+            max_frame_bytes,
+        }
+    }
+
+    async fn next_frame(
+        &mut self,
+        turn: &mut TurnBytes,
+    ) -> std::result::Result<FrameRead, FrameError> {
+        // A frame begun while idle can become part of this turn. Charge
+        // its buffered prefix once, before consuming any further bytes.
+        if turn.used == Some(0) {
+            turn.charge(self.partial.len()).map_err(FrameError::Limit)?;
+        }
+        loop {
+            let available = match self.reader.fill_buf().await {
+                Ok(available) => available,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(FrameError::Io(error)),
+            };
+            if available.is_empty() {
+                if self.partial.is_empty() {
+                    return Ok(FrameRead::Eof);
+                }
+                // A final unterminated line is still delivered, as `lines()` did.
+                return Self::validate_frame(std::mem::take(&mut self.partial));
+            }
+            let (take, complete) = match available.iter().position(|&byte| byte == b'\n') {
+                Some(end) => (end + 1, true),
+                None => (available.len(), false),
+            };
+            if let Some(max) = self.max_frame_bytes
+                && self.partial.len().saturating_add(take) > max
+            {
+                return Err(FrameError::Limit(PolicyFailure::Limit {
+                    limit: DuplexLimit::FrameBytes,
+                    max,
+                }));
+            }
+            turn.charge(take).map_err(FrameError::Limit)?;
+            self.partial.extend_from_slice(&available[..take]);
+            self.reader.consume(take);
+            if complete {
+                let mut frame = std::mem::take(&mut self.partial);
+                frame.pop();
+                if frame.last() == Some(&b'\r') {
+                    frame.pop();
+                }
+                return Self::validate_frame(frame);
+            }
+        }
+    }
+
+    fn validate_frame(frame: Vec<u8>) -> std::result::Result<FrameRead, FrameError> {
+        // Preserve the former Lines reader's fatal invalid-UTF-8 behavior.
+        std::str::from_utf8(&frame).map_err(|error| {
+            FrameError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+        Ok(FrameRead::Frame(frame))
+    }
+
+    fn into_inner(self) -> BufReader<R> {
+        self.reader
+    }
+}
+
+type PendingTurn = Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)>;
+type PendingControl = HashMap<String, (oneshot::Sender<Result<()>>, Option<OpDeadline>)>;
+
+/// Why the I/O loop stopped.
+enum IoEnd {
+    Eof,
+    Closed,
+    StderrFailed,
+    Read(Error),
+    Policy(PolicyFailure),
+}
+
+/// Session state that outlives the I/O future. The supervisor can drop
+/// that future at any await (a stdin write, a permission callback) and
+/// still settle every accepted waiter from here.
+struct Resident {
+    stdin: ChildStdin,
+    frames: FrameReader<ChildStdout>,
+    turn_bytes: TurnBytes,
+    pending: PendingTurn,
+    turn_deadline: Option<OpDeadline>,
+    pending_control: PendingControl,
+    next_control_id: u64,
+    deadline_tx: watch::Sender<Option<OpDeadline>>,
+    policy: DuplexPolicy,
+    session_span: tracing::Span,
+    turns: u64,
+    turn_span: Option<tracing::Span>,
+    turn_started: Option<std::time::Instant>,
+    // The CLI reports a running total on each result; the turn span
+    // records the change from the previous one.
+    last_total_cost: Option<f64>,
+}
+
+impl Resident {
+    fn earliest_deadline(&self) -> Option<OpDeadline> {
+        self.turn_deadline
+            .into_iter()
+            .chain(self.pending_control.values().filter_map(|(_, d)| *d))
+            .min_by_key(|deadline| deadline.at)
+    }
+
+    fn expired_deadline(&self) -> Option<PolicyFailure> {
+        self.earliest_deadline()
+            .filter(|deadline| deadline.at <= Instant::now())
+            .map(OpDeadline::failure)
+    }
+
+    /// Publish the earliest pending deadline. Called synchronously after
+    /// every accept and every settle, before the next await.
+    fn publish_deadline(&self) {
+        let next = self.earliest_deadline();
+        self.deadline_tx.send_if_modified(|current| {
+            let changed = *current != next;
+            *current = next;
+            changed
+        });
+    }
+
+    fn finish_turn(&mut self) {
+        self.turn_deadline = None;
+        self.turn_bytes.stop();
+        self.publish_deadline();
+    }
+
+    fn record_turn_outcome(&mut self, result: &Value) {
+        let total = result
+            .get("total_cost_usd")
+            .or_else(|| result.get("cost_usd"))
+            .and_then(Value::as_f64);
+        let cost = turn_cost_delta(&mut self.last_total_cost, total);
+        let Some(span) = self.turn_span.take() else {
+            return;
+        };
+        span.record(
+            "is_error",
+            result
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
+        if let Some(sub) = result.get("subtype").and_then(Value::as_str) {
+            let label = match sub {
+                "success" => "success",
+                "error_during_execution" => "error_during_execution",
+                "error_max_turns" => "error_max_turns",
+                "error_max_budget_usd" => "error_max_budget_usd",
+                _ => "other",
+            };
+            span.record("subtype", label);
+        }
+        if let (Some(c), Some(t)) = (cost, total) {
+            span.record("cost_usd", c);
+            span.record("total_cost_usd", t);
+        }
+        if let Some(started) = self.turn_started.take() {
+            span.record("duration_ms", started.elapsed().as_millis() as u64);
+        }
+    }
+
+    async fn handle_frame(
+        &mut self,
+        frame: &[u8],
+        events_tx: &broadcast::Sender<InboundEvent>,
+        permission_handler: Option<&PermissionHandler>,
+    ) -> Option<PolicyFailure> {
+        if frame.iter().all(u8::is_ascii_whitespace) {
+            return None;
+        }
+        let parsed = match serde_json::from_slice::<Value>(frame) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(line_bytes = frame.len(), json_error = ?e.classify(), "failed to parse duplex event, skipping");
+                return None;
+            }
+        };
+        // The pump can arm and settle an operation in one poll. Check after
+        // parsing too, before a reply can hide an expired watch update.
+        if let Some(failure) = self.expired_deadline() {
+            return Some(failure);
+        }
+        // Peek at the semantic outcome before handle_inbound consumes it.
+        let is_result = parsed.get("type").and_then(Value::as_str) == Some("result");
+        if is_result {
+            self.record_turn_outcome(&parsed);
+        }
+        match handle_inbound(
+            parsed,
+            &mut self.pending,
+            events_tx,
+            self.policy.max_turn_events,
+        ) {
+            InboundAction::None => {}
+            InboundAction::EventLimit(max) => {
+                return Some(PolicyFailure::Limit {
+                    limit: DuplexLimit::TurnEvents,
+                    max,
+                });
+            }
+            InboundAction::Permission(req) => {
+                let request_id = req.request_id.clone();
+                let decision = match permission_handler {
+                    Some(h) => h.invoke(req).await,
+                    None => {
+                        warn!("received can_use_tool with no permission handler; auto-denying");
+                        PermissionDecision::Deny {
+                            message: "no permission handler configured on duplex session".into(),
+                        }
+                    }
+                };
+                if matches!(decision, PermissionDecision::Defer) {
+                    debug!("permission handler deferred; waiting for respond_to_permission");
+                } else if write_permission_response(&mut self.stdin, &request_id, &decision)
+                    .await
+                    .is_err()
+                {
+                    warn!("failed to write permission response");
+                }
+            }
+            InboundAction::ControlResponse {
+                request_id,
+                outcome,
+            } => {
+                if let Some((reply, _)) = self.pending_control.remove(&request_id) {
+                    let _ = reply.send(outcome);
+                    self.publish_deadline();
+                } else {
+                    debug!("received control_response with no pending request");
+                }
+            }
+        }
+        if is_result && self.pending.is_none() {
+            self.finish_turn();
+        }
+        None
+    }
+
+    async fn handle_outbound(&mut self, msg: OutboundMsg) {
+        match msg {
+            OutboundMsg::Send { prompt, reply } => {
+                if self.pending.is_some() {
+                    let _ = reply.send(Err(Error::DuplexTurnInFlight));
+                    return;
+                }
+                // Accepted: the deadline and byte budget start before the
+                // write, so a blocked stdin write is bounded too.
+                self.pending = Some((reply, Vec::new()));
+                self.turn_deadline =
+                    OpDeadline::start(DuplexOperation::Turn, self.policy.turn_timeout);
+                self.turn_bytes.start();
+                self.publish_deadline();
+                if let Err(e) = write_user(&mut self.stdin, &prompt).await {
+                    if let Some((reply, _)) = self.pending.take() {
+                        let _ = reply.send(Err(e));
+                    }
+                    self.finish_turn();
+                    return;
+                }
+                self.turns += 1;
+                // One span per turn, so the events a turn produces are
+                // attributable to it rather than to the session as a
+                // whole. Outcome fields are recorded when the result
+                // event arrives.
+                self.turn_span = Some(tracing::debug_span!(
+                    parent: &self.session_span,
+                    "claude.turn",
+                    turn = self.turns,
+                    is_error = tracing::field::Empty,
+                    subtype = tracing::field::Empty,
+                    cost_usd = tracing::field::Empty,
+                    total_cost_usd = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty,
+                ));
+                self.turn_started = Some(std::time::Instant::now());
+            }
+            OutboundMsg::PermissionResponse {
+                request_id,
+                decision,
+            } => {
+                if write_permission_response(&mut self.stdin, &request_id, &decision)
+                    .await
+                    .is_err()
+                {
+                    warn!("failed to write deferred permission response");
+                }
+            }
+            OutboundMsg::Interrupt { reply } => {
+                self.next_control_id += 1;
+                let request_id = format!("interrupt-{}", self.next_control_id);
+                let deadline =
+                    OpDeadline::start(DuplexOperation::Control, self.policy.control_timeout);
+                self.pending_control
+                    .insert(request_id.clone(), (reply, deadline));
+                self.publish_deadline();
+                if let Err(e) =
+                    write_control_request(&mut self.stdin, &request_id, "interrupt").await
+                {
+                    if let Some((reply, _)) = self.pending_control.remove(&request_id) {
+                        let _ = reply.send(Err(e));
+                    }
+                    self.publish_deadline();
+                }
+            }
+        }
+    }
+}
+
+/// The resident I/O loop: stdout frames, outbound requests, and the
+/// stderr failure signal. Owns no state that a waiter needs, so the
+/// supervisor may drop it at any await.
+async fn pump(
+    res: &mut Resident,
+    outbound_rx: &mut mpsc::UnboundedReceiver<OutboundMsg>,
+    events_tx: &broadcast::Sender<InboundEvent>,
+    permission_handler: Option<&PermissionHandler>,
+    stderr_failed: &mut oneshot::Receiver<()>,
+) -> IoEnd {
+    let mut stderr_failure_open = true;
+    loop {
+        if let Some(failure) = res.expired_deadline() {
+            return IoEnd::Policy(failure);
+        }
+        // Outbound requests must get a chance to start their deadlines even
+        // when stdout is continuously ready.
+        tokio::select! {
+            frame = res.frames.next_frame(&mut res.turn_bytes) => match frame {
+                Ok(FrameRead::Frame(frame)) => {
+                    if let Some(failure) =
+                        res.handle_frame(&frame, events_tx, permission_handler).await
+                    {
+                        return IoEnd::Policy(failure);
+                    }
+                    // Frames already buffered need no I/O; keep yielding so
+                    // a continuously ready stdout cannot monopolize the task.
+                    tokio::task::consume_budget().await;
+                }
+                Ok(FrameRead::Eof) => return IoEnd::Eof,
+                Err(FrameError::Io(source)) => {
+                    return IoEnd::Read(Error::Io {
+                        message: "failed to read duplex stdout".to_string(),
+                        source,
+                        working_dir: None,
+                    });
+                }
+                Err(FrameError::Limit(failure)) => return IoEnd::Policy(failure),
+            },
+
+            failure = &mut *stderr_failed, if stderr_failure_open => {
+                stderr_failure_open = false;
+                if failure.is_ok() {
+                    return IoEnd::StderrFailed;
+                }
+            },
+
+            msg = outbound_rx.recv() => match msg {
+                Some(msg) => res.handle_outbound(msg).await,
+                None => return IoEnd::Closed,
+            },
+        }
+    }
+}
+
+/// Resolve when `deadline` passes; never when there is none.
+async fn expire(deadline: Option<OpDeadline>) -> PolicyFailure {
+    match deadline {
+        Some(deadline) => {
+            tokio::time::sleep_until(deadline.at).await;
+            deadline.failure()
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Run `pump` until it ends or the earliest published deadline passes.
+///
+/// The deadline is polled first, so a continuously ready stdout cannot
+/// starve it, and it can cancel `pump` while that is awaiting a stdin
+/// write or a permission callback.
+async fn supervise(
+    pump: impl Future<Output = IoEnd>,
+    deadline_rx: &mut watch::Receiver<Option<OpDeadline>>,
+) -> IoEnd {
+    tokio::pin!(pump);
+    let mut deadlines_open = true;
+    loop {
+        let next = *deadline_rx.borrow_and_update();
+        tokio::select! {
+            biased;
+
+            _ = expire(next) => {
+                // The operation may have settled after `next` was read.
+                // Only the current earliest deadline can expire.
+                if let Some(current) = *deadline_rx.borrow_and_update()
+                    && current.at <= Instant::now()
+                {
+                    return IoEnd::Policy(current.failure());
+                }
+            }
+            changed = deadline_rx.changed(), if deadlines_open => {
+                deadlines_open = changed.is_ok();
+            }
+            end = &mut pump => return end,
+        }
+    }
+}
+
+/// Answer a request that was queued but never accepted.
+fn reject_queued(msg: OutboundMsg) {
+    match msg {
+        OutboundMsg::Send { reply, .. } => {
+            let _ = reply.send(Err(Error::DuplexClosed));
+        }
+        OutboundMsg::Interrupt { reply } => {
+            let _ = reply.send(Err(Error::DuplexClosed));
+        }
+        OutboundMsg::PermissionResponse { .. } => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session_child(
     mut child: Child,
     mut group: crate::exec::GroupKillGuard,
     kill_grace: Option<Duration>,
     termination_signal: crate::TerminationSignal,
-    mut stdin: ChildStdin,
+    stdin: ChildStdin,
     stdout: ChildStdout,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundMsg>,
     events_tx: broadcast::Sender<InboundEvent>,
     permission_handler: Option<PermissionHandler>,
+    policy: DuplexPolicy,
     mut stderr_failed: oneshot::Receiver<()>,
 ) -> Result<(ExitStatus, bool)> {
-    let mut lines = BufReader::new(stdout).lines();
-    let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
-    let mut pending_control: HashMap<String, oneshot::Sender<Result<()>>> = HashMap::new();
-    let mut next_control_id: u64 = 0;
-    let mut stream_err: Option<Error> = None;
-    let mut stderr_failure_open = true;
-    // The session span is this task's own span (see DuplexSession::spawn).
-    let session_span = tracing::Span::current();
-    let mut turns: u64 = 0;
-    let mut turn_span: Option<tracing::Span> = None;
-    let mut turn_started: Option<std::time::Instant> = None;
-    // The CLI reports a running total on each result; the turn span
-    // records the change from the previous one.
-    let mut last_total_cost: Option<f64> = None;
+    let (deadline_tx, mut deadline_rx) = watch::channel(None);
+    let mut res = Resident {
+        stdin,
+        frames: FrameReader::new(stdout, policy.max_frame_bytes),
+        turn_bytes: TurnBytes {
+            limit: policy.max_turn_bytes,
+            used: None,
+        },
+        pending: None,
+        turn_deadline: None,
+        pending_control: HashMap::new(),
+        next_control_id: 0,
+        deadline_tx,
+        policy,
+        // The session span is this task's own span (see DuplexSession::spawn).
+        session_span: tracing::Span::current(),
+        turns: 0,
+        turn_span: None,
+        turn_started: None,
+        last_total_cost: None,
+    };
 
-    loop {
-        tokio::select! {
+    // The I/O future is dropped when this returns, before any cleanup.
+    let end = supervise(
+        pump(
+            &mut res,
+            &mut outbound_rx,
+            &events_tx,
+            permission_handler.as_ref(),
+            &mut stderr_failed,
+        ),
+        &mut deadline_rx,
+    )
+    .await;
+
+    // Reject new requests immediately and settle any that were queued but
+    // never accepted. Accepted waiters are settled after the child is.
+    outbound_rx.close();
+    while let Ok(msg) = outbound_rx.try_recv() {
+        reject_queued(msg);
+    }
+
+    let mut failure = None;
+    let mut stream_err = None;
+    match end {
+        IoEnd::Policy(f) => failure = Some(f),
+        IoEnd::Read(error) => stream_err = Some(error),
+        IoEnd::Eof | IoEnd::Closed | IoEnd::StderrFailed => {}
+    }
+
+    let Resident {
+        stdin,
+        frames,
+        pending,
+        pending_control,
+        session_span,
+        turns,
+        ..
+    } = res;
+    drop(stdin);
+    let mut stdout = frames.into_inner();
+    // Stderr is drained by the enclosing future, including while this
+    // function awaits a permission handler or settles the child.
+    let mut unused_stderr = tokio::io::empty();
+
+    let mut status = None;
+    if failure.is_none() {
+        // Accepted operations keep their deadlines during graceful shutdown.
+        let graceful = crate::exec::drain_until(
+            tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()),
+            &mut stdout,
+            &mut unused_stderr,
+        );
+        let waited = tokio::select! {
             biased;
-
-            line = lines.next_line() => match line {
-                Ok(Some(l)) => {
-                    if l.trim().is_empty() {
-                        continue;
-                    }
-                    let parsed = match serde_json::from_str::<Value>(&l) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            debug!(line_bytes = l.len(), json_error = ?e.classify(), "failed to parse duplex event, skipping");
-                            continue;
-                        }
-                    };
-                    // Peek at the semantic outcome before handle_inbound consumes it.
-                    if let Some("result") = parsed.get("type").and_then(Value::as_str) {
-                        let total = parsed
-                            .get("total_cost_usd")
-                            .or_else(|| parsed.get("cost_usd"))
-                            .and_then(Value::as_f64);
-                        let cost = turn_cost_delta(&mut last_total_cost, total);
-                        if let Some(span) = turn_span.take() {
-                            span.record(
-                                "is_error",
-                                parsed.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                            );
-                            if let Some(sub) = parsed.get("subtype").and_then(Value::as_str) {
-                                let label = match sub {
-                                    "success" => "success",
-                                    "error_during_execution" => "error_during_execution",
-                                    "error_max_turns" => "error_max_turns",
-                                    "error_max_budget_usd" => "error_max_budget_usd",
-                                    _ => "other",
-                                };
-                                span.record("subtype", label);
-                            }
-                            if let (Some(c), Some(t)) = (cost, total) {
-                                span.record("cost_usd", c);
-                                span.record("total_cost_usd", t);
-                            }
-                            if let Some(started) = turn_started.take() {
-                                span.record(
-                                    "duration_ms",
-                                    started.elapsed().as_millis() as u64,
-                                );
-                            }
-                        }
-                    }
-                    match handle_inbound(parsed, &mut pending, &events_tx) {
-                        InboundAction::None => {}
-                        InboundAction::Permission(req) => {
-                            let request_id = req.request_id.clone();
-                            let decision = match permission_handler.as_ref() {
-                                Some(h) => h.invoke(req).await,
-                                None => {
-                                    warn!("received can_use_tool with no permission handler; auto-denying");
-                                    PermissionDecision::Deny {
-                                        message:
-                                            "no permission handler configured on duplex session"
-                                                .into(),
-                                    }
-                                }
-                            };
-                            if matches!(decision, PermissionDecision::Defer) {
-                                debug!(
-                                    "permission handler deferred; waiting for respond_to_permission"
-                                );
-                            } else if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
-                                warn!("failed to write permission response");
-                            }
-                        }
-                        InboundAction::ControlResponse { request_id, outcome } => {
-                            if let Some(reply) = pending_control.remove(&request_id) {
-                                let _ = reply.send(outcome);
-                            } else {
-                                debug!(
-                                    "received control_response with no pending request"
-                                );
-                            }
-                        }
-                    }
+            waited = graceful => Some(waited),
+            expired = expire(*deadline_rx.borrow()) => {
+                failure = Some(expired);
+                None
+            }
+        };
+        if let Some(waited) = waited {
+            let settlement = settle_graceful(
+                waited,
+                &mut child,
+                &mut group,
+                kill_grace,
+                termination_signal,
+                &mut stdout,
+            );
+            tokio::pin!(settlement);
+            status = Some(tokio::select! {
+                biased;
+                settled = &mut settlement => settled,
+                expired = expire(*deadline_rx.borrow()) => {
+                    failure = Some(expired);
+                    // Do not restart cleanup or spend kill_grace twice.
+                    settlement.await
                 }
-                Ok(None) => break,
-                Err(e) => {
-                    stream_err = Some(Error::Io {
-                        message: "failed to read duplex stdout".to_string(),
-                        source: e,
-                        working_dir: None,
-                    });
-                    break;
-                }
-            },
-
-            failure = &mut stderr_failed, if stderr_failure_open => {
-                stderr_failure_open = false;
-                if failure.is_ok() {
-                    break;
-                }
-            },
-
-            msg = outbound_rx.recv() => match msg {
-                Some(OutboundMsg::Send { prompt, reply }) => {
-                    if pending.is_some() {
-                        let _ = reply.send(Err(Error::DuplexTurnInFlight));
-                        continue;
-                    }
-                    if let Err(e) = write_user(&mut stdin, &prompt).await {
-                        let _ = reply.send(Err(e));
-                        continue;
-                    }
-                    turns += 1;
-                    // One span per turn, so the events a turn produces are
-                    // attributable to it rather than to the session as a
-                    // whole. Outcome fields are recorded when the result
-                    // event arrives above.
-                    turn_span = Some(tracing::debug_span!(
-                        parent: &session_span,
-                        "claude.turn",
-                        turn = turns,
-                        is_error = tracing::field::Empty,
-                        subtype = tracing::field::Empty,
-                        cost_usd = tracing::field::Empty,
-                        total_cost_usd = tracing::field::Empty,
-                        duration_ms = tracing::field::Empty,
-                    ));
-                    turn_started = Some(std::time::Instant::now());
-                    pending = Some((reply, Vec::new()));
-                }
-                Some(OutboundMsg::PermissionResponse { request_id, decision }) => {
-                    if write_permission_response(&mut stdin, &request_id, &decision).await.is_err() {
-                        warn!("failed to write deferred permission response");
-                    }
-                }
-                Some(OutboundMsg::Interrupt { reply }) => {
-                    next_control_id += 1;
-                    let request_id = format!("interrupt-{next_control_id}");
-                    if let Err(e) =
-                        write_control_request(&mut stdin, &request_id, "interrupt").await
-                    {
-                        let _ = reply.send(Err(e));
-                        continue;
-                    }
-                    pending_control.insert(request_id, reply);
-                }
-                None => break,
-            },
+            });
         }
     }
 
-    drop(stdin);
-    let mut stdout = lines.into_inner();
-    // Stderr is drained by the enclosing future, including while this
-    // loop awaits a permission handler or settles the child.
+    // A tripped policy skips the graceful budget but honors the client's
+    // kill_grace and termination_signal.
+    let mut process_settled = status.as_ref().is_some_and(Result::is_ok);
+    if let Some(failure) = failure
+        && status.is_none()
+    {
+        warn!(?failure, "duplex policy tripped; stopping child");
+        match crate::exec::drain_until(
+            crate::exec::stop_and_reap(
+                &mut child,
+                &mut group,
+                kill_grace,
+                termination_signal,
+                None,
+            ),
+            &mut stdout,
+            &mut unused_stderr,
+        )
+        .await
+        {
+            Ok(()) => process_settled = true,
+            Err(error) => warn!(%error, "failed to settle duplex child after policy failure"),
+        }
+    }
+
+    let settle_error = || match failure {
+        Some(failure) => failure.error(process_settled),
+        None => Error::DuplexClosed,
+    };
+    if let Some((reply, _)) = pending {
+        let _ = reply.send(Err(settle_error()));
+    }
+    for (_, (reply, _)) in pending_control {
+        let _ = reply.send(Err(settle_error()));
+    }
+
+    session_span.record("turns", turns);
+    match (failure, stream_err, status) {
+        (Some(failure), _, _) => Err(failure.error(process_settled)),
+        (None, Some(error), _) => Err(error),
+        (None, None, Some(status)) => status,
+        (None, None, None) => unreachable!("graceful shutdown always records a status"),
+    }
+}
+
+/// Finish the graceful shutdown path from the outcome of the bounded
+/// wait: a native exit, a wait error, or an expired shutdown budget.
+async fn settle_graceful(
+    waited: std::result::Result<std::io::Result<ExitStatus>, tokio::time::error::Elapsed>,
+    child: &mut Child,
+    group: &mut crate::exec::GroupKillGuard,
+    kill_grace: Option<Duration>,
+    termination_signal: crate::TerminationSignal,
+    stdout: &mut BufReader<ChildStdout>,
+) -> Result<(ExitStatus, bool)> {
     let mut unused_stderr = tokio::io::empty();
-    let waited = crate::exec::drain_until(
-        tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()),
-        &mut stdout,
-        &mut unused_stderr,
-    )
-    .await;
-    let status = match waited {
+    match waited {
         Ok(Ok(status)) => {
             group.disarm();
             Ok((status, false))
@@ -1882,14 +2609,8 @@ async fn run_session_child(
                 working_dir: None,
             };
             match crate::exec::drain_until(
-                crate::exec::stop_and_reap(
-                    &mut child,
-                    &mut group,
-                    kill_grace,
-                    termination_signal,
-                    None,
-                ),
-                &mut stdout,
+                crate::exec::stop_and_reap(child, group, kill_grace, termination_signal, None),
+                stdout,
                 &mut unused_stderr,
             )
             .await
@@ -1901,14 +2622,8 @@ async fn run_session_child(
         Err(_) => {
             warn!("duplex child did not exit within shutdown budget; stopping");
             match crate::exec::drain_until(
-                crate::exec::stop_and_reap(
-                    &mut child,
-                    &mut group,
-                    kill_grace,
-                    termination_signal,
-                    None,
-                ),
-                &mut stdout,
+                crate::exec::stop_and_reap(child, group, kill_grace, termination_signal, None),
+                stdout,
                 &mut unused_stderr,
             )
             .await
@@ -1925,19 +2640,6 @@ async fn run_session_child(
                 Err(error) => Err(error),
             }
         }
-    };
-
-    if let Some((reply, _)) = pending.take() {
-        let _ = reply.send(Err(Error::DuplexClosed));
-    }
-    for (_, reply) in pending_control.drain() {
-        let _ = reply.send(Err(Error::DuplexClosed));
-    }
-
-    session_span.record("turns", turns);
-    match stream_err {
-        Some(error) => Err(error),
-        None => status,
     }
 }
 
@@ -1959,14 +2661,35 @@ enum InboundAction {
         request_id: String,
         outcome: Result<()>,
     },
+    /// Retaining this event would exceed the configured per-turn event
+    /// limit. Nothing was broadcast or retained.
+    EventLimit(usize),
+}
+
+/// The configured event limit, if the pending turn already holds that many.
+fn event_limit(pending: &PendingTurn, max_events: Option<usize>) -> Option<usize> {
+    let (_, events) = pending.as_ref()?;
+    max_events.filter(|max| events.len() >= *max)
 }
 
 fn handle_inbound(
     msg: Value,
-    pending: &mut Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)>,
+    pending: &mut PendingTurn,
     events_tx: &broadcast::Sender<InboundEvent>,
+    max_events: Option<usize>,
 ) -> InboundAction {
-    match msg.get("type").and_then(Value::as_str) {
+    // Results and well-formed control responses are never retained. Check
+    // the limit before broadcasting so subscribers see only retained events.
+    let kind = msg.get("type").and_then(Value::as_str);
+    let retained = match kind {
+        Some("result") => false,
+        Some("control_response") => parse_control_response(&msg).is_none(),
+        _ => true,
+    };
+    if retained && let Some(max) = event_limit(pending, max_events) {
+        return InboundAction::EventLimit(max);
+    }
+    match kind {
         Some("result") => {
             if let Some((reply, events)) = pending.take() {
                 let _ = reply.send(Ok(TurnResult {
@@ -2150,6 +2873,14 @@ async fn write_line(stdin: &mut ChildStdin, value: &Value, what: &'static str) -
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn handle(
+        msg: Value,
+        pending: &mut PendingTurn,
+        events_tx: &broadcast::Sender<InboundEvent>,
+    ) -> InboundAction {
+        handle_inbound(msg, pending, events_tx, None)
+    }
 
     #[test]
     fn build_args_default_includes_required_flags() {
@@ -2815,7 +3546,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        handle_inbound(
+        handle(
             json!({ "type": "assistant", "message": {} }),
             &mut pending,
             &events_tx,
@@ -2833,7 +3564,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, vec![json!({ "type": "assistant" })]));
-        handle_inbound(
+        handle(
             json!({ "type": "result", "result": "ok" }),
             &mut pending,
             &events_tx,
@@ -2848,8 +3579,8 @@ mod tests {
     fn handle_inbound_drops_orphans_without_pending_turn() {
         let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending: Option<(oneshot::Sender<Result<TurnResult>>, Vec<Value>)> = None;
-        handle_inbound(json!({ "type": "assistant" }), &mut pending, &events_tx);
-        handle_inbound(
+        handle(json!({ "type": "assistant" }), &mut pending, &events_tx);
+        handle(
             json!({ "type": "result", "result": "ok" }),
             &mut pending,
             &events_tx,
@@ -2862,7 +3593,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, mut events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        handle_inbound(
+        handle(
             json!({ "type": "assistant", "message": { "role": "assistant" } }),
             &mut pending,
             &events_tx,
@@ -2876,7 +3607,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, mut events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        handle_inbound(
+        handle(
             json!({ "type": "result", "result": "ok" }),
             &mut pending,
             &events_tx,
@@ -3071,7 +3802,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        let action = handle_inbound(
+        let action = handle(
             json!({
                 "type": "control_request",
                 "request_id": "req-1",
@@ -3089,7 +3820,9 @@ mod tests {
                 assert_eq!(req.request_id, "req-1");
                 assert_eq!(req.tool_name, "Bash");
             }
-            InboundAction::None | InboundAction::ControlResponse { .. } => {
+            InboundAction::None
+            | InboundAction::ControlResponse { .. }
+            | InboundAction::EventLimit(_) => {
                 panic!("expected Permission action");
             }
         }
@@ -3103,7 +3836,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, mut events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        let action = handle_inbound(
+        let action = handle(
             json!({
                 "type": "control_request",
                 "request_id": "req-2",
@@ -3200,7 +3933,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        let action = handle_inbound(
+        let action = handle(
             json!({
                 "type": "control_response",
                 "response": {
@@ -3220,7 +3953,7 @@ mod tests {
                 assert_eq!(request_id, "interrupt-1");
                 assert!(outcome.is_ok());
             }
-            InboundAction::None | InboundAction::Permission(_) => {
+            InboundAction::None | InboundAction::Permission(_) | InboundAction::EventLimit(_) => {
                 panic!("expected ControlResponse action");
             }
         }
@@ -3231,7 +3964,7 @@ mod tests {
         let (tx, _reply_rx) = oneshot::channel::<Result<TurnResult>>();
         let (events_tx, mut events_rx) = broadcast::channel(16);
         let mut pending = Some((tx, Vec::new()));
-        let action = handle_inbound(
+        let action = handle(
             json!({
                 "type": "control_response",
                 "response": { "subtype": "success" }
@@ -3493,6 +4226,259 @@ mod tests {
             !args
                 .iter()
                 .any(|arg| arg == "--dangerously-skip-permissions" || arg == "bypassPermissions")
+        );
+    }
+
+    // -- partial messages and host-side policies (#838, #839, #840) --
+
+    #[test]
+    fn partial_messages_are_opt_in() {
+        let defaults = DuplexOptions::default().build_args();
+        assert!(!defaults.iter().any(|a| a == "--include-partial-messages"));
+        let args = DuplexOptions::default()
+            .include_partial_messages()
+            .arg("--")
+            .build_args();
+        let flag = args
+            .iter()
+            .position(|a| a == "--include-partial-messages")
+            .expect("opt-in emits the flag");
+        let dash_dash = args.iter().position(|a| a == "--").unwrap();
+        assert!(flag < dash_dash, "{args:?}");
+    }
+
+    #[test]
+    fn policies_are_unlimited_by_default_and_emit_no_flags() {
+        let defaults = DuplexOptions::default();
+        assert!(defaults.policy.max_frame_bytes.is_none());
+        assert!(defaults.policy.max_turn_bytes.is_none());
+        assert!(defaults.policy.max_turn_events.is_none());
+        assert!(defaults.policy.turn_timeout.is_none());
+        assert!(defaults.policy.control_timeout.is_none());
+        let configured = DuplexOptions::default()
+            .max_frame_bytes(1)
+            .max_turn_bytes(2)
+            .max_turn_events(3)
+            .turn_timeout(Duration::from_secs(4))
+            .control_timeout(Duration::from_secs(5));
+        assert_eq!(configured.build_args(), defaults.build_args());
+    }
+
+    #[test]
+    fn oversized_deadline_is_treated_as_unbounded() {
+        assert!(OpDeadline::start(DuplexOperation::Turn, Some(Duration::MAX)).is_none());
+        assert!(OpDeadline::start(DuplexOperation::Turn, None).is_none());
+    }
+
+    async fn frames_of(
+        input: &[u8],
+        max_frame: Option<usize>,
+        turn: &mut TurnBytes,
+    ) -> (Vec<Vec<u8>>, Option<PolicyFailure>) {
+        let mut reader = FrameReader::new(input, max_frame);
+        let mut frames = Vec::new();
+        loop {
+            match reader.next_frame(turn).await {
+                Ok(FrameRead::Frame(frame)) => frames.push(frame),
+                Ok(FrameRead::Eof) => return (frames, None),
+                Err(FrameError::Limit(failure)) => return (frames, Some(failure)),
+                Err(FrameError::Io(error)) => panic!("unexpected io error: {error}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_reader_strips_terminators_and_keeps_a_final_partial_line() {
+        let mut turn = TurnBytes::default();
+        let (frames, failure) = frames_of(b"a\r\n\nb\nc", None, &mut turn).await;
+        assert!(failure.is_none());
+        assert_eq!(
+            frames,
+            vec![b"a".to_vec(), Vec::new(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_limit_trips_before_an_unterminated_line_is_extended() {
+        let input = vec![b'x'; 1 << 20];
+        let mut reader = FrameReader::new(&input[..], Some(1024));
+        let mut turn = TurnBytes::default();
+        match reader.next_frame(&mut turn).await {
+            Err(FrameError::Limit(PolicyFailure::Limit { limit, max })) => {
+                assert_eq!(limit, DuplexLimit::FrameBytes);
+                assert_eq!(max, 1024);
+            }
+            _ => panic!("expected a frame limit failure"),
+        }
+        assert!(reader.partial.len() <= 1024, "{}", reader.partial.len());
+        assert!(
+            reader.partial.capacity() <= 2048,
+            "{}",
+            reader.partial.capacity()
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_limit_counts_the_newline() {
+        let mut turn = TurnBytes::default();
+        let (frames, failure) = frames_of(b"abc\n", Some(4), &mut turn).await;
+        assert_eq!(frames, vec![b"abc".to_vec()]);
+        assert!(failure.is_none());
+        let (_, failure) = frames_of(b"abcd\n", Some(4), &mut turn).await;
+        assert!(matches!(
+            failure,
+            Some(PolicyFailure::Limit {
+                limit: DuplexLimit::FrameBytes,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_bytes_count_newlines_blank_and_malformed_lines_only_while_active() {
+        let mut idle = TurnBytes {
+            limit: Some(3),
+            used: None,
+        };
+        let (frames, failure) = frames_of(b"\n\n\n\nnot json\n", None, &mut idle).await;
+        assert_eq!(frames.len(), 5);
+        assert!(failure.is_none(), "idle bytes must not count");
+
+        let mut active = TurnBytes {
+            limit: Some(10),
+            used: None,
+        };
+        active.start();
+        let (frames, failure) = frames_of(b"\n\n\n\nnot json\n", None, &mut active).await;
+        assert_eq!(frames.len(), 4, "the malformed line would reach 13 bytes");
+        assert!(matches!(
+            failure,
+            Some(PolicyFailure::Limit {
+                limit: DuplexLimit::TurnBytes,
+                max: 10
+            })
+        ));
+        active.stop();
+        active.start();
+        assert_eq!(active.used, Some(0), "the budget resets per turn");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_keeps_partial_bytes_across_a_cancelled_read() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let mut frames = FrameReader::new(reader, None);
+        let mut turn = TurnBytes::default();
+        writer.write_all(br#"{"type":"#).await.unwrap();
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), frames.next_frame(&mut turn)).await;
+        assert!(cancelled.is_err(), "no complete frame is available yet");
+        writer.write_all(b"\"assistant\"}\n").await.unwrap();
+        match frames.next_frame(&mut turn).await {
+            Ok(FrameRead::Frame(frame)) => assert_eq!(frame, br#"{"type":"assistant"}"#),
+            _ => panic!("expected the reassembled frame"),
+        }
+    }
+
+    #[test]
+    fn event_limit_stops_retention_and_broadcast_but_not_results_or_acks() {
+        let (tx, rx) = oneshot::channel::<Result<TurnResult>>();
+        let (events_tx, mut events_rx) = broadcast::channel(16);
+        let mut pending = Some((tx, Vec::new()));
+        let limit = Some(1);
+        assert!(matches!(
+            handle_inbound(
+                json!({"type": "assistant"}),
+                &mut pending,
+                &events_tx,
+                limit
+            ),
+            InboundAction::None
+        ));
+        assert!(matches!(
+            handle_inbound(
+                json!({"type": "assistant"}),
+                &mut pending,
+                &events_tx,
+                limit
+            ),
+            InboundAction::EventLimit(1)
+        ));
+        let ack = json!({
+            "type": "control_response",
+            "response": {"request_id": "interrupt-1", "subtype": "success"}
+        });
+        assert!(matches!(
+            handle_inbound(ack, &mut pending, &events_tx, limit),
+            InboundAction::ControlResponse { .. }
+        ));
+        assert!(events_rx.try_recv().is_ok());
+        assert!(events_rx.try_recv().is_err(), "overflow must not broadcast");
+        assert!(matches!(
+            handle_inbound(json!({"type": "result"}), &mut pending, &events_tx, limit),
+            InboundAction::None
+        ));
+        assert_eq!(rx.blocking_recv().unwrap().unwrap().events.len(), 1);
+    }
+
+    #[test]
+    fn policy_failures_render_distinguishable_errors() {
+        let limit = PolicyFailure::Limit {
+            limit: DuplexLimit::TurnEvents,
+            max: 7,
+        }
+        .error(true);
+        assert!(matches!(
+            limit,
+            Error::DuplexLimitExceeded {
+                limit: DuplexLimit::TurnEvents,
+                max: 7,
+                process_settled: true,
+                ..
+            }
+        ));
+        let deadline = PolicyFailure::Deadline {
+            operation: DuplexOperation::Control,
+            timeout: Duration::from_millis(5),
+        }
+        .error(false);
+        assert!(matches!(
+            deadline,
+            Error::DuplexDeadlineExceeded {
+                operation: DuplexOperation::Control,
+                process_settled: false,
+                ..
+            }
+        ));
+        assert!(deadline.to_string().contains("control request deadline"));
+    }
+
+    #[tokio::test]
+    async fn turn_budget_counts_a_partial_frame_started_while_idle() {
+        let (mut writer, reader) = tokio::io::duplex(128);
+        let mut frames = FrameReader::new(reader, None);
+        let mut turn = TurnBytes {
+            limit: Some(20),
+            used: None,
+        };
+        let prefix = br#"{"type":"assistant","text":"a long prefix"#;
+        writer.write_all(prefix).await.unwrap();
+        tokio::select! {
+            biased;
+            _ = frames.next_frame(&mut turn) => panic!("frame is incomplete"),
+            _ = tokio::task::yield_now() => {},
+        }
+        assert_eq!(frames.partial, prefix);
+        turn.start();
+        writer.write_all(b"\"}\n").await.unwrap();
+        assert!(
+            matches!(
+                frames.next_frame(&mut turn).await,
+                Err(FrameError::Limit(PolicyFailure::Limit {
+                    limit: DuplexLimit::TurnBytes,
+                    ..
+                }))
+            ),
+            "the retained frame exceeds the turn budget even though its prefix was read while idle"
         );
     }
 }

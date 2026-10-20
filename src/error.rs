@@ -29,6 +29,60 @@ impl std::fmt::Display for OutputStream {
     }
 }
 
+/// Which opt-in [`DuplexOptions`](crate::duplex::DuplexOptions) resource
+/// limit an [`Error::DuplexLimitExceeded`] refers to.
+#[cfg(feature = "async")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DuplexLimit {
+    /// One stdout frame, including its newline terminator, was larger than
+    /// [`DuplexOptions::max_frame_bytes`](crate::duplex::DuplexOptions::max_frame_bytes).
+    FrameBytes,
+    /// Stdout bytes consumed during one turn exceeded
+    /// [`DuplexOptions::max_turn_bytes`](crate::duplex::DuplexOptions::max_turn_bytes).
+    TurnBytes,
+    /// Events retained for one turn exceeded
+    /// [`DuplexOptions::max_turn_events`](crate::duplex::DuplexOptions::max_turn_events).
+    TurnEvents,
+}
+
+#[cfg(feature = "async")]
+impl std::fmt::Display for DuplexLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::FrameBytes => "frame bytes",
+            Self::TurnBytes => "turn bytes",
+            Self::TurnEvents => "turn events",
+        })
+    }
+}
+
+/// Which duplex operation an [`Error::DuplexDeadlineExceeded`] refers to.
+#[cfg(feature = "async")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DuplexOperation {
+    /// A turn started by
+    /// [`DuplexSession::send`](crate::duplex::DuplexSession::send), bounded by
+    /// [`DuplexOptions::turn_timeout`](crate::duplex::DuplexOptions::turn_timeout).
+    Turn,
+    /// A control request such as
+    /// [`DuplexSession::interrupt`](crate::duplex::DuplexSession::interrupt),
+    /// bounded by
+    /// [`DuplexOptions::control_timeout`](crate::duplex::DuplexOptions::control_timeout).
+    Control,
+}
+
+#[cfg(feature = "async")]
+impl std::fmt::Display for DuplexOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Turn => "turn",
+            Self::Control => "control request",
+        })
+    }
+}
+
 /// Errors returned by claude-wrapper operations.
 ///
 /// This enum is `#[non_exhaustive]`: new variants may be added in
@@ -212,6 +266,59 @@ pub enum Error {
     DuplexControlFailed {
         /// The error message extracted from the CLI's control_response.
         message: String,
+    },
+
+    /// An opt-in [`DuplexOptions`](crate::duplex::DuplexOptions) resource
+    /// limit tripped, so the session was closed.
+    ///
+    /// Returned to every accepted turn and control waiter, and by
+    /// [`DuplexSession::close`](crate::duplex::DuplexSession::close). A turn
+    /// that trips a limit never resolves with a partial
+    /// [`TurnResult`](crate::duplex::TurnResult). Cleanup is attempted with
+    /// the client's configured process-group, `kill_grace`, and
+    /// `termination_signal` settings before this error is delivered.
+    /// Check `process_settled` for confirmation that the direct child was reaped.
+    ///
+    /// This variant is `#[non_exhaustive]`: match with `..`.
+    #[cfg(feature = "async")]
+    #[error(
+        "duplex {limit} limit of {max} exceeded; session closed (process settled: {process_settled})"
+    )]
+    #[non_exhaustive]
+    DuplexLimitExceeded {
+        /// Which limit tripped.
+        limit: DuplexLimit,
+        /// The configured ceiling that was exceeded.
+        max: usize,
+        /// The direct child was reaped after the stop policy ran. This does
+        /// not show that escaped descendants were contained.
+        process_settled: bool,
+    },
+
+    /// An opt-in duplex operation deadline expired, so the session was
+    /// closed.
+    ///
+    /// Returned to every accepted turn and control waiter, and by
+    /// [`DuplexSession::close`](crate::duplex::DuplexSession::close). The
+    /// cleanup attempt uses the client's configured process-group,
+    /// `kill_grace`, and `termination_signal` settings before this error is
+    /// delivered. Check `process_settled` for confirmation that the direct
+    /// child was reaped. It does not mean the CLI acknowledged an interrupt.
+    ///
+    /// This variant is `#[non_exhaustive]`: match with `..`.
+    #[cfg(feature = "async")]
+    #[error(
+        "duplex {operation} deadline of {timeout:?} exceeded; session closed (process settled: {process_settled})"
+    )]
+    #[non_exhaustive]
+    DuplexDeadlineExceeded {
+        /// Which operation's deadline expired first.
+        operation: DuplexOperation,
+        /// The configured timeout for that operation.
+        timeout: std::time::Duration,
+        /// The direct child was reaped after the stop policy ran. This does
+        /// not show that escaped descendants were contained.
+        process_settled: bool,
     },
 
     /// A history-module operation (parsing or locating session

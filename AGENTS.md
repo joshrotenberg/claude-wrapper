@@ -158,6 +158,14 @@ the lifetime of the conversation. Async-only, gated on `feature =
   closes shortly after with a truncated `TurnResult`.
 - `respond_to_permission(request_id, decision)` -- answers a
   permission prompt that was deferred from the handler.
+- `DuplexOptions` has opt-in frame/turn limits (`max_frame_bytes`,
+  `max_turn_bytes`, `max_turn_events`) and operation deadlines
+  (`turn_timeout`, `control_timeout`). Client command timeout and
+  output limits do not apply to the persistent transport. Deadline
+  expiry or overflow closes the session and reports process settlement.
+- Partial message chunks are opt-in via
+  `DuplexOptions::include_partial_messages()`. They increase retained
+  event volume; subscriber lag and per-turn retention limits are separate.
 - `close(self)` -- drops the outbound channel, closes stdin, and
   reaps the child. Drop without close also tears down (via
   `kill_on_drop` on the `Command`).
