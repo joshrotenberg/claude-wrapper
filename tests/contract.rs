@@ -560,6 +560,7 @@ fn exclusive_query_commands() -> Vec<(&'static str, QueryCommand)> {
 /// flags, and exposes its argv only through `to_command_string`.
 fn maximal_duplex_command() -> String {
     let opts = DuplexOptions::default()
+        .include_partial_messages()
         .forward_subagent_text()
         .allow_dangerously_skip_permissions()
         .model("haiku")

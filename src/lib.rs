@@ -402,6 +402,8 @@ pub use duplex::{
     DuplexOptions, DuplexSession, InboundEvent, PermissionDecision, PermissionHandler,
     PermissionRequest, TurnResult,
 };
+#[cfg(feature = "async")]
+pub use error::{DuplexLimit, DuplexOperation};
 pub use error::{Error, OutputStream, Result};
 pub use exec::CommandOutput;
 #[cfg(feature = "tempfile")]
@@ -888,6 +890,8 @@ impl ClaudeBuilder {
     }
 
     /// Set a default timeout for all commands (in seconds).
+    ///
+    /// See [`Self::timeout`] for scope.
     #[must_use]
     pub fn timeout_secs(mut self, seconds: u64) -> Self {
         self.timeout = Some(Duration::from_secs(seconds));
@@ -895,6 +899,11 @@ impl ClaudeBuilder {
     }
 
     /// Set a default timeout for all commands.
+    ///
+    /// Bounds one-shot command runs. It does not apply to duplex sessions,
+    /// which stay open across turns and have no lifetime limit; opt in per
+    /// operation with `DuplexOptions::turn_timeout` and
+    /// `DuplexOptions::control_timeout`.
     #[must_use]
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
@@ -1079,8 +1088,11 @@ impl ClaudeBuilder {
     /// logged at warn.
     ///
     /// This bounds the buffered paths (`execute`, `execute_json`, and
-    /// their cancellable and blocking forms). Streaming runs deliver
-    /// events as they arrive and are not affected.
+    /// their cancellable and blocking forms), and the total bytes consumed
+    /// by one-shot async streaming runs. Blocking streaming is not affected.
+    /// Duplex sessions are not capped by this setting; opt in per session with
+    /// `DuplexOptions::max_frame_bytes`, `max_turn_bytes`, and
+    /// `max_turn_events`.
     #[must_use]
     pub fn output_limit(mut self, bytes: usize) -> Self {
         self.output_limit = Some(bytes);
