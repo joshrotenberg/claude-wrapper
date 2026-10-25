@@ -2342,9 +2342,28 @@ mod tests {
     #[tokio::test]
     async fn async_auth_shaped_stderr_maps_auth() {
         let (_dir, path) =
-            fake_script(r#"echo "Not authenticated. Run `claude login`." >&2; exit 1"#);
-        let err = run_claude(&client(&path), vec![]).await.unwrap_err();
+            fake_script(r#"printf '%s\n' 'Not authenticated. Run `claude login`.' >&2; exit 1"#);
+        let (provider_dir, provider_path) =
+            fake_script(r#"echo invoked > "$PROVIDER_SENTINEL"; exit 97"#);
+        std::fs::rename(&provider_path, provider_dir.path().join("claude")).unwrap();
+        let marker = provider_dir.path().join("provider-invoked");
+        let claude = Claude::builder()
+            .binary(&path)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    provider_dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("PROVIDER_SENTINEL", marker.to_string_lossy())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let err = run_claude(&claude, vec![]).await.unwrap_err();
         assert!(matches!(err, Error::Auth { .. }), "got: {err:?}");
+        assert!(!marker.exists(), "error text executed a provider command");
     }
 
     #[cfg(feature = "async")]
