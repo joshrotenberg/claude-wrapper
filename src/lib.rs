@@ -351,6 +351,8 @@ pub mod skills;
 pub mod slash;
 pub mod streaming;
 #[cfg(feature = "json")]
+pub mod structured;
+#[cfg(feature = "json")]
 pub mod tasks;
 pub mod tool_pattern;
 pub mod types;

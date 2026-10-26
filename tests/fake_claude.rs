@@ -1440,3 +1440,100 @@ async fn session_flags_turn_without_usage() {
     assert_eq!(session.total_tokens(), 0);
     assert_eq!(session.turns_missing_usage(), 1);
 }
+
+// --- structured output (synthetic results; see FAKE_CLAUDE_RESULT_JSON) ---
+
+#[derive(Debug, serde::Deserialize, PartialEq)]
+struct Person {
+    name: String,
+}
+
+/// Run one `execute_json` against `result_json`, returning the outcome and
+/// how many processes were started.
+async fn structured_run(
+    result_json: &str,
+) -> (
+    claude_wrapper::Result<claude_wrapper::types::QueryResult>,
+    usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls");
+    let claude = claude_with_env(&[
+        ("FAKE_CLAUDE_RESULT_JSON", result_json),
+        ("FAKE_CLAUDE_CALL_LOG", &log.to_string_lossy()),
+    ]);
+    let outcome = QueryCommand::new("extract")
+        .json_schema(r#"{"type":"object"}"#)
+        .execute_json(&claude)
+        .await;
+    let calls = std::fs::read_to_string(&log)
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    (outcome, calls)
+}
+
+#[tokio::test]
+async fn structured_output_decodes_object_and_array() {
+    let (outcome, calls) = structured_run(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":{"name":"Ada"}}"#,
+    )
+    .await;
+    let result = outcome.unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(
+        result.decode_structured::<Person>().unwrap(),
+        Person { name: "Ada".into() }
+    );
+    assert!(result.structured_output().unwrap().is_object());
+
+    let (outcome, _) = structured_run(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":[{"name":"Ada"},{"name":"Grace"}]}"#,
+    )
+    .await;
+    let people: Vec<Person> = outcome.unwrap().decode_structured().unwrap();
+    assert_eq!(people.len(), 2);
+}
+
+#[tokio::test]
+async fn structured_output_distinguishes_failures() {
+    use claude_wrapper::structured::StructuredOutputError as E;
+
+    type Check = fn(&E) -> bool;
+    let cases: [(&str, Check); 5] = [
+        (
+            r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"result":"","session_id":"s","structured_output":{"name":"partial"}}"#,
+            |e| matches!(e, E::NativeError { subtype: Some(s) } if s == "error_max_structured_output_retries"),
+        ),
+        (
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"text","session_id":"s"}"#,
+            |e| matches!(e, E::Missing),
+        ),
+        (
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":null}"#,
+            |e| matches!(e, E::Missing),
+        ),
+        (
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":"Ada"}"#,
+            |e| matches!(e, E::NotObjectOrArray),
+        ),
+        (
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":{"nope":1}}"#,
+            |e| matches!(e, E::Decode(_)),
+        ),
+    ];
+
+    for (json, expected) in cases {
+        let (outcome, calls) = structured_run(json).await;
+        let result = outcome.expect("process succeeded");
+        let err = result.decode_structured::<Person>().unwrap_err();
+        assert!(expected(&err), "unexpected {err:?} for {json}");
+        assert_eq!(calls, 1, "decoding must not start another process");
+    }
+}
+
+#[tokio::test]
+async fn structured_output_malformed_stdout_is_a_process_level_json_error() {
+    let (outcome, calls) = structured_run(r#"{"type":"result","structured_output":{"name":"#).await;
+    assert!(matches!(outcome, Err(claude_wrapper::Error::Json { .. })));
+    assert_eq!(calls, 1);
+}

@@ -435,6 +435,38 @@ pub struct QueryResult {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+#[cfg(feature = "json")]
+impl QueryResult {
+    /// The schema-validated structured output (`structured_output`), when it
+    /// is a JSON object or array.
+    ///
+    /// Present when the query ran with
+    /// [`QueryCommand::json_schema`](crate::QueryCommand::json_schema).
+    /// Returns `None` when it is absent, `null` or a scalar; use
+    /// [`decode_structured`](Self::decode_structured) to tell those apart.
+    #[must_use]
+    pub fn structured_output(&self) -> Option<&serde_json::Value> {
+        crate::structured::object_or_array(self.extra.get("structured_output"))
+    }
+
+    /// Decode the structured output into `T`.
+    ///
+    /// Returns [`StructuredOutputError::NativeError`](crate::structured::StructuredOutputError::NativeError)
+    /// for an error result, even one carrying a partial object. See
+    /// [`crate::structured`] for the full rules. This never runs the CLI.
+    pub fn decode_structured<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> std::result::Result<T, crate::structured::StructuredOutputError> {
+        crate::structured::decode(
+            self.is_error,
+            self.extra
+                .get("subtype")
+                .and_then(serde_json::Value::as_str),
+            self.extra.get("structured_output"),
+        )
+    }
+}
+
 #[cfg(all(test, feature = "json"))]
 mod tests {
     use super::*;

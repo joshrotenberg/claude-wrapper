@@ -297,6 +297,22 @@ println!("{}", result.result);
 println!("cost: ${:.4}", result.cost_usd.unwrap_or(0.0));
 ```
 
+With `--json-schema`, the validated object arrives as `structured_output`.
+Decode it into your own type with `decode_structured`, which never runs the
+CLI again. `TurnResult::decode_structured` does the same for a duplex turn.
+
+```rust
+#[derive(serde::Deserialize)]
+struct User { id: u64 }
+
+let user: User = result.decode_structured()?;
+```
+
+An error result (`is_error: true`) is `StructuredOutputError::NativeError` even
+when it carries a partial object. Absent or `null` output, a non-object value
+and a type mismatch are separate variants. The CLI enforces the schema; the
+crate does not re-validate the object against it.
+
 ### Tool permissions
 
 Use `ToolPattern` for first-class, validated patterns:

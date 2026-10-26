@@ -517,3 +517,45 @@ fn sync_stream_handler_runs_on_caller_thread_non_send_state() {
 
     assert_eq!(*counter.borrow(), 3);
 }
+
+/// Structured-output decoding is shared by the sync and async paths and
+/// starts no second process.
+#[cfg(feature = "json")]
+#[test]
+fn sync_structured_output_decodes_and_rejects_error_results() {
+    use claude_wrapper::QueryCommand;
+    use claude_wrapper::structured::StructuredOutputError;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Person {
+        name: String,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls");
+    let run = |json: &str| {
+        let claude = claude_with_env(&[
+            ("FAKE_CLAUDE_RESULT_JSON", json),
+            ("FAKE_CLAUDE_CALL_LOG", &log.to_string_lossy()),
+        ]);
+        QueryCommand::new("extract")
+            .json_schema(r#"{"type":"object"}"#)
+            .execute_json_sync(&claude)
+            .expect("process succeeded")
+    };
+
+    let ok = run(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s","structured_output":{"name":"Ada"}}"#,
+    );
+    assert_eq!(ok.decode_structured::<Person>().unwrap().name, "Ada");
+
+    let failed = run(
+        r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"result":"","session_id":"s","structured_output":{"name":"partial"}}"#,
+    );
+    assert!(matches!(
+        failed.decode_structured::<Person>(),
+        Err(StructuredOutputError::NativeError { .. })
+    ));
+
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+}
