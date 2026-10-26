@@ -2996,6 +2996,11 @@ mod tests {
             .status();
     }
 
+    /// Timeout for interrupt tests whose clock starts at spawn. The fixture
+    /// must record its pids and groups before the timeout fires; at a few
+    /// hundred milliseconds a loaded machine can start it too late (#842).
+    const FIXTURE_TIMEOUT: Duration = Duration::from_secs(2);
+
     struct InterruptFixture {
         _script_dir: tempfile::TempDir,
         workdir: tempfile::TempDir,
@@ -3011,6 +3016,7 @@ sleep 30 &
 detached=$!
 set +m
 trap 'echo received > "{dir}/cleanup-stage"; head -c 1048576 /dev/zero || exit 97; echo stdout > "{dir}/cleanup-stage"; head -c 1048576 /dev/zero >&2 || exit 98; echo stderr > "{dir}/cleanup-stage"; kill "$detached"; wait "$detached"; echo cleaned > "{dir}/cleaned"; exit 0' INT
+[ -n "$(trap -p INT)" ] || echo ignored > "{dir}/int-ignored"
 echo $$ > "{dir}/provider"
 echo "$detached" > "{dir}/detached"
 ps -o pgid= -p $$ > "{dir}/provider-group"
@@ -3066,6 +3072,14 @@ wait "$detached"
 
         fn assert_cleaned(&self) {
             self.assert_detached();
+            // A shell cannot trap a signal that was ignored when it started,
+            // and children inherit an ignored SIGINT from the test process
+            // (nohup, a background job). Say so instead of reporting a
+            // missing cleanup stage.
+            assert!(
+                !self.path("int-ignored").exists(),
+                "SIGINT was ignored when the fixture started, so its trap could not be installed; run the tests with SIGINT at its default disposition"
+            );
             // Observe before fixture teardown so emergency cleanup cannot hide
             // a failure of the provider's own SIGINT handler.
             assert!(
@@ -3141,7 +3155,7 @@ wait "$detached"
         let mut claude = fixture.client();
         claude.process_group = false;
         claude.kill_grace = Some(Duration::from_secs(30));
-        claude.timeout = Some(Duration::from_millis(500));
+        claude.timeout = Some(FIXTURE_TIMEOUT);
         let started = std::time::Instant::now();
         let result = run_claude(&claude, vec![]).await;
         assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
@@ -3163,7 +3177,7 @@ wait "$detached"
     async fn interrupt_timeout_stays_timeout_after_clean_exit() {
         let fixture = InterruptFixture::new();
         let mut claude = fixture.client();
-        claude.timeout = Some(Duration::from_millis(600));
+        claude.timeout = Some(FIXTURE_TIMEOUT);
         let result = run_claude(&claude, vec![]).await;
         assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
         fixture.assert_cleaned();
@@ -3188,7 +3202,7 @@ wait "$detached"
         for stdin in [false, true] {
             let fixture = InterruptFixture::new();
             let mut claude = fixture.client();
-            claude.timeout = Some(Duration::from_millis(600));
+            claude.timeout = Some(FIXTURE_TIMEOUT);
             let result = if stdin {
                 run_claude_with_stdin_prompt_sync(&claude, vec![], "prompt".into())
             } else {
@@ -3204,7 +3218,7 @@ wait "$detached"
     fn interrupt_sync_stream_timeout_drains_large_output_and_detached_cleanup() {
         let fixture = InterruptFixture::new();
         let mut claude = fixture.client();
-        claude.timeout = Some(Duration::from_millis(600));
+        claude.timeout = Some(FIXTURE_TIMEOUT);
         let mut events = 0;
         let result = crate::streaming::stream_query_sync(
             &claude,
@@ -3283,7 +3297,7 @@ wait "$detached"
             .binary(binary)
             .termination_signal(crate::TerminationSignal::Interrupt)
             .kill_grace(Duration::from_millis(100))
-            .timeout(Duration::from_millis(300))
+            .timeout(FIXTURE_TIMEOUT)
             .build()
             .unwrap();
         let result = run_claude(&claude, vec![]).await;
