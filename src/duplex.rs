@@ -1201,6 +1201,38 @@ pub struct TurnResult {
 }
 
 impl TurnResult {
+    /// The schema-validated structured output (`structured_output`), when it
+    /// is a JSON object or array.
+    ///
+    /// Present when the session was spawned with
+    /// [`DuplexOptions::json_schema`]. Returns `None` when it is absent,
+    /// `null` or a scalar; use [`decode_structured`](Self::decode_structured)
+    /// to tell those apart.
+    #[must_use]
+    pub fn structured_output(&self) -> Option<&Value> {
+        crate::structured::object_or_array(self.result.get("structured_output"))
+    }
+
+    /// Decode the turn's structured output into `T`.
+    ///
+    /// Uses the turn's own result, so it never sends another prompt. An
+    /// error result (`is_error: true`) is
+    /// [`StructuredOutputError::NativeError`](crate::structured::StructuredOutputError::NativeError)
+    /// even when it carries a partial object. See [`crate::structured`] for
+    /// the full rules.
+    pub fn decode_structured<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> std::result::Result<T, crate::structured::StructuredOutputError> {
+        crate::structured::decode(
+            self.result
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            self.result.get("subtype").and_then(Value::as_str),
+            self.result.get("structured_output"),
+        )
+    }
+
     /// Extract `result.result` as a string, if present.
     #[must_use]
     pub fn result_text(&self) -> Option<&str> {
@@ -3202,6 +3234,38 @@ mod tests {
             .build_args();
         assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn turn_result_decodes_structured_output_without_another_turn() {
+        use crate::structured::StructuredOutputError;
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Person {
+            name: String,
+        }
+
+        let ok = TurnResult {
+            result: serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": false,
+                "structured_output": {"name": "Ada"}
+            }),
+            events: vec![],
+        };
+        assert_eq!(ok.decode_structured::<Person>().unwrap().name, "Ada");
+        assert!(ok.structured_output().is_some());
+
+        let failed = TurnResult {
+            result: serde_json::json!({
+                "type": "result", "subtype": "error_during_execution", "is_error": true,
+                "structured_output": {"name": "partial"}
+            }),
+            events: vec![],
+        };
+        assert!(matches!(
+            failed.decode_structured::<Person>(),
+            Err(StructuredOutputError::NativeError { subtype: Some(_) })
+        ));
     }
 
     #[test]

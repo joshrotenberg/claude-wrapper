@@ -32,6 +32,11 @@
 #       test that cancellation kills the whole group. Written before
 #       FAKE_CLAUDE_PID_FILE, so once the pid file exists the
 #       grandchild pid is readable too.
+#   FAKE_CLAUDE_CALL_LOG    - if set, append one line per invocation, so
+#       tests can assert how many processes a helper started.
+#   FAKE_CLAUDE_RESULT_JSON - if set, emitted verbatim as the terminal result
+#       for json and stream-json output (stream-json prefixes the init line).
+#       Synthetic; used for structured-output and malformed-output cases.
 #   FAKE_CLAUDE_USAGE_JSON  - if set, raw JSON embedded as the "usage"
 #       field of the result output (stream-json result line and json
 #       object), e.g. '{"input_tokens":100,"output_tokens":25}'.
@@ -71,6 +76,10 @@ fi
 # the moment it starts.
 if [[ -n "${FAKE_CLAUDE_PID_FILE:-}" ]]; then
     echo $$ > "$FAKE_CLAUDE_PID_FILE"
+fi
+
+if [[ -n "${FAKE_CLAUDE_CALL_LOG:-}" ]]; then
+    echo invoked >> "$FAKE_CLAUDE_CALL_LOG"
 fi
 
 # Capture the actual child environment before the test-only controls below
@@ -139,7 +148,12 @@ if [[ -n "${FAKE_CLAUDE_USAGE_JSON:-}" ]]; then
     USAGE_FIELD=",\"usage\":${FAKE_CLAUDE_USAGE_JSON}"
 fi
 
-if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
+if [[ -n "${FAKE_CLAUDE_RESULT_JSON:-}" && ( "$OUTPUT_FORMAT" == "json" || "$OUTPUT_FORMAT" == "stream-json" ) ]]; then
+    if [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
+        printf '{"type":"system","subtype":"init","session_id":"%s","tools":[],"mcp_servers":[]}\n' "$SESSION_ID"
+    fi
+    printf '%s\n' "$FAKE_CLAUDE_RESULT_JSON"
+elif [[ "$OUTPUT_FORMAT" == "stream-json" ]]; then
     # Emit NDJSON matching real claude's stream-json format.
     # Escape the output for safe embedding in a JSON string value.
     ESCAPED_OUTPUT=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
