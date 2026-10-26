@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.9] - 2026-10-26
+
+### Bug Fixes
+
+- Extend tested Claude CLI range to 2.1.309 
+
+
+
 ## [0.14.8] - 2026-10-20
 
 ### Features
