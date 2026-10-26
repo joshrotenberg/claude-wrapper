@@ -205,7 +205,7 @@
 //! ask rule in [`DuplexOptions::settings`], for example
 //! `{"permissions":{"ask":["Bash"]}}`. Do not also auto-approve that action.
 //! Native denial and deferred-denial regressions exercise the resident transport
-//! at the supported 2.1.220 and 2.1.303 endpoints. They do not add SDK hook setup
+//! against CLI 2.1.220 and 2.1.303. They do not add SDK hook setup
 //! or change the CLI's permission evaluation rules. See the
 //! [official permission guide](https://code.claude.com/docs/en/agent-sdk/user-input).
 //!
