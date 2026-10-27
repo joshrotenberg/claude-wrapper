@@ -158,6 +158,29 @@ always uses immediate hard cleanup. Descendants that leave the owned group
 require cooperative cleanup by the CLI; the wrapper cannot guarantee their
 termination.
 
+For duplex graceful shutdown on Linux, Android, Apple platforms, FreeBSD,
+DragonFly, NetBSD, and OpenBSD, the wrapper observes native exit without reaping,
+stops the remaining owned group, then reaps the child. Unlike earlier versions,
+even a successful native exit now stops same-group descendants: the default is
+immediate SIGKILL; `kill_grace` opts into the configured soft signal followed by
+the full grace and SIGKILL. The child keeps its natural exit status, and its group
+identity remains reserved until the last signal. Once native exit is observed,
+cleanup grace cannot trigger a new operation timeout; an already-expired deadline
+still takes precedence over native status.
+
+A configured grace adds time even when only the exited leader remains. A
+successful `close()` establishes direct-child settlement and completion of this
+signaling sequence, not an inventory proving all descendants are gone. Stopped
+orphan descendants may appear as zombies until the system reaps them. Descendants
+that leave the group, and abrupt controller death (including SIGKILL), are outside
+this contract. The runtime must retain exclusive ownership of reaping its child;
+external waiters or automatic SIGCHLD reaping are not supported. Other platforms
+and `process_group(false)` retain direct-child-only graceful cleanup. A failure
+to observe exit without reaping is reported as an error, rather than silently
+weakening the group-cleanup contract.
+An observation error starts the configured stop sequence immediately rather than
+waiting out the graceful EOF budget, including when a sandbox blocks `waitid`.
+
 ### Bounded output capture
 
 A buffered run reads the child's stdout and stderr to EOF, so peak memory is

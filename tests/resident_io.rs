@@ -278,7 +278,14 @@ async fn inherited_stderr_does_not_hold_exit_state_open() {
     let fixture = Fixture::new(
         "read -r request\n(while [[ ! -e release ]]; do sleep 0.01; done; echo done > done) >/dev/null &\necho native-failure >&2\nexit 7",
     );
-    let client = fixture.client().with_working_dir(fixture.dir.path());
+    // Opt out of owned-group cleanup so this pipe holder intentionally survives
+    // native exit. The explicit release below is responsible for its lifetime.
+    let client = Claude::builder()
+        .binary(&fixture.binary)
+        .working_dir(fixture.dir.path())
+        .process_group(false)
+        .build()
+        .unwrap();
     let session = DuplexSession::spawn(&client, DuplexOptions::default())
         .await
         .unwrap();
@@ -302,6 +309,464 @@ async fn inherited_stderr_does_not_hold_exit_state_open() {
     assert!(
         matches!(closed, Err(Error::DuplexProcessFailed { status, .. }) if status.code()==Some(7))
     );
+}
+
+// -- Graceful owned-group cleanup (#858) ----------------------------------
+
+// The child stays in its parent's group and ignores HUP. It deliberately does
+// not clean itself up when its parent exits on stdin EOF. A TERM marker lets us
+// distinguish the configured grace from an immediate hard kill.
+const GROUP_DESCENDANT: &str = r#"
+(
+    trap '' HUP
+    trap 'echo term > descendant.term; exit 0' TERM
+    echo ready > descendant.ready
+    while :; do sleep 0.02; done
+) </dev/null >/dev/null 2>&1 &
+echo $! > descendant.pid
+echo $$ > leader.pid
+while [[ ! -e descendant.ready ]]; do sleep 0.01; done
+touch descendant.started
+"#;
+
+/// Failure-path cleanup belongs to the test, including when the regression is
+/// run against an unfixed library. Never signal a PID that left this group.
+struct TestDescendant {
+    pid: i32,
+    group: i32,
+}
+
+impl TestDescendant {
+    async fn capture(fixture: &Fixture) -> Self {
+        fixture.wait_for("descendant.started").await;
+        let pid = std::fs::read_to_string(fixture.dir.path().join("descendant.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: getpgid takes a plain PID and does not access memory.
+        let group = unsafe { libc::getpgid(pid) };
+        let descendant = Self { pid, group };
+        assert!(group > 0, "fixture descendant must be running");
+        descendant
+    }
+
+    fn running(&self) -> bool {
+        // SAFETY: a read-only process identity query. A changed group is no
+        // longer this fixture's process, so it must not be signalled in Drop.
+        if unsafe { libc::getpgid(self.pid) } != self.group {
+            return false;
+        }
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &self.pid.to_string()])
+            .output()
+            .expect("ps must inspect the fixture descendant");
+        let state = String::from_utf8(output.stdout).unwrap();
+        // Orphan zombies can remain until the host's init reaps them. They
+        // cannot execute work and must not be confused with a surviving child.
+        if state.trim().is_empty() {
+            assert!(output.status.success() || output.status.code() == Some(1));
+            false
+        } else {
+            assert!(output.status.success());
+            !state.trim().starts_with('Z')
+        }
+    }
+
+    async fn assert_stopped(&self) {
+        tokio::time::timeout(SETTLE, async {
+            while self.running() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("same-group descendant survived graceful close");
+    }
+}
+
+impl Drop for TestDescendant {
+    fn drop(&mut self) {
+        // SAFETY: signal only this recorded test process while it retains the
+        // captured group identity. This is cleanup for failed/opt-out cases.
+        unsafe {
+            if self.group > 0 && libc::getpgid(self.pid) == self.group {
+                libc::kill(self.pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn graceful_close_stops_descendants_and_preserves_zero_exit() {
+    let fixture = Fixture::new(&format!(
+        "{GROUP_DESCENDANT}\nread -r request\nprintf '%s\\n' '{RESULT}'\ncat >/dev/null\nexit 0"
+    ));
+    let session = fixture.spawn().await;
+    let descendant = TestDescendant::capture(&fixture).await;
+    let leader: i32 = std::fs::read_to_string(fixture.dir.path().join("leader.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        descendant.group, leader,
+        "fixture must share the owned group"
+    );
+    assert!(descendant.running());
+    assert!(!session.send("fixture").await.unwrap().is_error());
+    tokio::time::timeout(SETTLE, session.close())
+        .await
+        .expect("graceful close must be bounded")
+        .expect("group cleanup must preserve the leader's zero exit");
+    descendant.assert_stopped().await;
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn graceful_exit_stops_descendants_and_preserves_nonzero_status() {
+    let fixture = Fixture::new(&format!(
+        "{GROUP_DESCENDANT}\nread -r request\nprintf '%s\\n' '{RESULT}'\necho native-failure >&2\nexit 9"
+    ));
+    let session = fixture.spawn().await;
+    let descendant = TestDescendant::capture(&fixture).await;
+    assert!(!session.send("fixture").await.unwrap().is_error());
+    let exit = tokio::time::timeout(SETTLE, session.wait_for_exit())
+        .await
+        .unwrap();
+    assert!(matches!(exit, SessionExitStatus::Failed(_)));
+    match session.close().await {
+        Err(Error::DuplexProcessFailed {
+            status,
+            stderr,
+            shutdown_budget_exceeded,
+            ..
+        }) => {
+            assert_eq!(status.code(), Some(9));
+            assert!(stderr.contains("native-failure"));
+            assert!(!shutdown_budget_exceeded);
+        }
+        other => panic!("expected original native exit status: {other:?}"),
+    }
+    descendant.assert_stopped().await;
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn graceful_close_settles_group_after_abandoned_turn_or_permission() {
+    for permission in [false, true] {
+        let request = r#"{"type":"control_request","request_id":"fixture-permission","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}"#;
+        let after_read = if permission {
+            format!("printf '%s\\n' '{request}'")
+        } else {
+            String::new()
+        };
+        let fixture = Fixture::new(&format!(
+            "{GROUP_DESCENDANT}\nread -r request\n{after_read}\ntouch accepted\ncat > responses\nexit 0"
+        ));
+        let deferred = Arc::new(AtomicBool::new(false));
+        let observed = deferred.clone();
+        let session = fixture
+            .spawn_with(
+                DuplexOptions::default().on_permission(PermissionHandler::new(move |_| {
+                    observed.store(true, Ordering::SeqCst);
+                    async { PermissionDecision::Defer }
+                })),
+            )
+            .await;
+        let descendant = TestDescendant::capture(&fixture).await;
+        {
+            let turn = session.send("fixture");
+            tokio::pin!(turn);
+            tokio::select! {
+                early = &mut turn => panic!("fixture resolved without a result: {early:?}"),
+                () = async {
+                    fixture.wait_for("accepted").await;
+                    tokio::time::timeout(SETTLE, async {
+                        while permission && !deferred.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await.unwrap();
+                } => {}
+            }
+        }
+        // This is the same close path a controller uses after handling SIGTERM:
+        // abandon the turn wait, then explicitly close its owned session.
+        tokio::time::timeout(SETTLE, session.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::fs::read(fixture.dir.path().join("responses"))
+                .unwrap()
+                .is_empty()
+        );
+        descendant.assert_stopped().await;
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn graceful_group_cleanup_honors_configured_signal_and_grace() {
+    let fixture = Fixture::new(&format!("{GROUP_DESCENDANT}\ncat >/dev/null\nexit 0"));
+    let client = Claude::builder()
+        .binary(&fixture.binary)
+        .working_dir(fixture.dir.path())
+        .kill_grace(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let session = DuplexSession::spawn(&client, DuplexOptions::default())
+        .await
+        .unwrap();
+    let descendant = TestDescendant::capture(&fixture).await;
+    session.close().await.unwrap();
+    assert!(
+        fixture.dir.path().join("descendant.term").exists(),
+        "descendant missed the configured soft signal"
+    );
+    descendant.assert_stopped().await;
+}
+
+#[tokio::test]
+async fn graceful_close_with_group_opt_out_does_not_signal_shared_group() {
+    let fixture = Fixture::new(&format!("{GROUP_DESCENDANT}\ncat >/dev/null\nexit 0"));
+    let client = Claude::builder()
+        .binary(&fixture.binary)
+        .working_dir(fixture.dir.path())
+        .process_group(false)
+        .build()
+        .unwrap();
+    let session = DuplexSession::spawn(&client, DuplexOptions::default())
+        .await
+        .unwrap();
+    let descendant = TestDescendant::capture(&fixture).await;
+    // SAFETY: getpgrp is a read-only query with no arguments.
+    assert_eq!(descendant.group, unsafe { libc::getpgrp() });
+    session.close().await.unwrap();
+    assert!(
+        descendant.running(),
+        "opt-out must not signal the shared group"
+    );
+    // The guard above, not the library, cleans up this deliberate survivor.
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn post_exit_group_grace_does_not_replace_native_status_with_timeout() {
+    for code in [0, 9] {
+        let fixture = Fixture::new(&format!(
+            "{GROUP_DESCENDANT}\nread -r request\ntouch accepted\ncat >/dev/null\nexit {code}"
+        ));
+        let grace = Duration::from_secs(3);
+        let client = Claude::builder()
+            .binary(&fixture.binary)
+            .working_dir(fixture.dir.path())
+            .kill_grace(grace)
+            .build()
+            .unwrap();
+        let session = DuplexSession::spawn(
+            &client,
+            DuplexOptions::default().turn_timeout(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap();
+        let descendant = TestDescendant::capture(&fixture).await;
+        {
+            let turn = session.send("fixture");
+            tokio::pin!(turn);
+            tokio::select! {
+                early = &mut turn => panic!("fixture resolved without a result: {early:?}"),
+                () = fixture.wait_for("accepted") => {}
+            }
+        }
+        // The leader exits on EOF before the pending turn deadline. Only the
+        // wrapper's group grace crosses that deadline; retain the native status.
+        let started = std::time::Instant::now();
+        let closed = tokio::time::timeout(SETTLE, session.close()).await.unwrap();
+        if code == 0 {
+            closed.unwrap();
+        } else {
+            assert!(
+                matches!(closed, Err(Error::DuplexProcessFailed {
+                status, shutdown_budget_exceeded: false, ..
+            }) if status.code() == Some(code)),
+                "{closed:?}"
+            );
+        }
+        assert!(started.elapsed() >= grace, "must honor the full grace");
+        descendant.assert_stopped().await;
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn deadline_before_native_exit_still_stops_group_and_reports_policy() {
+    let fixture = Fixture::new(&format!(
+        "{GROUP_DESCENDANT}\ntrap 'touch native.stopped; exit 0' TERM\nread -r request\nexec 1>&-\nwhile :; do sleep 0.02; done"
+    ));
+    let client = Claude::builder()
+        .binary(&fixture.binary)
+        .working_dir(fixture.dir.path())
+        .kill_grace(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let session = DuplexSession::spawn(
+        &client,
+        DuplexOptions::default().turn_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let descendant = TestDescendant::capture(&fixture).await;
+    // Stdout EOF starts observation, but the native process remains alive until
+    // the turn deadline initiates cleanup. Its later zero exit cannot erase it.
+    let turn = tokio::time::timeout(SETTLE, session.send("fixture"))
+        .await
+        .unwrap();
+    let closed = session.close().await;
+    for outcome in [turn.map(|_| ()), closed] {
+        assert!(
+            matches!(
+                outcome,
+                Err(Error::DuplexDeadlineExceeded {
+                    operation: DuplexOperation::Turn,
+                    process_settled: true,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+    assert!(fixture.dir.path().join("native.stopped").exists());
+    descendant.assert_stopped().await;
+}
+
+// Run only as the subprocess of the test below, so SIGTERM handling cannot
+// affect the test runner or any other test's signal disposition.
+#[tokio::test]
+#[ignore = "helper controller invoked by controlled_sigterm_settles_owned_descendants"]
+async fn sigterm_fixture_controller() {
+    let Some(dir) = std::env::var_os("WRAPPER_858_CONTROLLER_FIXTURE") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let client = Claude::builder()
+        .binary(dir.join("resident.sh"))
+        .working_dir(&dir)
+        .build()
+        .unwrap();
+    let session = DuplexSession::spawn(&client, DuplexOptions::default())
+        .await
+        .unwrap();
+    std::fs::write(dir.join("controller.ready"), b"").unwrap();
+    tokio::select! {
+        turn = session.send("fixture") => panic!("turn completed before SIGTERM: {turn:?}"),
+        received = terminate.recv() => assert!(received.is_some()),
+        () = tokio::time::sleep(SETTLE) => panic!("controller never received SIGTERM"),
+    }
+    // Cooperative controller shutdown drops the pending wait, then closes.
+    tokio::time::timeout(SETTLE, session.close())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+#[tokio::test]
+async fn controlled_sigterm_settles_owned_descendants() {
+    let fixture = Fixture::new(&format!(
+        "{GROUP_DESCENDANT}\nread -r request\ntouch accepted\ncat >/dev/null\nexit 0"
+    ));
+    let controller = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sigterm_fixture_controller",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("WRAPPER_858_CONTROLLER_FIXTURE", fixture.dir.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let descendant = TestDescendant::capture(&fixture).await;
+    fixture.wait_for("controller.ready").await;
+    fixture.wait_for("accepted").await;
+    // SAFETY: signal only our owned, unreaped controller process. Its installed
+    // handler will close the duplex child; no signal is sent to the test runner.
+    assert_eq!(
+        unsafe { libc::kill(controller.id().unwrap() as i32, libc::SIGTERM) },
+        0
+    );
+    let output = tokio::time::timeout(SETTLE, controller.wait_with_output())
+        .await
+        .expect("controller shutdown must be bounded")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    descendant.assert_stopped().await;
 }
 
 // -- Opt-in resource limits (#838) ----------------------------------------
