@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.10] - 2026-11-02
+
+### Bug Fixes
+
+- *(duplex)* Settle owned descendants before reaping graceful exits 
+
+
+
 ## [0.14.9] - 2026-10-26
 
 ### Bug Fixes
