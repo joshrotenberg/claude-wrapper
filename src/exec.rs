@@ -238,8 +238,9 @@ impl GroupKillGuard {
         }
     }
 
-    /// Stop the guard from firing: the child's exit status has been
-    /// observed, so the group id is no longer safe to signal.
+    /// Stop the guard from firing after the child has been reaped (or wait
+    /// ownership was lost), when its group ID is no longer safe to signal.
+    /// A non-reaping exit observation alone must not disarm the guard.
     pub(crate) fn disarm(&mut self) {
         #[cfg(unix)]
         {

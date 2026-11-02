@@ -49,6 +49,15 @@
 //! completes the session; a nonzero exit or I/O/settlement failure is reported
 //! through [`SessionExitStatus::Failed`] and the error returned by `close`.
 //!
+//! On Linux, Android, Apple platforms, FreeBSD, DragonFly, NetBSD, and OpenBSD,
+//! graceful shutdown retains the exited child until the owned process group has
+//! received SIGKILL (preceded by the configured soft signal if `kill_grace` is set).
+//! Only then is the child reaped, preserving its original exit status and keeping
+//! its group ID reserved throughout cleanup. Group cleanup does not extend to
+//! escaped descendants, and a successful close is not a process-tree census.
+//! Once native exit is observed, cleanup grace cannot trigger a new operation
+//! timeout; an operation deadline that already expired retains its policy error.
+//!
 //! # Resource limits and deadlines
 //!
 //! A duplex session is unbounded by default: no per-frame or per-turn
@@ -1078,7 +1087,9 @@ impl DuplexOptions {
     ///
     /// The clock starts when the session task accepts a
     /// [`DuplexSession::send`], before the prompt is written to stdin, and
-    /// stops when the closing `result` line is read. The deadline covers
+    /// stops when the closing `result` line is read or native exit is observed.
+    /// Cleanup grace after observed native exit cannot create a new timeout.
+    /// The deadline covers
     /// the stdin write, every [`PermissionHandler`] call made during the
     /// turn, and any wait for [`DuplexSession::respond_to_permission`]
     /// after a [`PermissionDecision::Defer`]. Expiry closes the session
@@ -1764,7 +1775,14 @@ impl DuplexSession {
     ///
     /// Drops the outbound channel sender, which the session task
     /// observes as `recv() -> None`, then closes stdin and reaps the
-    /// child.
+    /// child. On Linux, Android, Apple platforms, FreeBSD, DragonFly, NetBSD,
+    /// and OpenBSD, an owned process group is stopped before reaping even when
+    /// the child exits gracefully. The default is immediate SIGKILL; setting
+    /// `kill_grace` adds the configured soft signal and grace before SIGKILL;
+    /// the child's natural exit status is preserved unless an operation deadline
+    /// already expired before exit was observed. `process_group(false)` and
+    /// other platforms retain direct-child-only cleanup. Descendants that leave
+    /// the owned group and controller SIGKILL are outside this guarantee.
     ///
     /// Returns an error for a nonzero child exit, even if an earlier
     /// turn already delivered a successful result. Failed native exits
@@ -2539,19 +2557,26 @@ async fn run_session_child(
     if failure.is_none() {
         // Accepted operations keep their deadlines during graceful shutdown.
         let graceful = crate::exec::drain_until(
-            tokio::time::timeout(SHUTDOWN_BUDGET, child.wait()),
+            tokio::time::timeout(
+                SHUTDOWN_BUDGET,
+                observe_graceful_exit(&mut child, &mut group),
+            ),
             &mut stdout,
             &mut unused_stderr,
         );
         let waited = tokio::select! {
             biased;
-            waited = graceful => Some(waited),
             expired = expire(*deadline_rx.borrow()) => {
                 failure = Some(expired);
                 None
             }
+            waited = graceful => Some(waited),
         };
         if let Some(waited) = waited {
+            // No operation can produce another result after native exit. Keep
+            // its status: only the wrapper's cleanup grace remains. Deadlines
+            // still apply if observation failed or the shutdown budget expired.
+            let native_exited = matches!(&waited, Ok(Ok(_)));
             let settlement = settle_graceful(
                 waited,
                 &mut child,
@@ -2564,7 +2589,7 @@ async fn run_session_child(
             status = Some(tokio::select! {
                 biased;
                 settled = &mut settlement => settled,
-                expired = expire(*deadline_rx.borrow()) => {
+                expired = expire(*deadline_rx.borrow()), if !native_exited => {
                     failure = Some(expired);
                     // Do not restart cleanup or spend kill_grace twice.
                     settlement.await
@@ -2618,10 +2643,101 @@ async fn run_session_child(
     }
 }
 
+/// An owned group must be stopped while its leader is still an unreaped child.
+/// A cached/reaped status is safe only when no group signal remains to be sent.
+enum GracefulExit {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    Unreaped,
+    Reaped(ExitStatus),
+}
+
+/// Observe exit without polling Child::wait/try_wait for an owned Unix group.
+/// The background task exclusively owns this child's wait status. Tokio's child
+/// reaper is polled only by wait/try_wait (or Drop), none of which run here.
+/// Polling is bounded by the caller's shutdown/operation deadline and occurs
+/// only during shutdown, not while an idle session is waiting for input.
+async fn observe_graceful_exit(
+    child: &mut Child,
+    group: &mut crate::exec::GroupKillGuard,
+) -> std::io::Result<GracefulExit> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    if group.is_armed() {
+        if let Some(pid) = child.id() {
+            loop {
+                match child_exited_unreaped(pid) {
+                    Ok(true) => return Ok(GracefulExit::Unreaped),
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        // A foreign waiter or SIGCHLD auto-reaping can invalidate
+                        // custody. Never signal a group whose identity was lost.
+                        if error.raw_os_error() == Some(libc::ECHILD) {
+                            group.disarm();
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        // Child::id() is None only after Tokio has already reaped it.
+        group.disarm();
+    }
+    let waited = child.wait().await;
+    group.disarm();
+    waited.map(GracefulExit::Reaped)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: info is valid writable storage. P_PID selects only our owned
+    // child. WNOHANG never blocks, WEXITED excludes stopped/continued events,
+    // and WNOWAIT leaves its status waitable so the PID cannot be recycled.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the structure was zero-initialized, and waitid succeeded. With
+    // WNOHANG and no exit event, si_pid is zero (also on older kernels that
+    // leave the supplied structure untouched).
+    Ok(unsafe { info.assume_init().si_pid() } != 0)
+}
+
 /// Finish the graceful shutdown path from the outcome of the bounded
 /// wait: a native exit, a wait error, or an expired shutdown budget.
 async fn settle_graceful(
-    waited: std::result::Result<std::io::Result<ExitStatus>, tokio::time::error::Elapsed>,
+    waited: std::result::Result<std::io::Result<GracefulExit>, tokio::time::error::Elapsed>,
     child: &mut Child,
     group: &mut crate::exec::GroupKillGuard,
     kill_grace: Option<Duration>,
@@ -2630,7 +2746,32 @@ async fn settle_graceful(
 ) -> Result<(ExitStatus, bool)> {
     let mut unused_stderr = tokio::io::empty();
     match waited {
-        Ok(Ok(status)) => {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        Ok(Ok(GracefulExit::Unreaped)) => {
+            // Do not call wait/try_wait before the last group signal. The exited
+            // leader remains a zombie, reserving its PID/PGID during the grace.
+            let cleanup = async {
+                crate::exec::kill_group_with_grace(group, kill_grace, termination_signal).await;
+                child.wait().await
+            };
+            crate::exec::drain_until(cleanup, stdout, &mut unused_stderr)
+                .await
+                .map(|status| (status, false))
+                .map_err(|source| Error::Io {
+                    message: "failed to reap duplex child after group cleanup".into(),
+                    source,
+                    working_dir: None,
+                })
+        }
+        Ok(Ok(GracefulExit::Reaped(status))) => {
             group.disarm();
             Ok((status, false))
         }
