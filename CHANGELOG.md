@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.11] - 2026-11-09
+
+### Bug Fixes
+
+- Extend tested Claude CLI range to 2.1.321 
+
+### Miscellaneous
+
+- Replace retired macOS runner 
+
+
+
 ## [0.14.10] - 2026-11-02
 
 ### Bug Fixes
